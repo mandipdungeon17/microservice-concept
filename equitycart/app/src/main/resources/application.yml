@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: equitycart
+  datasource:
+    url: jdbc:postgresql://localhost:5432/equitycart
+    username: postgres
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  data:
+    mongodb:
+      uri: mongodb://localhost:27017/equitycart
+
+
+server:
+  port: 8080

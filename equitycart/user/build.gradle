@@ -1,0 +1,13 @@
+plugins {
+    id 'java-library'
+}
+dependencies {
+    implementation project(':commons')
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'io.jsonwebtoken:jjwt-api:0.12.6' //JJWT library API for creating and parsing JWT tokens
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.12.6' //JJWT library implementation for JWT token handling (runtimeOnly — your code only uses the API, not the impl classes)
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.12.6' //JJWT's Jackson integration for JSON serialization inside tokens (runtimeOnly)
+}

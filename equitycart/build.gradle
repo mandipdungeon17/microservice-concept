@@ -1,0 +1,36 @@
+plugins {
+    id 'org.springframework.boot' version '3.5.8' apply false
+    id 'io.spring.dependency-management' version '1.1.7' apply false
+}
+allprojects {
+    group = 'com.equitycart'
+    version = project.findProperty('version') ?: '1.0.0-SNAPSHOT'
+    repositories {
+        mavenCentral()
+    }
+}
+subprojects {
+    apply plugin: 'java'
+    apply plugin: 'io.spring.dependency-management'
+    java {
+        sourceCompatibility = JavaVersion.toVersion(project.findProperty('javaVersion') ?: '21')
+        targetCompatibility = JavaVersion.toVersion(project.findProperty('javaVersion') ?: '21')
+    }
+    dependencyManagement {
+        imports {
+            mavenBom "org.springframework.boot:spring-boot-dependencies:${project.findProperty('springBootVersion') ?: '3.5.8'}"
+        }
+    }
+    dependencies {
+        compileOnly 'org.projectlombok:lombok'
+        annotationProcessor 'org.projectlombok:lombok'
+        testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    }
+    test {
+        useJUnitPlatform()
+    }
+}
+
+wrapper {
+    gradleVersion = '8.14.2'
+}
