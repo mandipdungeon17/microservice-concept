@@ -20,7 +20,7 @@ Build an enterprise-grade Java application that dynamically supports both SQL an
 - Guide architectural and design decisions
 - Review and critique code
 - Help debug issues and explain root causes
-- Explain core concepts in depth
+- Explain core concepts in depth — **always include brief historical context** (what problem existed before, who created the solution, how it evolved) so concepts are easier to remember
 - Suggest optimizations and best practices
 - Clarify internal working of frameworks and libraries
 - Prepare for technical interviews

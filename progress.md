@@ -39,9 +39,31 @@
 - [x] All 6 query methods explained (Derived, JPQL, Native SQL, Criteria, Specifications, QueryDSL)
 - [x] Security dependencies added to user-service build.gradle
 
+### Implementation Completed
+- [x] Step 2: Create entity classes — COMPLETE (2026-04-13)
+  - BaseEntity in commons: @MappedSuperclass with id, createdAt, updatedAt + lifecycle callbacks
+  - commons/build.gradle: added `api 'spring-boot-starter-data-jpa'` (api scope, not implementation)
+  - User: lean auth entity (email, password, enabled, accountLocked)
+  - Role: separate table (not enum) for multi-role support
+  - UserRole: explicit join entity with composite unique constraint (user_id, role_id)
+  - UserProfile: personal details separated from auth for SRP + performance
+  - KycDetail: optional KYC with status enum (PENDING/VERIFIED/REJECTED)
+  - RefreshToken: @ManyToOne to User (multiple sessions), revocable from DB
+  - WalletAccount: BigDecimal(19,4) for financial precision
+  - KycStatus enum in separate enums package
+  - BUILD SUCCESSFUL — all modules compile cleanly
+- [x] Step 3: Create Repository interfaces — COMPLETE (2026-04-15)
+  - 7 repository interfaces in `user/src/main/java/com/equitycart/user/repository/`
+  - UserRepository: findByEmail (login), existsByEmail (registration duplicate check)
+  - RoleRepository: findByName (role lookup for registration)
+  - UserRoleRepository: findByUserId (load roles for JWT)
+  - RefreshTokenRepository: findByToken, findByUserIdAndRevokedFalse, deleteByUserId
+  - UserProfileRepository, KycDetailRepository: basic CRUD for now
+  - WalletAccountRepository: findByUserId (balance queries)
+  - BUILD SUCCESSFUL
+
 ### Implementation Pending (RESUME HERE)
-- [ ] Step 2: Create entity classes (User, UserProfile, Role, UserRole, KycDetail, RefreshToken, WalletAccount)
-- [ ] Step 3: Create Repository interfaces
+- [ ] Step 4: Create AuthService (register, login, refresh)
 - [ ] Step 4: Create AuthService (register, login, refresh)
 - [ ] Step 5: Create JwtService (generate, validate, extract claims)
 - [ ] Step 6: Create JwtAuthFilter (Spring Security filter)
@@ -66,3 +88,5 @@
 - **2025-04-07**: Project conceived, domain finalized (Hybrid), roadmap created
 - **2025-04-07**: Phase 0 complete — Gradle multi-module skeleton built, all 7 modules compile, application.yml configured for PostgreSQL + MongoDB
 - **2025-04-09**: Phase 1 started — Entity design complete, security architecture decided (JWT), query methods studied, security deps added. Next: create entity classes.
+- **2026-04-13**: Step 2 complete — BaseEntity in commons + 7 user entities created. All JPA mappings, constraints, and Lombok annotations reviewed. BUILD SUCCESSFUL. Next: Repository interfaces.
+- **2026-04-15**: Step 3 complete — 7 repository interfaces created. Fixed: existsBy return type, derived query field names matching entity fields. BUILD SUCCESSFUL. Next: AuthService.
