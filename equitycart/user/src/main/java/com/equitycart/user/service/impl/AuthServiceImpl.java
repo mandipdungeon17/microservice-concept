@@ -16,12 +16,15 @@ import com.equitycart.user.repository.UserRepository;
 import com.equitycart.user.repository.UserRoleRepository;
 import com.equitycart.user.repository.WalletAccountRepository;
 import com.equitycart.user.service.api.AuthService;
+import com.equitycart.user.service.api.JwtService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Optional;
 
 @Service
@@ -32,12 +35,17 @@ import java.util.Optional;
  */
 @RequiredArgsConstructor
 public class AuthServiceImpl implements AuthService {
+
+    @Value("${jwt.refresh-token-expiry}")
+    private long refreshTokenExpiry;
+
     private final UserRepository userRepository;
     private final UserRoleRepository userRoleRepository;
     private final WalletAccountRepository walletAccountRepository;
     private final RefreshTokenRepository refreshTokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final RoleRepository roleRepository;
+    private final JwtService jwtService;
 
     @Transactional
     @Override
@@ -58,14 +66,14 @@ public class AuthServiceImpl implements AuthService {
         WalletAccount walletAccount = WalletAccount.builder().user(savedUser).build();
         walletAccountRepository.save(walletAccount);
 
-        return new AuthResponse("TODO_ACCESS", "TODO_REFRESH");
+        return generateAuthAndRefreshTokens(savedUser, List.of(userRole.getRole().getName()));
     }
 
     @Override
     public AuthResponse login(LoginRequest request) {
         Optional<User> optionalUser = userRepository.findByEmail(request.email());
         if(optionalUser.isEmpty())
-            throw  new RuntimeException("User doesn't exist");
+            throw  new RuntimeException("Invalid email or password");
 
         User userEntity = optionalUser.get();
 
@@ -75,7 +83,15 @@ public class AuthServiceImpl implements AuthService {
         if(userEntity.isAccountLocked() || !userEntity.isEnabled()){
             throw new RuntimeException("Account is locked or disabled");
         }
-        return new AuthResponse("TODO_ACCESS", "TODO_REFRESH");
+
+        List<UserRole> userRoles = userRoleRepository.findByUserId(userEntity.getId());
+
+        if(userRoles.isEmpty())
+            throw new RuntimeException("User has no assigned roles");
+
+        List<String> roles = userRoles.stream().map(u -> u.getRole().getName()).toList();
+
+        return generateAuthAndRefreshTokens(userEntity, roles);
     }
 
     @Override
@@ -89,6 +105,30 @@ public class AuthServiceImpl implements AuthService {
         if(refreshTokenEntity.isRevoked() || refreshTokenEntity.getExpiresAt().isBefore(LocalDateTime.now()))
             throw new RuntimeException("Refresh token has been revoked or expired");
 
-        return new AuthResponse("TODO_ACCESS", "TODO_REFRESH");
+        refreshTokenEntity.setRevoked(true);
+        refreshTokenRepository.save(refreshTokenEntity);
+
+        List<UserRole> userRoles = userRoleRepository.findByUserId(refreshTokenEntity.getUser().getId());
+
+        if(userRoles.isEmpty())
+            throw new RuntimeException("User has no assigned roles");
+
+        List<String> roles = userRoles.stream().map(u -> u.getRole().getName()).toList();
+
+        return generateAuthAndRefreshTokens(refreshTokenEntity.getUser(), roles);
+    }
+
+    private AuthResponse generateAuthAndRefreshTokens(User user, List<String> roles){
+        String accessToken = jwtService.generateAccessToken(user, roles);
+        String refreshToken = jwtService.generateRefreshToken();
+
+        RefreshToken refreshTokenEntity =
+                RefreshToken.builder()
+                .user(user).token(refreshToken)
+                .expiresAt(LocalDateTime.now().plusDays(refreshTokenExpiry)).build();
+
+        refreshTokenRepository.save(refreshTokenEntity);
+
+        return new AuthResponse(accessToken, refreshToken);
     }
 }

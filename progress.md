@@ -61,12 +61,56 @@
   - UserProfileRepository, KycDetailRepository: basic CRUD for now
   - WalletAccountRepository: findByUserId (balance queries)
   - BUILD SUCCESSFUL
+- [x] Step 4: Create AuthService (register, login, refresh) — COMPLETE (2026-04-20)
+  - 4 DTOs as Java records: RegisterRequest, LoginRequest, AuthResponse, RefreshRequest
+  - Validation: @NotBlank, @Email, @Size(min=8) on request DTOs
+  - SecurityConfig: PasswordEncoder @Bean returning BCryptPasswordEncoder
+  - AuthService interface + AuthServiceImpl (interface/impl split)
+  - Constructor injection via @RequiredArgsConstructor + private final fields (no @Autowired)
+  - register(): email duplicate check → hash password → save User → assign CUSTOMER role → create wallet → return tokens (placeholder)
+  - login(): find by email → verify password with BCrypt.matches() → check enabled/locked → return tokens (placeholder)
+  - refreshToken(): find by token → check revoked/expired → return tokens (placeholder)
+  - @Transactional on register (3 writes must be atomic)
+  - BUILD SUCCESSFUL
+
+- [x] Step 5: Create JwtService + Wire into AuthService — COMPLETE (2026-04-20)
+  - JwtService interface: generateAccessToken, generateRefreshToken, extractAllClaims, extractUserId, extractRoles, validateToken
+  - JwtServiceImpl using JJWT 0.12.6: HMAC-SHA256 signing, base64-decoded secret key
+  - generateAccessToken: userId as subject, roles as custom claim, configurable expiry via @Value
+  - generateRefreshToken: opaque UUID (not JWT — stored in DB for revocation)
+  - extractAllClaims: Jwts.parser().verifyWith().parseSignedClaims() — validates signature + expiry
+  - validateToken: wraps extractAllClaims in try-catch (expired/tampered → false)
+  - Removed isTokenExpired() — redundant because JJWT throws ExpiredJwtException during parsing
+  - JWT config (secret, access-token-expiry, refresh-token-expiry) in app/application.yml
+  - Wired JwtService into AuthServiceImpl — replaced all "TODO_ACCESS"/"TODO_REFRESH" placeholders
+  - Helper method generateAuthAndRefreshTokens(): generates both tokens, saves RefreshToken entity to DB
+  - Refresh token rotation in refreshToken(): revokes old token before issuing new pair
+  - @Value for refresh-token-expiry (days) used in RefreshToken entity expiry calculation
+  - Fixed: hardcoded expiry → config value, extractRoles data corruption, validateToken always-true, YAML location
+  - BUILD SUCCESSFUL
+
+- [x] Step 6: Create JwtAuthFilter — COMPLETE (2026-04-20)
+  - JwtAuthFilter extends OncePerRequestFilter (runs exactly once per request)
+  - Extracts "Bearer " token from Authorization header
+  - Null check on header — unauthenticated requests pass through safely
+  - Validates token via JwtService, extracts userId and roles
+  - Converts roles to SimpleGrantedAuthority with "ROLE_" prefix (Spring Security convention)
+  - Creates authenticated UsernamePasswordAuthenticationToken (3-arg constructor)
+  - Sets authentication in SecurityContextHolder
+  - @Component (not @Service — filter is infrastructure, not business logic)
+  - Fixed: null header NPE, @Service→@Component, 2-arg→3-arg auth token constructor
+
+- [x] Step 7: Create SecurityConfig — COMPLETE (2026-04-20)
+  - Disables CSRF (not needed for JWT — CSRF protects cookie-based auth)
+  - Session policy STATELESS (JWT is self-contained, no server-side session)
+  - /api/auth/** permitAll (login/register/refresh accessible without token)
+  - anyRequest().authenticated() (everything else requires valid JWT)
+  - JwtAuthFilter registered before UsernamePasswordAuthenticationFilter
+  - Lambda DSL used (non-lambda authorizeHttpRequests() is deprecated)
+  - Fixed: missing final on field, old non-lambda DSL, single * wildcard, hardcoded URL instead of anyRequest()
 
 ### Implementation Pending (RESUME HERE)
-- [ ] Step 4: Create AuthService (register, login, refresh)
-- [ ] Step 4: Create AuthService (register, login, refresh)
-- [ ] Step 5: Create JwtService (generate, validate, extract claims)
-- [ ] Step 6: Create JwtAuthFilter (Spring Security filter)
+- [ ] Step 8: Create AuthController (REST endpoints)
 - [ ] Step 7: Create SecurityConfig (public vs protected endpoints)
 - [ ] Step 8: Create AuthController (REST endpoints)
 - [ ] Step 9: Test with Postman/curl
@@ -90,3 +134,7 @@
 - **2025-04-09**: Phase 1 started — Entity design complete, security architecture decided (JWT), query methods studied, security deps added. Next: create entity classes.
 - **2026-04-13**: Step 2 complete — BaseEntity in commons + 7 user entities created. All JPA mappings, constraints, and Lombok annotations reviewed. BUILD SUCCESSFUL. Next: Repository interfaces.
 - **2026-04-15**: Step 3 complete — 7 repository interfaces created. Fixed: existsBy return type, derived query field names matching entity fields. BUILD SUCCESSFUL. Next: AuthService.
+- **2026-04-20**: Step 4 complete — DTOs (records + validation), SecurityConfig (BCryptPasswordEncoder bean), AuthService with register/login/refresh. Fixed: @Autowired vs constructor injection, passwordEncoder.matches() arg order, raw strings → DTOs. BUILD SUCCESSFUL. Next: JwtService.
+- **2026-04-20**: Step 5 complete — JwtService (JJWT 0.12.6) + wired into AuthService. Fixed 5 issues: hardcoded expiry, extractRoles corruption, validateToken always-true, redundant isTokenExpired, YAML location. Refresh token rotation implemented. All TODO placeholders replaced. Next: JwtAuthFilter.
+- **2026-04-20**: Step 6 complete — JwtAuthFilter (OncePerRequestFilter). Extracts Bearer token, validates, sets SecurityContext. Fixed: null header NPE, @Service→@Component, unauthenticated 2-arg→authenticated 3-arg constructor. Next: SecurityConfig.
+- **2026-04-20**: Step 7 complete — SecurityConfig with SecurityFilterChain bean. CSRF disabled, STATELESS sessions, /api/auth/** public, all else authenticated. Fixed: missing final, non-lambda DSL, single-star wildcard, hardcoded URL. Next: AuthController.
