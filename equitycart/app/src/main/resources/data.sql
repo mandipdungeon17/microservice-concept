@@ -1,0 +1,11 @@
+-- INSERT INTO roles (name, description, created_at, updated_at)
+-- SELECT 'CUSTOMER', 'Default customer role', NOW(), NOW()
+--     WHERE NOT EXISTS (SELECT 1 FROM roles WHERE name = 'CUSTOMER');
+--
+-- INSERT INTO roles (name, description, created_at, updated_at)
+-- SELECT 'SELLER', 'Seller role', NOW(), NOW()
+--     WHERE NOT EXISTS (SELECT 1 FROM roles WHERE name = 'SELLER');
+--
+-- INSERT INTO roles (name, description, created_at, updated_at)
+-- SELECT 'ADMIN', 'Administrator role', NOW(), NOW()
+--     WHERE NOT EXISTS (SELECT 1 FROM roles WHERE name = 'ADMIN');

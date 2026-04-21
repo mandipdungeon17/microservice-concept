@@ -1,6 +1,7 @@
 package com.equitycart.user.entity;
 
 import com.equitycart.commons.entity.BaseEntity;
+import com.equitycart.user.enums.UserRoles;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
@@ -19,6 +20,7 @@ import lombok.Setter;
 @Builder
 public class Role extends BaseEntity {
     @Column(nullable = false, unique = true)
-    private String name;
+    @Builder.Default
+    private String name = UserRoles.CUSTOMER.name();
     private String description;
 }

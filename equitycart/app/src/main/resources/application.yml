@@ -1,4 +1,7 @@
 spring:
+#  sql:
+#    init:
+#      mode: always
   application:
     name: equitycart
   datasource:
@@ -7,6 +10,7 @@ spring:
     password: postgres
     driver-class-name: org.postgresql.Driver
   jpa:
+#    defer-datasource-initialization: true
     hibernate:
       ddl-auto: update
     show-sql: true

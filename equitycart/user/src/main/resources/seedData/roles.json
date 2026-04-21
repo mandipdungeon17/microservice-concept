@@ -1,0 +1,5 @@
+[
+  { "name": "CUSTOMER", "description": "Default customer role" },
+  { "name": "SELLER", "description": "Seller role" },
+  { "name": "ADMIN", "description": "Administrator role" }
+]
