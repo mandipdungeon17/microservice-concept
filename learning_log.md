@@ -298,6 +298,24 @@ A: The Spring Boot plugin creates a `bootJar` task that packages a fat/uber JAR 
 - Fix: Changed to `/api/auth/**` which matches any number of path segments.
 - Lesson: In Spring's `AntPathMatcher` (named after Apache Ant build tool's path matching): `*` = one segment, `**` = any number of segments. Always use `/**` when you want to match an entire URL subtree.
 
+**21. Duplicate Method Names Cause Confusion (2026-04-20)**
+
+- Problem: All three controller methods named `register`. Java allows this (overloading — different parameter types), but it's semantically misleading and error-prone.
+- Fix: Named methods after their purpose: `register`, `login`, `refreshToken`.
+- Lesson: Method overloading in controllers is legal but a bad idea. Name methods after their action. REST controllers especially benefit from clear naming since they map to API endpoints.
+
+**22. Duplicate @PostMapping Path Causes Startup Failure (2026-04-20)**
+
+- Problem: Two methods mapped to `@PostMapping("/register")`. Spring cannot resolve which method to call and fails at startup with `Ambiguous mapping` error.
+- Fix: Changed refresh endpoint to `@PostMapping("/refresh")`.
+- Lesson: Each combination of HTTP method + path must map to exactly one handler method. Spring checks this eagerly at startup — not at request time.
+
+**23. Catch-All Exception Handling Hides Real Errors (2026-04-20)**
+
+- Problem: `catch (Exception e)` returned 400 BAD_REQUEST for everything — including server errors like database failures. Also returned `AuthResponse(null, null)` — meaningless to the client.
+- Fix: Removed try-catch entirely. Unhandled exceptions return 500 by default. Proper error handling will be added via `@RestControllerAdvice` (global exception handler).
+- Lesson: Don't catch exceptions in controllers just to return a status code. Use `@RestControllerAdvice` to centralize error handling. 400 = client's fault, 500 = server's fault — using the wrong one makes debugging impossible.
+
 ---
 
 ### Core Concepts Learned
@@ -703,6 +721,24 @@ History: CSRF attacks exploit the browser's automatic cookie-sending behavior. I
 - `NEVER` — don't create, but use one if it exists
 - `STATELESS` — never create, never use. Each request is independent. This is what JWT APIs need — the token is the proof, no server memory required. This is also what makes horizontal scaling work: any server instance can handle any request.
 
+**39. REST Controller Layer — Thin by Design (2026-04-20)**
+
+History: The "thin controller, fat service" pattern comes from MVC architecture (1979, Trygve Reenskaug at Xerox PARC). Controllers should only translate HTTP ↔ service calls. Business logic belongs in the service layer. This keeps controllers reusable (same service can be called from controllers, scheduled jobs, message listeners) and testable (test business logic without HTTP).
+
+- `@RestController` = `@Controller` + `@ResponseBody` (introduced Spring 4.0, 2013)
+- `@RequestMapping("/api/auth")` — base path, combined with method-level `@PostMapping("/login")` → `/api/auth/login`
+- `@RequestBody` — tells Spring to deserialize JSON body → Java object (via Jackson)
+- `ResponseEntity<T>` — wraps response body + HTTP status code. `ResponseEntity.ok(body)` for 200, `new ResponseEntity<>(body, HttpStatus.CREATED)` for 201
+- 201 CREATED for register (new resource created), 200 OK for login/refresh (no new resource)
+
+**40. How JSON Serialization Works in Spring (2026-04-20)**
+
+- Spring Boot auto-configures Jackson (JSON library) via `spring-boot-starter-web`
+- Incoming request: `HttpMessageConverter` reads JSON body → calls Jackson → creates Java object (deserialization)
+- Outgoing response: Jackson converts Java object → JSON string (serialization)
+- Java records work automatically because they have public accessor methods (`email()`, `password()`)
+- No annotations needed on DTOs for basic serialization — Jackson handles it by convention
+
 **32. Refresh Token Rotation — Security Pattern (2026-04-20)**
 
 - Every time a refresh token is used, the old one is revoked (`setRevoked(true)`) and a new one is issued
@@ -822,5 +858,405 @@ A: The `HttpSecurity` methods (`.csrf()`, `.authorizeHttpRequests()`, `.addFilte
 
 **Q33: "What's the difference between `authorizeHttpRequests()` and `authorizeHttpRequests(Customizer)`?" (2026-04-20)**
 A: The no-arg version `authorizeHttpRequests()` returns a registry object you chain on directly — this is the old style, now deprecated. The lambda version `authorizeHttpRequests(auth -> auth.requestMatchers(...))` takes a `Customizer<>` lambda. Spring Security 5.2+ moved to the lambda DSL for consistency — every configuration method (`csrf`, `sessionManagement`, `authorizeHttpRequests`) follows the same `method(lambda)` pattern. The lambda style also enables better IDE support and avoids the `.and()` chaining that was needed with the old style.
+
+**Q34: "What is @RestController and how does it differ from @Controller?" (2026-04-20)**
+A: `@Controller` returns view names (for server-side rendered HTML — Thymeleaf, JSP). `@RestController` = `@Controller` + `@ResponseBody` — every method's return value is serialized directly to the response body (JSON by default). Introduced in Spring 4.0 (2013) to eliminate the need for `@ResponseBody` on every method in REST APIs.
+
+**Q35: "What does @RequestBody do?" (2026-04-20)**
+A: It tells Spring to read the HTTP request body and deserialize it into the annotated parameter. Spring uses `HttpMessageConverter` implementations — for JSON, it uses Jackson's `MappingJackson2HttpMessageConverter`. Without `@RequestBody`, Spring looks for query parameters or form data instead. The `Content-Type: application/json` header tells Spring which converter to use.
+
+**Q36: "Why use ResponseEntity instead of returning the object directly?" (2026-04-20)**
+A: Returning an object directly always sends 200 OK. `ResponseEntity` gives you control over the HTTP status code, headers, and body. For REST APIs, correct status codes matter: 201 for resource creation, 204 for no content, 404 for not found. Clients (and API consumers) rely on status codes for flow control — a mobile app checks for 401 to trigger re-login, not by parsing error messages.
+
+**Q37: "Why should controllers be thin?" (2026-04-20)**
+A: Business logic in controllers is untestable without spinning up HTTP infrastructure. It's also unreusable — you can't call a controller method from a scheduled job or message listener. The "thin controller, fat service" pattern (from MVC, 1979) keeps controllers as translators between HTTP and business logic. Test the service layer with unit tests, test the controller layer with integration tests.
+
+**24. PostgreSQL Database Names Are Case-Sensitive (2026-04-21)**
+
+- Problem: YAML had `equitycart`, pgAdmin showed `equityCart`. PostgreSQL treats unquoted names as lowercase, but if created with quotes (`"equityCart"`), it preserves case.
+- Lesson: Always use lowercase database names in PostgreSQL. If you create `equityCart` via pgAdmin's GUI, check whether it added quotes. Unquoted `CREATE DATABASE equitycart` and `CREATE DATABASE EquityCart` both create `equitycart`. But `CREATE DATABASE "EquityCart"` creates a case-sensitive name.
+
+**25. `data.sql` Doesn't Run for PostgreSQL by Default (2026-04-21)**
+
+- Problem: Created `data.sql` with seed data, but the `roles` table stayed empty.
+- Root cause: Since Spring Boot 2.5, `spring.sql.init.mode` defaults to `embedded` — meaning `data.sql` only executes for in-memory databases (H2, HSQLDB). PostgreSQL is not embedded, so the file is silently skipped.
+- Fix: Set `spring.sql.init.mode: always` in `application.yml`.
+- History: Before Spring Boot 2.5, `data.sql` ran unconditionally. The change was made after production incidents where seed scripts accidentally ran against prod databases, duplicating or corrupting data.
+
+**26. `data.sql` Runs Before Hibernate Creates Tables (2026-04-21)**
+
+- Problem: Even with `mode: always`, `data.sql` can fail because it runs before `ddl-auto: update` creates/updates tables.
+- Fix: Set `spring.jpa.defer-datasource-initialization: true` — this flips the order: Hibernate DDL first → `data.sql` second.
+- Lesson: Spring Boot has two initialization phases: (1) SQL script init (`data.sql`, `schema.sql`) and (2) Hibernate DDL (`ddl-auto`). By default, SQL scripts run first. The `defer` flag reverses this.
+
+**27. YAML Indentation Changes the Property Path (2026-04-21)**
+
+- Problem: Placed `defer-datasource-initialization: true` under `spring.data` instead of `spring.jpa`. Spring silently ignored the unknown property.
+- What happened: `spring.data.defer-datasource-initialization` is not a real property. `spring.jpa.defer-datasource-initialization` is. One indent level difference = completely different property.
+- Lesson: YAML is whitespace-sensitive. Every indentation level maps to a dot-separated property path. Always verify the full property path matches the Spring Boot documentation. Use IDE autocomplete when possible.
+
+**28. Java Field Defaults vs Database Rows (2026-04-21)**
+
+- Problem: Set `private String name = UserRoles.CUSTOMER.name()` on Role entity, expected `CUSTOMER` to appear in the `roles` table.
+- Reality: Java field defaults only apply when creating a `new Role()` in Java. They don't insert rows into the database. `ddl-auto: update` creates the table structure (columns, constraints), not data.
+- Lesson: Entity field defaults = "what value should a new Java object have in memory." Database seed data = "what rows should exist on disk." These are separate concerns. Use `data.sql`, `CommandLineRunner`, or a JSON seeder to populate reference data.
+
+**Q38: "Why does Spring Boot skip data.sql for PostgreSQL?" (2026-04-21)**
+A: Safety. Since Spring Boot 2.5, `spring.sql.init.mode` defaults to `embedded` — only in-memory databases get auto-seeded. This prevents `data.sql` from accidentally running against production databases on every restart. For PostgreSQL, you must explicitly set `mode: always`. In production, you'd typically use Flyway or Liquibase instead of `data.sql` — they track which migrations have already run and never re-execute them.
+
+**Q39: "What's the difference between `data.sql` and `schema.sql` in Spring Boot?" (2026-04-21)**
+A: `schema.sql` creates/alters table structure (DDL: CREATE TABLE, ALTER TABLE). `data.sql` inserts/updates data (DML: INSERT, UPDATE). Both run at the same phase — before Hibernate DDL by default. If you use `ddl-auto: update`, you typically don't need `schema.sql` because Hibernate handles DDL. You'd only use `schema.sql` with `ddl-auto: none` (fully manual schema management).
+
+**Q40: "How do you handle multiple active refresh tokens per user?" (2026-04-21)**
+A: It depends on the security model. Multi-device apps (Gmail, Netflix) allow multiple active refresh tokens — one per session/device. Banking apps revoke all previous tokens on new login (single session). For multi-token systems, you need periodic cleanup of expired/revoked tokens — either a `@Scheduled` job or database TTL. The refresh token table will grow unbounded otherwise.
+
+**29. CommandLineRunner for Seed Data (2026-04-21)**
+
+- `CommandLineRunner` is a functional interface with `run(String... args)`. Spring Boot executes all `CommandLineRunner` beans after the full application context is loaded — meaning all beans are created, all `@PostConstruct` have run, and Hibernate has created/updated tables.
+- History: Added in Spring Boot 1.0 (2014). Its sibling `ApplicationRunner` (added 1.3) is identical except it receives parsed `ApplicationArguments` instead of raw `String[]`. Use either — for seed data it makes no difference.
+- Advantage over `data.sql`: no ordering tricks (`defer-datasource-initialization`), no `sql.init.mode` needed, type-safe, can use repositories and Spring beans.
+
+**30. Jackson ObjectMapper and TypeReference (2026-04-21)**
+
+- `ObjectMapper` is Jackson's core class for JSON ↔ Java conversion. Spring Boot auto-configures one with sensible defaults — always inject it, never `new ObjectMapper()`.
+- `TypeReference<List<RoleSeedData>>` solves Java's **type erasure** problem. At runtime, `List<RoleSeedData>` becomes just `List` — the generic type is erased. `TypeReference` captures the full generic type at compile time using an anonymous subclass trick (the `{}` after `new TypeReference<>()` creates an anonymous class that preserves the type info).
+- History: Type erasure was a deliberate Java 5 (2004) design choice for backward compatibility with pre-generics code. Jackson, Gson, and other libraries all need workarounds like `TypeReference` because of it.
+
+**31. Classpath Resource Loading in Spring (2026-04-21)**
+
+- `@Value("classpath:seedData/roles.json") Resource rolesFile` — Spring resolves `classpath:` prefix by searching all JARs and class directories on the classpath.
+- In a multi-module Gradle project, `user/src/main/resources/` gets packaged into `user-service.jar`. When `app` depends on `user`, that JAR is on the classpath — so `classpath:seedData/roles.json` finds the file inside the user JAR.
+- Alternative: `new ClassPathResource("seedData/roles.json")` does the same thing without Spring injection.
+- `resource.getInputStream()` reads the file contents — works for both files on disk and files inside JARs (unlike `resource.getFile()` which fails for JAR-embedded resources).
+
+**Q41: "Why inject ObjectMapper instead of creating a new one?" (2026-04-21)**
+A: Spring Boot auto-configures ObjectMapper with project-wide settings (date formats, naming strategies, null handling, module registration like JavaTimeModule). `new ObjectMapper()` creates a bare instance that ignores all that config. If you later add `spring.jackson.date-format` in YAML, the injected one picks it up — the hand-created one doesn't. Consistency matters when multiple parts of the app serialize/deserialize JSON.
+
+**Q42: "What is TypeReference and why is it needed?" (2026-04-21)**
+A: Java erases generic types at runtime (type erasure, Java 5 design). `objectMapper.readValue(json, List.class)` loses the element type — Jackson doesn't know it's `RoleSeedData`, so it deserializes to `List<LinkedHashMap>`. `TypeReference<List<RoleSeedData>>` preserves the full generic type via an anonymous subclass trick. The `{}` creates a subclass whose `.getGenericSuperclass()` retains the type parameter — Jackson reads that reflectively.
+
+**Q43: "What's the difference between CommandLineRunner and data.sql for seeding?" (2026-04-21)**
+A: `data.sql` is raw SQL executed during datasource initialization — before the app context is fully ready. It requires `defer-datasource-initialization: true` with `ddl-auto: update`, and `sql.init.mode: always` for non-embedded databases. `CommandLineRunner` runs after full context load — all beans, Hibernate DDL, everything is ready. It's type-safe (uses repositories, not raw SQL), idempotent by design (check before insert in Java), and doesn't need ordering tricks. Trade-off: `data.sql` is simpler for static one-liners; `CommandLineRunner` is better for anything conditional or multi-entity.
+
+**32. @RestControllerAdvice — Global Exception Handling (2026-04-23)**
+
+- History: Before Spring 3.2 (2012), exception handling was per-controller (`@ExceptionHandler` in each controller) or XML-configured (`SimpleMappingExceptionResolver`). Spring 3.2 introduced `@ControllerAdvice` — one class that intercepts exceptions from all controllers. Spring 4.3 (2016) added `@RestControllerAdvice` = `@ControllerAdvice` + `@ResponseBody`.
+- Flow: Controller → Service throws exception → `@RestControllerAdvice` intercepts → matches `@ExceptionHandler` by exception type → returns structured JSON error response.
+- `@ResponseStatus(HttpStatus.NOT_FOUND)` on the handler method sets the HTTP status code for the response.
+- The catch-all `@ExceptionHandler(Exception.class)` prevents stack traces from leaking to clients. In production, return a generic message ("An unexpected error occurred") and log the real exception server-side.
+
+**33. Separation of Concerns: Exceptions vs Handlers (2026-04-23)**
+
+- Problem: Initially put `@RestControllerAdvice` and `@ExceptionHandler` on the exception classes themselves — making each exception handle itself.
+- Why it's wrong: (1) Violates separation of concerns — an exception's job is to carry error info, a handler's job is to format responses. (2) Spring instantiates `@RestControllerAdvice` classes as beans, but exceptions are created with `throw new` — two separate instances with different lifecycles. (3) Adding a new exception means modifying the exception class to add handler logic, instead of adding one method to the central handler.
+- Analogy: Exceptions are the charges (what went wrong), the handler is the judge (decides the response). The charge doesn't decide its own verdict.
+
+**34. Custom Exceptions for HTTP Status Mapping (2026-04-23)**
+
+- Raw `RuntimeException` can't be distinguished — the handler doesn't know if it's a 400, 404, or 500. Custom exceptions map to specific HTTP statuses:
+  - `ResourceNotFoundException` → 404 Not Found
+  - `DuplicateResourceException` → 409 Conflict
+  - `AuthenticationException` → 401 Unauthorized
+  - `AccountDisabledException` → 403 Forbidden
+- All extend `RuntimeException` (unchecked) — no need to declare `throws` in method signatures. Spring's `@Transactional` only rolls back on unchecked exceptions by default, which is what we want.
+
+**Q44: "What's the difference between @ControllerAdvice and @RestControllerAdvice?" (2026-04-23)**
+A: Same relationship as `@Controller` vs `@RestController`. `@ControllerAdvice` returns view names (for server-side rendered HTML). `@RestControllerAdvice` adds `@ResponseBody` — return values are serialized to JSON. For REST APIs, always use `@RestControllerAdvice`.
+
+**Q45: "Why use custom exceptions instead of Spring's ResponseStatusException?" (2026-04-23)**
+A: `ResponseStatusException` (Spring 5, 2017) couples your service layer to HTTP — the service decides the status code. Custom exceptions keep the service layer HTTP-agnostic — the service throws `DuplicateResourceException`, and the handler decides it's 409. If the same service is called from a message listener (no HTTP), the exception still makes sense. `ResponseStatusException` is fine for quick prototypes, but custom exceptions scale better in real applications.
+
+**Q46: "Why should the catch-all handler not expose ex.getMessage() to clients?" (2026-04-23)**
+A: Unexpected exceptions can contain internal details: SQL queries, file paths, class names, stack frames. Exposing these is an information disclosure vulnerability (OWASP A01:2021). Return a generic message to the client, log the full exception server-side with `log.error("Unexpected error", ex)`. Only custom exceptions (whose messages you control) are safe to expose.
+
+**35. Java Records — Capabilities and Limitations (2026-04-23)**
+
+History: Records were added in Java 14 (2020, preview) and finalized in Java 16 (2021). Inspired by Kotlin's `data class` and Scala's `case class`. Motivation: a simple DTO used to require 50+ lines (fields, constructor, getters, equals, hashCode, toString). Records generate all of this from a single line.
+
+What the compiler generates from `public record Foo(String a, int b) {}`:
+- `private final` fields for each component
+- Canonical (all-args) constructor
+- Accessor methods: `a()`, `b()` (NOT `getA()` — not JavaBean convention)
+- `equals()`, `hashCode()`, `toString()`
+
+Limitations:
+1. **Immutable** — fields are `final`, no setters, no modification after creation
+2. **Cannot extend a class** — implicitly extends `java.lang.Record` (single inheritance)
+3. **Can implement interfaces** — accessor methods can satisfy interface contracts
+4. **No additional instance fields** — all fields must be in the component list (parentheses). Static fields/methods are allowed
+5. **Not suitable for JPA entities** — JPA requires no-arg constructor + mutable fields + setters
+6. **Lombok is mostly redundant** — `@Builder`, `@Getter`, `@Setter`, `@Data`, `@NoArgsConstructor`, `@Value`, `@With` either conflict or duplicate what the record provides. `@Slf4j`/`@Log4j2` work (they just add a static field)
+7. **Spring/Jakarta annotations work** — `@Valid`, `@NotBlank`, `@Email`, `@JsonProperty`, `@RequestBody` all work. Annotations go on constructor parameters in the component list
+
+Compact constructor — validation without re-declaring parameters:
+```java
+public record PriceRange(double min, double max) {
+    public PriceRange {  // no parentheses — "compact"
+        if (max < min) throw new IllegalArgumentException("Max must be >= min");
+        // fields are auto-assigned AFTER this block
+    }
+}
+```
+
+Static factory method — the record alternative to `@Builder`:
+```java
+public record ErrorResponse(int status, String error, String message, LocalDateTime timestamp) {
+    public static ErrorResponse of(HttpStatus httpStatus, String message) {
+        return new ErrorResponse(httpStatus.value(), httpStatus.getReasonPhrase(), message, LocalDateTime.now());
+    }
+}
+```
+
+When to use: DTOs (request/response), value objects, config holders, any immutable data carrier.
+When NOT to use: JPA entities, mutable state, Spring beans, anything needing inheritance.
+
+**Q47: "Can records be JPA entities?" (2026-04-23)**
+A: No. JPA requires: (1) no-arg constructor — records don't have one, (2) mutable fields — record fields are final, (3) setter access — records have no setters. Hibernate 6 has experimental support but it's not production-ready. Records can be used as **JPA projections** (query result DTOs) via Spring Data's interface/class-based projections, but not as managed entities.
+
+**Q48: "Why don't records use JavaBean naming (getEmail) for accessors?" (2026-04-23)**
+A: Records deliberately broke from JavaBean convention (1996) because they're a different concept. JavaBeans were designed for mutable, tool-friendly components (visual GUI builders). Records are immutable value types — no setters, so `get` prefix makes less sense. Jackson 2.12+ (2020) added native record support, and Spring handles both styles, so this rarely causes issues with modern libraries. Older frameworks expecting `getX()` may not work.
+
+**Q49: "Why doesn't @Builder work with records?" (2026-04-23)**
+A: Lombok's `@Builder` generates a private all-args constructor + a static builder class. Records already have a public canonical constructor that can't be made private. The two conflict. Alternatives: (1) static factory method on the record, (2) compact constructor for validation, (3) just use the canonical constructor directly — for DTOs with 2-4 fields, a builder adds complexity without benefit.
+
+**36. Bean Validation in Spring Boot (2026-04-24)**
+
+History: Bean Validation started as JSR 303 (Java EE 6, 2009), evolved to JSR 380 (Bean Validation 2.0, 2017), now Jakarta Validation 3.0. The reference implementation is Hibernate Validator (same company as Hibernate ORM, but a completely separate project). Spring Boot auto-configures it via `spring-boot-starter-validation`.
+
+Flow: Client sends JSON → `@RequestBody` deserializes → `@Valid` triggers validation → valid: proceed to controller → invalid: `MethodArgumentNotValidException` thrown → `@RestControllerAdvice` catches → 400 response.
+
+Key annotations:
+- `@NotNull` — not null (allows empty `""`)
+- `@NotBlank` — not null, not empty, not whitespace (use for strings)
+- `@Email` — valid email format
+- `@Size(min=, max=)` — string length or collection size
+- `@Min` / `@Max` — numeric bounds
+- `@Pattern(regexp=)` — custom regex
+
+`@Valid` on the controller parameter is the trigger — without it, annotations on the DTO are just metadata, validation never runs.
+
+**37. Separate Response Types for Different Error Shapes (2026-04-24)**
+
+- `ErrorResponse(status, error, message, timestamp)` — for simple errors (404, 409, 401, 403, 500)
+- `ValidationErrorResponse(status, error, message, timestamp, List<FieldError>)` — for validation errors (400)
+- Why separate: avoids nullable `fieldErrors` field on non-validation errors, produces clean OpenAPI schemas, clients can distinguish error types by response shape
+- Industry practice: Google, Stripe, AWS use different response shapes for validation vs other errors
+- `FieldError` as nested record inside `ValidationErrorResponse` — scoped to where it's used, not polluting the outer package
+
+**38. Log Levels for Different Error Types (2026-04-24)**
+
+- `logger.warn()` — for client mistakes (validation failures, bad input, auth failures). Expected in normal operation.
+- `logger.error()` — for unexpected server-side problems (NPE, database down, unhandled exceptions). Should trigger alerts in production.
+- Using `error` for validation failures causes alert fatigue — monitoring tools page on-call engineers every time someone submits a blank form.
+
+**Q50: "What's the difference between @NotNull, @NotBlank, and @NotEmpty?" (2026-04-24)**
+A: `@NotNull` only checks for null — `""` passes. `@NotEmpty` checks not null AND not empty — `""` fails but `"  "` passes. `@NotBlank` checks not null, not empty, AND not just whitespace — `"  "` fails. For string fields in APIs, `@NotBlank` is almost always what you want. `@NotEmpty` is useful for collections (`List<String>` must have at least one element).
+
+**Q51: "Why use @Valid instead of validating manually in the service?" (2026-04-24)**
+A: `@Valid` is declarative — the framework handles validation before your code runs. Manual validation (`if email == null`) is scattered across service methods, easy to forget, and mixes validation logic with business logic. Bean Validation centralizes constraints on the DTO (single source of truth), produces consistent error responses, and is testable independently. Manual validation is only needed for cross-field rules (e.g., "end date must be after start date") that annotations can't express.
+
+**Q52: "Why use a separate ValidationErrorResponse instead of adding fields to ErrorResponse?" (2026-04-24)**
+A: Single Responsibility. `ErrorResponse` represents a simple error — one message, one status. `ValidationErrorResponse` represents multiple field-level problems. Combining them means every non-validation error has a null `fieldErrors` field — wasted bytes, confusing to clients, messy OpenAPI schema. Separate types let clients distinguish error shapes by type, and each record stays focused on its purpose. Records are cheap to create — don't hesitate to use multiple.
+
+**39. SecurityContextHolder and ThreadLocal — How Per-Request Auth Works (2026-04-24)**
+
+- `SecurityContextHolder` stores `SecurityContext` in a `ThreadLocal` by default (`MODE_THREADLOCAL`).
+- `ThreadLocal` (Java 1.2, 1998): each thread has its own independent copy of the variable. Thread-42's SecurityContext with userId=5 is completely invisible to Thread-43's SecurityContext with userId=8.
+- Flow: JwtAuthFilter extracts userId from JWT → stores in SecurityContext on current thread → controller reads from same thread's SecurityContext → same userId, guaranteed.
+- After request: `SecurityContextHolderFilter` clears the context, so the thread is clean for the next request (thread pool reuse).
+- Getting the principal: `Authentication authentication` (method parameter, Spring-injected) or `SecurityContextHolder.getContext().getAuthentication().getPrincipal()` (manual static call). Method parameter is preferred — cleaner, testable, no static coupling.
+
+**40. Spring Security Filter Chain Architecture (2026-04-24)**
+
+History: Filter chain architecture introduced in Spring Security 3.0 (2009), replacing interceptor-based approach.
+
+Request flow:
+1. Tomcat receives request, assigns thread
+2. `DelegatingFilterProxy` (Spring 1.0, 2004) — bridges Servlet container ↔ Spring beans. Servlet containers don't know about Spring beans, so this proxy delegates to Spring's `FilterChainProxy`.
+3. `FilterChainProxy` — Spring Security's entry point. Looks up matching `SecurityFilterChain` bean and runs its filters in order.
+4. Filter chain runs: SecurityContextHolderFilter → HeaderWriterFilter → LogoutFilter → **JwtAuthFilter (ours)** → UsernamePasswordAuthenticationFilter → AnonymousAuthenticationFilter → ExceptionTranslationFilter → **AuthorizationFilter** (checks permitAll/authenticated)
+5. If authorized → `DispatcherServlet` → controller
+
+`addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)` — inserts our filter at the right position. We place it before the default form-login filter because JWT auth must set the SecurityContext before any authorization checks run.
+
+**41. Stateless Logout with JWT (2026-04-24)**
+
+- Access tokens are self-contained and stateless — no server-side revocation without a blacklist.
+- Standard approach: revoke all refresh tokens → current access token expires naturally (15 min) → client deletes token from storage.
+- This is what Google, GitHub, and OAuth2 implementations do.
+- For instant access token revocation: need a server-side blacklist (Redis with TTL = remaining token lifetime). This adds statefulness but covers edge cases like compromised tokens.
+
+**Q53: "How does SecurityContextHolder prevent one user from seeing another's data?" (2026-04-24)**
+A: `ThreadLocal`. Each HTTP request runs on its own thread from Tomcat's pool. `SecurityContextHolder` (default `MODE_THREADLOCAL`) stores the `SecurityContext` in a thread-local variable — Thread-42 with userId=5 can never access Thread-43's context with userId=8. The context is cleared after each request (`SecurityContextHolderFilter`), preventing stale data when threads are reused from the pool. The only way to cross-contaminate is manually sharing SecurityContext across threads (don't) or a compromised JWT secret key.
+
+**Q54: "What is DelegatingFilterProxy and why does Spring need it?" (2026-04-24)**
+A: Servlet containers (Tomcat, Jetty) manage their own filter lifecycle — they instantiate filters via `web.xml` or `@WebFilter`, not via Spring. But Spring Security's filters are Spring beans (they need dependency injection). `DelegatingFilterProxy` solves this: it's a plain Servlet filter that Tomcat creates, but it delegates every request to a Spring bean (`FilterChainProxy`). It's the bridge between Tomcat's world and Spring's world. Without it, Spring Security filters couldn't participate in the Servlet filter chain.
+
+**Q55: "Why does addFilterBefore use UsernamePasswordAuthenticationFilter as the reference?" (2026-04-24)**
+A: `UsernamePasswordAuthenticationFilter` is Spring's default form-login authentication filter — it handles `POST /login` with username/password in form data. In a JWT API, you don't use form login, but you need your authentication to happen at roughly the same point in the chain — after CSRF and headers, but before authorization checks. Placing your JWT filter "before UsernamePasswordAuthenticationFilter" positions it correctly. The reference filter doesn't need to be active — it's just a position marker in the chain.
+
+**42. Form Login — The Traditional Authentication Pattern (2026-04-24)**
+
+History: Form login was THE authentication pattern from the late 1990s through mid-2010s. Every web framework had it: PHP sessions, Java's `j_security_check` (Servlet spec), Rails `devise`, Django `auth`. JWT/token-based auth only became mainstream around 2014-2015 with the rise of SPAs (React, Angular) and mobile apps that needed stateless APIs.
+
+What it is: an HTML form submits username + password as `application/x-www-form-urlencoded` (not JSON). The server creates a session, sends back a cookie. Used by WordPress admin, Jira, Jenkins, banking portals — anywhere the browser manages sessions via cookies.
+
+When to use: server-side rendered apps (Thymeleaf, JSP), admin panels.
+When NOT to use: REST APIs consumed by SPAs/mobile (use JWT), microservice-to-microservice (use OAuth2 client credentials).
+
+`UsernamePasswordAuthenticationFilter` handles form login:
+1. Checks: is this a POST to `/login`? If no → does nothing, passes through.
+2. Extracts username + password from form parameters (not JSON body).
+3. Creates unauthenticated `UsernamePasswordAuthenticationToken` (2-arg).
+4. Delegates to `AuthenticationManager.authenticate()`.
+5. `AuthenticationManager` → `DaoAuthenticationProvider` → calls `UserDetailsService.loadUserByUsername()` (your code) → calls `PasswordEncoder.matches()`.
+6. Success → creates authenticated token (3-arg) → `SecurityContextHolder.setAuthentication()` → session created → redirect.
+7. Failure → `AuthenticationException` → redirect to `/login?error`.
+
+In EquityCart's JWT API, `UsernamePasswordAuthenticationFilter` never activates because no request matches its criteria (form POST to `/login`). It just passes every request through.
+
+**43. FilterChainProxy and SecurityFilterChain Registration (2026-04-24)**
+
+How `FilterChainProxy` finds your `SecurityFilterChain`:
+1. Spring Boot auto-configures `DelegatingFilterProxy` as a Servlet filter named `"springSecurityFilterChain"`.
+2. `DelegatingFilterProxy` looks up a Spring bean with that name → finds `FilterChainProxy` (auto-configured by `@EnableWebSecurity`).
+3. `FilterChainProxy` holds a `List<SecurityFilterChain>` — your `@Bean SecurityFilterChain` is added during context startup.
+4. At request time, `FilterChainProxy` iterates its list, calls `chain.matches(request)`, first match wins.
+5. `httpSecurity.build()` returns `DefaultSecurityFilterChain` (implements `SecurityFilterChain`).
+
+Multiple `SecurityFilterChain` beans: if you have separate chains (one for API, one for admin), each has a `requestMatcher` — `FilterChainProxy` picks the first match. Use `@Order` to control priority.
+
+**44. DelegatingFilterProxy and DispatcherServlet Are Siblings, Not Parent-Child (2026-04-24)**
+
+Common misconception: `DelegatingFilterProxy` does NOT come under `DispatcherServlet`. They are siblings in the Servlet container:
+
+```
+Tomcat (Servlet Container)
+├── Filter chain (Servlet Filters — run BEFORE any servlet)
+│   ├── DelegatingFilterProxy → FilterChainProxy → SecurityFilterChain
+│   └── other filters...
+└── DispatcherServlet (runs AFTER all filters pass)
+    ├── HandlerMapping → finds which controller method to call
+    ├── HandlerAdapter → invokes the controller method
+    ├── ViewResolver → resolves view (if server-side rendering)
+    └── HandlerExceptionResolver → finds @ExceptionHandler methods
+```
+
+Filters and Servlets are separate concepts in the Java Servlet spec (1997). Filters intercept requests BEFORE they reach any servlet. Security must run before business logic — that's why Spring Security is a filter, not part of DispatcherServlet.
+
+**45. How Unhandled Exceptions Reach GlobalExceptionHandler (2026-04-24)**
+
+When a service method (e.g., `UserServiceImpl.logout()`) doesn't throw custom exceptions, infrastructure exceptions can still occur:
+- Database down → `DataAccessException` (Spring's wrapper around JDBC/Hibernate exceptions)
+- Connection timeout → `DataAccessException`
+- Constraint violation → `DataIntegrityViolationException`
+
+Flow: Service throws `DataAccessException` → Controller doesn't catch → `DispatcherServlet` catches → looks for matching `@ExceptionHandler` → no specific handler for `DataAccessException` → falls through to `@ExceptionHandler(Exception.class)` (catch-all) → returns 500: "An unexpected error occurred".
+
+This is correct: database failures ARE unexpected server errors — 500 is the right status. Custom exceptions are for business rule violations you can predict and name (duplicate email → 409, invalid password → 401). Infrastructure failures are handled by the catch-all.
+
+To handle specific infrastructure errors differently (e.g., 503 for database down), add:
+`@ExceptionHandler(DataAccessException.class)` returning `HttpStatus.SERVICE_UNAVAILABLE`.
+
+**Q56: "What is form login and when is it used?" (2026-04-24)**
+A: Form login is the traditional authentication pattern where an HTML form submits username + password as `application/x-www-form-urlencoded` to a server endpoint. The server validates credentials, creates a session, and sends a session cookie. Used for server-side rendered apps (Thymeleaf, JSP, WordPress, Jenkins). NOT used for REST APIs — those use JWT. Spring Security's `UsernamePasswordAuthenticationFilter` handles this pattern.
+
+**Q57: "What does UsernamePasswordAuthenticationFilter do and when does it activate?" (2026-04-24)**
+A: It intercepts POST requests to `/login` (configurable), extracts username/password from form parameters, creates an unauthenticated token, and delegates to `AuthenticationManager` → `DaoAuthenticationProvider` → `UserDetailsService.loadUserByUsername()` → `PasswordEncoder.matches()`. On success: authenticated token stored in SecurityContext + session created. On failure: `AuthenticationException` thrown. In a JWT API, it never activates because no request matches its criteria — it's just a position marker in the filter chain.
+
+**Q58: "How does FilterChainProxy find your SecurityFilterChain bean?" (2026-04-24)**
+A: Spring Boot auto-configures `DelegatingFilterProxy` (a Servlet filter) that delegates to a Spring bean named `"springSecurityFilterChain"` — which is `FilterChainProxy`. During context startup, Spring collects all `SecurityFilterChain` beans (returned by `httpSecurity.build()`) and hands them to `FilterChainProxy`. At request time, `FilterChainProxy` iterates the list, calls `chain.matches(request)` on each, and the first match wins. If you have multiple chains, `@Order` controls priority.
+
+**Q59: "What is the relationship between DelegatingFilterProxy and DispatcherServlet?" (2026-04-24)**
+A: They are siblings, not parent-child. Both live in the Servlet container (Tomcat). `DelegatingFilterProxy` is a Servlet filter — it runs BEFORE any servlet. `DispatcherServlet` is a Servlet — it runs AFTER all filters pass. Filters and Servlets are separate concepts from the Java Servlet spec (1997). Security (filters) runs before business logic (servlet) by design. `DelegatingFilterProxy` bridges Tomcat's filter world to Spring's bean world; `DispatcherServlet` bridges Tomcat's servlet world to Spring's MVC world.
+
+**Q60: "How do exceptions from a service without custom exception handling reach the GlobalExceptionHandler?" (2026-04-24)**
+A: Infrastructure exceptions (database down → `DataAccessException`, constraint violation → `DataIntegrityViolationException`) are unchecked `RuntimeException` subclasses thrown by Spring Data. They propagate from service → controller → `DispatcherServlet`. The servlet looks for matching `@ExceptionHandler` in `@RestControllerAdvice`. No specific handler match → falls through to `@ExceptionHandler(Exception.class)` (catch-all) → returns 500. This is correct — database failures are unexpected server errors. Custom exceptions are for predictable business rule violations (duplicate email, invalid password), not infrastructure failures.
+
+**46. Role-Based Access Control (RBAC) in Spring Security (2026-04-24)**
+
+History: RBAC as a formal model was defined by NIST in 1992 (Ferraiolo & Kuhn). In Spring Security 1.x (2004), all authorization was URL-based in XML. Method-level `@Secured` came in 2.0 (2008). `@PreAuthorize` with SpEL came in 3.0 (2009). `@EnableMethodSecurity` replaced `@EnableGlobalMethodSecurity` in 5.6 (2022).
+
+Two complementary approaches:
+- **URL-based** (in SecurityFilterChain): coarse-grained, path-prefix-level rules. `requestMatchers("/api/admin/**").hasRole("ADMIN")`. Evaluated by `AuthorizationFilter` in the filter chain.
+- **Method-level** (`@PreAuthorize`): fine-grained, per-method rules. `@PreAuthorize("hasRole('ADMIN')")`. Evaluated by Spring AOP proxy wrapping the bean. Requires `@EnableMethodSecurity` on a `@Configuration` class.
+
+Both work together — URL rules filter first, method rules filter second. Use URL-based for entire path prefixes, method-level for specific operations and ownership checks.
+
+**Matcher ordering matters**: Spring evaluates top-to-bottom, first match wins. Most specific rules first (`/api/admin/**`), most general last (`anyRequest()`). A misplaced `anyRequest().authenticated()` before specific rules would shadow them.
+
+**47. @EnableMethodSecurity vs @EnableGlobalMethodSecurity (2026-04-24)**
+
+- `@EnableGlobalMethodSecurity(prePostEnabled = true)` — deprecated since Spring Security 5.6 (2022)
+- `@EnableMethodSecurity` — the replacement. Enables `@PreAuthorize` and `@PostAuthorize` by default (no `prePostEnabled = true` needed)
+- Also supports `@Secured` (disabled by default, enable with `@EnableMethodSecurity(securedEnabled = true)`)
+- Must be on a `@Configuration` class — typically `SecurityConfig`
+
+**48. hasRole() vs hasAuthority() (2026-04-24)**
+
+- `hasRole("ADMIN")` automatically prepends `"ROLE_"` → checks for authority `"ROLE_ADMIN"`
+- `hasAuthority("ROLE_ADMIN")` checks the exact string — no auto-prefix
+- Both work. `hasRole()` is more readable and the convention
+- `hasAnyRole("SELLER", "ADMIN")` — matches if user has ANY of the listed roles
+- In the JWT filter, authorities are stored as `"ROLE_CUSTOMER"` → `hasRole("CUSTOMER")` matches
+
+**49. @PreAuthorize SpEL Expressions (2026-04-24)**
+
+- `hasRole('ADMIN')` — single role check
+- `hasAnyRole('SELLER', 'ADMIN')` — any of these roles
+- `isAuthenticated()` — any logged-in user
+- `#userId == authentication.principal` — ownership check (method parameter via `#`)
+- `@PreAuthorize` is evaluated BEFORE the method runs; `@PostAuthorize` evaluates AFTER (can check return value)
+- SpEL annotations are compiled strings — can't call Java enums/methods inside them without custom evaluation context
+
+**50. Authorization Failure Responses (2026-04-24)**
+
+- No token / invalid token → `AuthenticationEntryPoint` → 401 Unauthorized (or 403 if not customized)
+- Valid token but wrong role → `AccessDeniedHandler` → 403 Forbidden
+- `@PreAuthorize` failure → throws `AccessDeniedException` → `AccessDeniedHandler` → 403
+- URL-based rule failure → same `AccessDeniedException` → 403
+
+**Q61: "What are the two approaches to RBAC in Spring Security and when to use each?" (2026-04-24)**
+A: URL-based rules in `SecurityFilterChain` (`requestMatchers().hasRole()`) for coarse-grained path-prefix-level restrictions. Method-level `@PreAuthorize` for fine-grained per-method restrictions, especially ownership checks (`#userId == authentication.principal`). Use both together: URL rules for broad patterns (`/api/admin/**` → ADMIN only), method annotations for specific operations. URL rules are evaluated by `AuthorizationFilter` in the filter chain; `@PreAuthorize` is evaluated by Spring AOP proxies.
+
+**Q62: "What is @EnableMethodSecurity and why was @EnableGlobalMethodSecurity deprecated?" (2026-04-24)**
+A: `@EnableMethodSecurity` (Spring Security 5.6+) enables `@PreAuthorize` and `@PostAuthorize` by default. It replaced `@EnableGlobalMethodSecurity(prePostEnabled = true)` which required explicit flag. The new annotation uses `AuthorizationManager`-based infrastructure (consistent with the rest of Spring Security 6.x) instead of the older `AccessDecisionManager` voting system. Simpler API, better defaults.
+
+**Q63: "What's the difference between hasRole() and hasAuthority()?" (2026-04-24)**
+A: `hasRole("ADMIN")` auto-prepends `"ROLE_"` and checks for `"ROLE_ADMIN"`. `hasAuthority("ROLE_ADMIN")` checks the exact string. Both access the same `GrantedAuthority` list in the `Authentication` object. `hasRole()` is more readable and the convention. The `"ROLE_"` prefix exists because Spring Security (since 1.0, 2004) distinguishes roles (coarse-grained) from authorities (fine-grained) — the prefix identifies which is which.
+
+**Q64: "Why does requestMatcher ordering matter in SecurityFilterChain?" (2026-04-24)**
+A: Spring evaluates matchers top-to-bottom; first match wins. If `anyRequest().authenticated()` appears before `.requestMatchers("/api/admin/**").hasRole("ADMIN")`, the admin rule is never evaluated — every request matches `anyRequest()` first. Rule of thumb: most specific matchers first (exact paths, path+method), then broader patterns, then `anyRequest()` last as the catch-all.
+
+**Q65: "How does @PreAuthorize work internally?" (2026-04-24)**
+A: `@EnableMethodSecurity` registers a Spring AOP `MethodInterceptor`. When a bean with `@PreAuthorize` is created, Spring wraps it in a proxy (CGLIB or JDK dynamic proxy). Before each method call, the interceptor evaluates the SpEL expression against the current `SecurityContext`. If it returns false, `AccessDeniedException` is thrown → `AccessDeniedHandler` → 403. The proxy pattern is the same mechanism Spring uses for `@Transactional` and `@Cacheable`.
+
+**51. Spring's @Transactional vs Jakarta's @Transactional (2026-04-24)**
+
+History: Java EE had `@Transactional` since JTA (Java Transaction API, 1999) — originally `javax.transaction.Transactional`, now `jakarta.transaction.Transactional`. Spring created its own in Spring Framework 1.0 (2004) because the JTA version was designed for Java EE application servers (JBoss, WebLogic) and too limited for standalone apps.
+
+| Feature | Spring (`org.springframework.transaction.annotation`) | Jakarta (`jakarta.transaction`) |
+|---|---|---|
+| `readOnly` | Yes — hints to DB driver | No |
+| `propagation` | 7 options (REQUIRED, REQUIRES_NEW, NESTED, etc.) | 3 options |
+| `isolation` | Yes (READ_COMMITTED, REPEATABLE_READ, etc.) | No |
+| `rollbackFor` | Yes — specify exception classes | Limited |
+| `timeout` | Yes | No |
+| Works without app server | Yes | Originally needed Java EE container |
+
+Rule: In Spring Boot, always use `org.springframework.transaction.annotation.Transactional`. Jakarta's version works (Spring bridges it) but with fewer features. Watch for IDE auto-import picking the wrong one.
+
+**52. When @Transactional Is Needed — Multi-Write Consistency (2026-04-24)**
+
+`refreshToken()` needs `@Transactional` because:
+1. Revoke old token (write)
+2. Generate + save new token (write)
+
+If step 2 fails without `@Transactional`, old token is revoked but new token doesn't exist — user is locked out. With `@Transactional`, step 1 rolls back and old token remains valid.
+
+General rule: if a method does multiple related writes where partial completion leaves inconsistent state, it needs `@Transactional`.
+
+**Q66: "Spring's @Transactional vs Jakarta's @Transactional — which to use?" (2026-04-24)**
+A: Spring's (`org.springframework.transaction.annotation.Transactional`). It has more features: `readOnly`, `isolation`, 7 propagation options, `timeout`, `rollbackFor`. Jakarta's (`jakarta.transaction.Transactional`) was designed for Java EE app servers and has fewer options. Spring bridges Jakarta's annotation internally, so it works, but with reduced control. The most common mistake is IDE auto-importing the wrong one.
 
 ---

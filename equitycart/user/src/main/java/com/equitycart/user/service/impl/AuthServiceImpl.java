@@ -1,5 +1,9 @@
 package com.equitycart.user.service.impl;
 
+import com.equitycart.commons.exception.AccountDisabledException;
+import com.equitycart.commons.exception.AuthenticationException;
+import com.equitycart.commons.exception.DuplicateResourceException;
+import com.equitycart.commons.exception.ResourceNotFoundException;
 import com.equitycart.user.dto.AuthResponse;
 import com.equitycart.user.dto.LoginRequest;
 import com.equitycart.user.dto.RefreshRequest;
@@ -51,14 +55,14 @@ public class AuthServiceImpl implements AuthService {
     @Override
     public AuthResponse register(RegisterRequest request) {
         if(userRepository.existsByEmail(request.email())){
-            throw new RuntimeException("Email already registered");
+            throw new DuplicateResourceException("Email already registered");
         }
         String encodedPassword = passwordEncoder.encode(request.password());
         User user = User.builder().email(request.email()).password(encodedPassword).build();
         User savedUser = userRepository.save(user);
 
         Optional<Role> role = roleRepository.findByName(UserRoles.CUSTOMER.name());
-        if(role.isEmpty()) throw new RuntimeException("Default role CUSTOMER not found");
+        if(role.isEmpty()) throw new ResourceNotFoundException("Default role CUSTOMER not found");
 
         UserRole userRole = UserRole.builder().user(savedUser).role(role.get()).build();
         userRoleRepository.save(userRole);
@@ -73,21 +77,21 @@ public class AuthServiceImpl implements AuthService {
     public AuthResponse login(LoginRequest request) {
         Optional<User> optionalUser = userRepository.findByEmail(request.email());
         if(optionalUser.isEmpty())
-            throw  new RuntimeException("Invalid email or password");
+            throw  new AuthenticationException("Invalid email or password");
 
         User userEntity = optionalUser.get();
 
         if(!passwordEncoder.matches(request.password(), userEntity.getPassword()))
-            throw new RuntimeException("Invalid email or password");
+            throw new AuthenticationException("Invalid email or password");
 
         if(userEntity.isAccountLocked() || !userEntity.isEnabled()){
-            throw new RuntimeException("Account is locked or disabled");
+            throw new AccountDisabledException("Account is locked or disabled");
         }
 
         List<UserRole> userRoles = userRoleRepository.findByUserId(userEntity.getId());
 
         if(userRoles.isEmpty())
-            throw new RuntimeException("User has no assigned roles");
+            throw new ResourceNotFoundException("User has no assigned roles");
 
         List<String> roles = userRoles.stream().map(u -> u.getRole().getName()).toList();
 
@@ -95,15 +99,16 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
+    @Transactional
     public AuthResponse refreshToken(RefreshRequest request) {
         Optional<RefreshToken> optionalRefreshToken = refreshTokenRepository.findByToken(request.refreshToken());
 
-        if(optionalRefreshToken.isEmpty()) throw new RuntimeException("Invalid refresh token");
+        if(optionalRefreshToken.isEmpty()) throw new AuthenticationException("Invalid refresh token");
 
         RefreshToken refreshTokenEntity = optionalRefreshToken.get();
 
         if(refreshTokenEntity.isRevoked() || refreshTokenEntity.getExpiresAt().isBefore(LocalDateTime.now()))
-            throw new RuntimeException("Refresh token has been revoked or expired");
+            throw new AuthenticationException("Refresh token has been revoked or expired");
 
         refreshTokenEntity.setRevoked(true);
         refreshTokenRepository.save(refreshTokenEntity);
@@ -111,7 +116,7 @@ public class AuthServiceImpl implements AuthService {
         List<UserRole> userRoles = userRoleRepository.findByUserId(refreshTokenEntity.getUser().getId());
 
         if(userRoles.isEmpty())
-            throw new RuntimeException("User has no assigned roles");
+            throw new ResourceNotFoundException("User has no assigned roles");
 
         List<String> roles = userRoles.stream().map(u -> u.getRole().getName()).toList();
 

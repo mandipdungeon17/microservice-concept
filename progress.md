@@ -109,16 +109,75 @@
   - Lambda DSL used (non-lambda authorizeHttpRequests() is deprecated)
   - Fixed: missing final on field, old non-lambda DSL, single * wildcard, hardcoded URL instead of anyRequest()
 
-### Implementation Pending (RESUME HERE)
-- [ ] Step 8: Create AuthController (REST endpoints)
-- [ ] Step 7: Create SecurityConfig (public vs protected endpoints)
-- [ ] Step 8: Create AuthController (REST endpoints)
-- [ ] Step 9: Test with Postman/curl
+- [x] Step 8: Create AuthController — COMPLETE (2026-04-20)
+  - @RestController + @RequestMapping("/api/auth")
+  - POST /register → 201 CREATED, POST /login → 200 OK, POST /refresh → 200 OK
+  - Thin controller — delegates to AuthService, no business logic
+  - No try-catch — exceptions will be handled by global @RestControllerAdvice (later)
+  - Fixed: duplicate method names (all named register), duplicate path mapping (/register on two endpoints), removed catch-all error handling
+
+- [x] Step 9: Test the application — COMPLETE (2026-04-21)
+  - Build successful, app starts on port 8080
+  - Fixed: database name case-sensitivity (PostgreSQL is case-sensitive)
+  - Fixed: data.sql not running — needed `spring.sql.init.mode: always` (Spring Boot 2.5+ only runs data.sql for embedded DBs by default)
+  - Fixed: data.sql running before table creation — needed `spring.jpa.defer-datasource-initialization: true`
+  - Fixed: YAML indentation — `defer-datasource-initialization` was nested under `spring.data` instead of `spring.jpa`
+  - All 3 endpoints tested: POST /register (201), POST /login (200), POST /refresh (200)
+  - Verified: multiple active refresh tokens per user is acceptable for e-commerce (multi-device sessions)
+
+- [x] Step 10: JSON-based DataSeeder — COMPLETE (2026-04-21)
+  - CommandLineRunner reads `seedData/roles.json` from classpath
+  - Jackson ObjectMapper deserializes to `List<RoleSeedData>` (record DTO)
+  - Idempotent: checks `existsByName()` before inserting
+  - Injected ObjectMapper (Spring-managed bean, not `new ObjectMapper()`)
+  - Removed `data.sql` approach — DataSeeder replaces it (CommandLineRunner runs after full context load, no ordering tricks needed)
+  - Cleaned up: removed `spring.sql.init.mode` and `defer-datasource-initialization` from YAML
+
+- [x] Step 11: Global exception handler — COMPLETE (2026-04-23)
+  - ErrorResponse record in commons/dto (status, error, message, timestamp)
+  - 4 custom exceptions in commons/exception: ResourceNotFoundException (404), DuplicateResourceException (409), AuthenticationException (401), AccountDisabledException (403)
+  - GlobalExceptionHandler in commons/handler with @RestControllerAdvice — one @ExceptionHandler per exception + catch-all for 500
+  - Fixed: initial attempt put @RestControllerAdvice on exception classes (wrong — exceptions shouldn't handle themselves)
+  - AuthServiceImpl updated: all RuntimeExceptions replaced with specific custom exceptions
+
+- [x] Step 12: Input validation — COMPLETE (2026-04-24)
+  - Bean Validation annotations on DTOs: @NotBlank, @Email, @Size on RegisterRequest/LoginRequest, @NotBlank on RefreshRequest
+  - @Valid added to all controller method parameters
+  - Separate ValidationErrorResponse record with nested FieldError record — clean separation from ErrorResponse
+  - GlobalExceptionHandler catches MethodArgumentNotValidException → 400 with field-level errors
+  - Learned: separate response types for different error shapes (industry standard), List<FieldError> over Map for multiple errors per field
+
+- [x] Step 13: Test protected endpoints — COMPLETE (2026-04-24)
+  - 10 test scenarios: 9 pass, 1 expected (no controller for /api/users/me yet)
+  - Auth endpoints: register (201), login (200), refresh (200), validation (400), duplicate (409), wrong password (401)
+  - Protected endpoints: blocked without token (403), blocked with bogus token (403)
+  - Refresh token rotation verified: revoked token returns 401
+  - Known issue: 403 instead of 401 for unauthenticated — needs custom AuthenticationEntryPoint (future)
+  - Known issue: valid token on non-existent endpoint returns 500 — no controller yet (expected)
+
+- [x] Step 14: Logout API — COMPLETE (2026-04-24)
+  - POST /api/user/logout (protected — requires JWT)
+  - Separate UserController + UserService (not on AuthController — logout is a user action, not auth)
+  - Revokes all active refresh tokens for the user
+  - Void return, no try-catch — exceptions propagate to GlobalExceptionHandler
+  - userId extracted from Authentication principal (set by JwtAuthFilter via ThreadLocal SecurityContext)
+  - Learned: SecurityContextHolder is ThreadLocal (per-thread isolation), addFilterBefore positions in filter chain, DelegatingFilterProxy bridges Servlet ↔ Spring
+
+- [x] Step 15: RBAC on endpoints — COMPLETE (2026-04-24)
+  - @EnableMethodSecurity added to SecurityConfig
+  - URL-based rules: /api/admin/** → ADMIN only, POST /api/products/** → SELLER or ADMIN
+  - Method-level: @PreAuthorize("hasRole('ADMIN')") on test endpoint
+  - Used UserRoles enum in URL rules to avoid hardcoded strings
+  - Correct matcher ordering: most specific first, anyRequest().authenticated() last
+  - Tested: CUSTOMER gets 403 on admin endpoint, ADMIN gets through
+
+### Phase 1 Remaining
+- [ ] Step 16: Unit + Integration tests (Testcontainers) — DEFERRED (will write after Phase 2)
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
-- [ ] Phase 1: User Service & Security (Weeks 2-3) ← CURRENT
-- [ ] Phase 2: Product Catalog & Batch Import (Weeks 4-5)
+- [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
+- [ ] Phase 2: Product Catalog & Batch Import (Weeks 4-5) ← CURRENT
 - [ ] Phase 3: Order Service & Cart (Weeks 6-7)
 - [ ] Phase 4: Market Data - Reactive (Weeks 8-9)
 - [ ] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12)
@@ -138,3 +197,11 @@
 - **2026-04-20**: Step 5 complete — JwtService (JJWT 0.12.6) + wired into AuthService. Fixed 5 issues: hardcoded expiry, extractRoles corruption, validateToken always-true, redundant isTokenExpired, YAML location. Refresh token rotation implemented. All TODO placeholders replaced. Next: JwtAuthFilter.
 - **2026-04-20**: Step 6 complete — JwtAuthFilter (OncePerRequestFilter). Extracts Bearer token, validates, sets SecurityContext. Fixed: null header NPE, @Service→@Component, unauthenticated 2-arg→authenticated 3-arg constructor. Next: SecurityConfig.
 - **2026-04-20**: Step 7 complete — SecurityConfig with SecurityFilterChain bean. CSRF disabled, STATELESS sessions, /api/auth/** public, all else authenticated. Fixed: missing final, non-lambda DSL, single-star wildcard, hardcoded URL. Next: AuthController.
+- **2026-04-20**: Step 8 complete — AuthController with 3 POST endpoints. Thin delegation to AuthService. Fixed: duplicate method names, duplicate path mappings, removed catch-all try-catch. Next: build and test.
+- **2026-04-21**: Step 9 complete — All 3 auth endpoints tested and working. Fixed: DB name case-sensitivity, data.sql not running (needed `sql.init.mode: always`), YAML indentation bug, understood Java field defaults vs DB seed data. Next: JSON-based DataSeeder, then @RestControllerAdvice.
+- **2026-04-21**: Step 10 complete — DataSeeder with CommandLineRunner + Jackson + roles.json. Removed data.sql approach. Learned: CommandLineRunner runs after full context (no ordering issues), inject ObjectMapper don't create it, TypeReference for generic deserialization. Next: @RestControllerAdvice.
+- **2026-04-23**: Step 11 complete — GlobalExceptionHandler with @RestControllerAdvice. 4 custom exceptions + catch-all. Key lesson: exceptions carry error info, handlers decide the response (separation of concerns). Next: input validation.
+- **2026-04-24**: Step 12 complete — Bean Validation on DTOs + @Valid in controller. Separate ValidationErrorResponse with nested FieldError record. Learned: separate response types for different error shapes, List over Map for multiple errors per field, warn not error for validation failures. Next: test protected endpoints.
+- **2026-04-24**: Step 13 complete — 10 curl tests, all auth flows verified. JWT filter blocks unauthenticated requests. Refresh token rotation works. Known: 403 vs 401 needs AuthenticationEntryPoint, valid token on missing endpoint gives 500. Next: Logout API.
+- **2026-04-24**: Step 14 complete — Logout API with separate UserController/UserService. Revokes all active refresh tokens. Learned: SecurityContextHolder is ThreadLocal, filter chain order via addFilterBefore, DelegatingFilterProxy bridges Servlet ↔ Spring. Next: RBAC.
+- **2026-04-24**: Step 15 complete — RBAC with @EnableMethodSecurity + URL-based rules + @PreAuthorize. URL rules use UserRoles enum, correct matcher ordering. Tested CUSTOMER → 403, ADMIN → 200. Learned: form login vs JWT auth, FilterChainProxy registration, DelegatingFilterProxy is sibling to DispatcherServlet (not child), catch-all exception handler flow. Next: Unit + Integration tests.
