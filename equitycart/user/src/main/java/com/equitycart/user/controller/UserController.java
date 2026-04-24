@@ -29,7 +29,7 @@ public class UserController {
     @GetMapping("/admin/test")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<String> adminTest() {
-        return ResponseEntity.ok().build();
+        return ResponseEntity.ok("Admin access granted");
     }
 
 }

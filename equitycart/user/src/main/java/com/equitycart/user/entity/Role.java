@@ -20,7 +20,6 @@ import lombok.Setter;
 @Builder
 public class Role extends BaseEntity {
     @Column(nullable = false, unique = true)
-    @Builder.Default
-    private String name = UserRoles.CUSTOMER.name();
+    private String name;
     private String description;
 }
