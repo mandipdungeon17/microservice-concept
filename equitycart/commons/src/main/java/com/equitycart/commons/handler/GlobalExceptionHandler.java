@@ -68,7 +68,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ValidationErrorResponse handleMethodArgumentNotValidException(MethodArgumentNotValidException ex) {
-        logger.error("An unexpected error occurred: ", ex);
+        logger.warn("An unexpected error occurred: ", ex);
         return new ValidationErrorResponse(
                 HttpStatus.BAD_REQUEST.value(),
                 HttpStatus.BAD_REQUEST.getReasonPhrase(),
@@ -85,7 +85,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public ErrorResponse handleGenericException(Exception ex) {
-        logger.warn("An unexpected error occurred: ", ex);
+        logger.error("An unexpected error occurred: ", ex);
         return new ErrorResponse(
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),
                 HttpStatus.INTERNAL_SERVER_ERROR.getReasonPhrase(),
