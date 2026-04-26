@@ -1,5 +1,5 @@
 rootProject.name = 'equitycart'
-include 'app', 'commons', 'ledger-service', 'market-data-service', 'order-service', 'portfolio-service', 'user-service'
+include 'app', 'commons', 'ledger-service', 'market-data-service', 'order-service', 'portfolio-service', 'user-service', 'product-service'
 project(":app").projectDir = file("app")
 project(":commons").projectDir = file("commons")
 project(":ledger-service").projectDir = file("ledger")
@@ -7,3 +7,4 @@ project(":market-data-service").projectDir = file("market-data")
 project(":order-service").projectDir = file("order")
 project(":portfolio-service").projectDir = file("portfolio")
 project(":user-service").projectDir = file("user")
+project(":product-service").projectDir = file("product")

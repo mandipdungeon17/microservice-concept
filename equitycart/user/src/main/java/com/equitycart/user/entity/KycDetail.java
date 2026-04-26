@@ -24,14 +24,19 @@ import lombok.Setter;
 @NoArgsConstructor
 @Builder
 public class KycDetail extends BaseEntity {
+
     @Column(nullable = false)
     private String documentType;
+
     @Column(unique = true, nullable = false)
     private String documentNumber;
+
     @Enumerated(EnumType.STRING)
     @Builder.Default
     private KycStatus kycStatus = KycStatus.PENDING;
+
     private String rejectionReason;
+
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;

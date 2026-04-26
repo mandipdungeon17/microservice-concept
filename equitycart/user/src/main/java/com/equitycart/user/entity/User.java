@@ -18,11 +18,15 @@ import lombok.Setter;
 @AllArgsConstructor
 @Builder
 public class User extends BaseEntity {
+
     @Column(nullable = false, unique = true)
     private String email;
+
     @Column(nullable = false)
     private String password;
+
     @Builder.Default
     private boolean enabled = true;
+
     private boolean accountLocked;
 }

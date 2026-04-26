@@ -23,11 +23,15 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @Builder
 public class RefreshToken extends BaseEntity {
+
     @Column(unique = true, nullable = false)
     private String token;
+
     @Column(nullable = false)
     private LocalDateTime expiresAt;
+
     private boolean revoked;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;

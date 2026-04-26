@@ -21,19 +21,27 @@ import lombok.Setter;
 @NoArgsConstructor
 @Builder
 public class UserProfile extends BaseEntity {
+
     @Column(nullable = false)
     private String firstName;
+
     @Column(nullable = false)
     private String lastName;
+
     private String address;
+
     @Column(nullable = false)
     private String city;
+
     @Column(nullable = false)
     private String state;
+
     @Column(nullable = false)
     private String zipCode;
+
     @Column(nullable = false, unique = true)
     private String phoneNumber;
+
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;

@@ -23,12 +23,15 @@ import java.math.BigDecimal;
 @NoArgsConstructor
 @Builder
 public class WalletAccount extends BaseEntity {
+
     @Column(precision = 19, scale = 4)
     @Builder.Default
     private BigDecimal cashBalance = BigDecimal.ZERO;
+
     @Column(precision = 19, scale = 4)
     @Builder.Default
     private BigDecimal stockBackBalance = BigDecimal.ZERO;
+
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(name="user_id", nullable = false)
     private User user;

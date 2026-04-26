@@ -8,6 +8,7 @@ dependencies {
     implementation project(':ledger-service')
     implementation project(':market-data-service')
     implementation project(':user-service')
+    implementation project(':product-service')
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
