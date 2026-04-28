@@ -36,7 +36,7 @@ public class BrandTickerMappingController {
     }
 
     @GetMapping("/brand/{brandId}")
-    public ResponseEntity<List<BrandTickerMappingResponse>> getByBrandId(@PathVariable Long brandId) {
+    public ResponseEntity<List<BrandTickerMappingResponse>> getByBrandId(@PathVariable("brandId") Long brandId) {
         List<BrandTickerMappingResponse> brandTickerMappingResponseList =
                 brandTickerMappingService.getByBrandId(brandId);
 

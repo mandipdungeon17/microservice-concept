@@ -1,9 +1,11 @@
 package com.equitycart.product.service.impl;
 
+import com.equitycart.commons.dto.PagedResponse;
 import com.equitycart.commons.exception.DuplicateResourceException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
 import com.equitycart.product.dto.ProductRequest;
 import com.equitycart.product.dto.ProductResponse;
+import com.equitycart.product.dto.ProductSearchRequest;
 import com.equitycart.product.entity.Brand;
 import com.equitycart.product.entity.Category;
 import com.equitycart.product.entity.Product;
@@ -11,7 +13,11 @@ import com.equitycart.product.repository.BrandRepository;
 import com.equitycart.product.repository.CategoryRepository;
 import com.equitycart.product.repository.ProductRepository;
 import com.equitycart.product.service.api.ProductService;
+import com.equitycart.product.specification.ProductSpecification;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -102,6 +108,23 @@ public class ProductServiceImpl implements ProductService {
         product.setActive(false);
 
         productRepository.save(product);
+    }
+
+    @Override
+    public PagedResponse<ProductResponse> searchProduct(ProductSearchRequest request, Pageable pageable) {
+        Specification<Product> spec = Specification.allOf(
+                ProductSpecification.hasName(request.name()),
+                ProductSpecification.hasBrandId(request.brandId()),
+                ProductSpecification.hasCategoryId(request.categoryId()),
+                ProductSpecification.hasMinPrice(request.minPrice()),
+                ProductSpecification.hasMaxPrice(request.maxPrice()),
+                ProductSpecification.isActive(request.active())
+        );
+
+        Page<Product> productPage = productRepository.findAll(spec, pageable);
+        Page<ProductResponse> responsePage = productPage.map(this::toResponse);
+
+        return PagedResponse.from(responsePage);
     }
 
     private ProductResponse toResponse(Product product) {

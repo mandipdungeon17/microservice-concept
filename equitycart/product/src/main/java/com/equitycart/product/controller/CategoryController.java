@@ -33,7 +33,7 @@ public class CategoryController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<CategoryResponse> getCategoryById(@PathVariable Long id) {
+    public ResponseEntity<CategoryResponse> getCategoryById(@PathVariable("id")  Long id) {
         CategoryResponse categoryResponse = categoryService.getCategoryById(id);
 
         return ResponseEntity.ok(categoryResponse);
@@ -47,7 +47,7 @@ public class CategoryController {
     }
 
     @GetMapping("/{parentId}/subcategories")
-    public ResponseEntity<List<CategoryResponse>> getSubCategories(@PathVariable Long parentId) {
+    public ResponseEntity<List<CategoryResponse>> getSubCategories(@PathVariable("parentId")  Long parentId) {
         List<CategoryResponse> categoryResponseList = categoryService.getSubCategories(parentId);
 
         return ResponseEntity.ok(categoryResponseList);

@@ -1,10 +1,13 @@
 package com.equitycart.product.controller;
 
+import com.equitycart.commons.dto.PagedResponse;
 import com.equitycart.product.dto.ProductRequest;
 import com.equitycart.product.dto.ProductResponse;
+import com.equitycart.product.dto.ProductSearchRequest;
 import com.equitycart.product.service.api.ProductService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -33,7 +36,7 @@ public class ProductController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<ProductResponse> getProductById(@PathVariable Long id) {
+    public ResponseEntity<ProductResponse> getProductById(@PathVariable("id") Long id) {
         ProductResponse productResponse = productService.getProductById(id);
 
         return ResponseEntity.ok(productResponse);
@@ -41,7 +44,7 @@ public class ProductController {
 
     @PreAuthorize("hasAnyRole('ADMIN', 'SELLER')")
     @PutMapping("/{id}")
-    public ResponseEntity<ProductResponse> updateProduct(@PathVariable Long id,
+    public ResponseEntity<ProductResponse> updateProduct(@PathVariable("id") Long id,
                                                          @Valid @RequestBody ProductRequest request) {
 
         ProductResponse productResponse = productService.updateProduct(id, request);
@@ -51,9 +54,17 @@ public class ProductController {
 
     @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
-    public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
+    public ResponseEntity<Void> deleteProduct(@PathVariable("id") Long id) {
         productService.deleteProduct(id);
 
         return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
+    }
+
+    @GetMapping
+    public ResponseEntity<PagedResponse<ProductResponse>> searchProducts(
+            ProductSearchRequest request, Pageable pageable) {
+        PagedResponse<ProductResponse> response = productService.searchProduct(request, pageable);
+
+        return ResponseEntity.ok(response);
     }
 }

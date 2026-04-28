@@ -174,10 +174,77 @@
 ### Phase 1 Remaining
 - [ ] Step 16: Unit + Integration tests (Testcontainers) — DEFERRED (will write after Phase 2)
 
+## Phase 2: Product Catalog & Batch Import — IN PROGRESS (started 2026-04-27)
+### Design Completed
+- [x] Entity design: Category (self-referential tree), Brand, BrandTickerMapping, Product
+- [x] Product module structure: controller → service → repository in product-service module
+- [x] Soft delete strategy for products (active flag, not physical delete)
+- [x] Category hierarchy: self-referential @ManyToOne (parent/children) for unlimited nesting
+
+### Implementation Completed
+- [x] Step 1: Create Product module entities — COMPLETE (2026-04-27)
+  - Category: self-referential parent-child with @ManyToOne + @OneToMany, unique name constraint
+  - Brand: name + description + logoUrl, unique name constraint
+  - BrandTickerMapping: maps brand → stock ticker (AAPL, NKE), unique composite (brandId + tickerSymbol)
+  - Product: name, description, sku (unique), price (BigDecimal), stockQuantity, imageUrl, active flag
+  - Product has @ManyToOne to Brand and Category (LAZY fetch)
+  - All entities extend BaseEntity (id, createdAt, updatedAt)
+  - BUILD SUCCESSFUL
+
+- [x] Step 2: Create Repository interfaces — COMPLETE (2026-04-27)
+  - CategoryRepository: findByParentIsNull (top-level), findByParentId (subcategories), existsByName
+  - BrandRepository: findByName, existsByName
+  - BrandTickerMappingRepository: findByBrandId, existsByBrandIdAndTickerSymbol
+  - ProductRepository: findByBrandId, findByCategoryId, findBySku, existsBySku
+  - BUILD SUCCESSFUL
+
+- [x] Step 3: Create DTOs (request/response records) — COMPLETE (2026-04-27)
+  - Request DTOs with Bean Validation: CategoryRequest, BrandRequest, BrandTickerMappingRequest, ProductRequest
+  - Response DTOs: CategoryResponse, BrandResponse, BrandTickerMappingResponse, ProductResponse
+  - ProductResponse includes nested brandName and categoryName (not just IDs)
+  - BrandTickerMappingRequest: @DecimalMin("0.0") + @DecimalMax("100.0") for stockBackPercentage
+  - BUILD SUCCESSFUL
+
+- [x] Step 4: Create Service layer (interface + impl) — COMPLETE (2026-04-27)
+  - CategoryService: create, getById, getTopLevel, getSubcategories
+  - BrandService: create, getById, getAll
+  - BrandTickerMappingService: create, getByBrandId
+  - ProductService: create, getById, update, delete (soft delete — sets active=false)
+  - All services use custom exceptions: ResourceNotFoundException (404), DuplicateResourceException (409)
+  - Product create validates brand and category exist before saving
+  - @Transactional on write operations
+  - BUILD SUCCESSFUL
+
+- [x] Step 5: Create Controllers + Test all APIs — COMPLETE (2026-04-27)
+  - CategoryController: POST /api/categories, GET /api/categories/{id}, GET /api/categories/top-level, GET /api/categories/{id}/subcategories
+  - BrandController: POST /api/brands, GET /api/brands/{id}, GET /api/brands
+  - BrandTickerMappingController: POST /api/brand-ticker-mappings, GET /api/brand-ticker-mappings/brand/{brandId}
+  - ProductController: POST /api/products, GET /api/products/{id}, PUT /api/products/{id}, DELETE /api/products/{id}
+  - POST endpoints secured: ADMIN or SELLER role required
+  - GET endpoints: any authenticated user
+  - Fixed: `-parameters` compiler flag missing in build.gradle — @PathVariable without explicit name failed at runtime
+  - All APIs tested and working (POST, GET, PUT, DELETE, RBAC)
+
+- [x] Step 6: Search/Filter with JPA Specifications + Pagination — COMPLETE (2026-04-28)
+  - ProductRepository extended with JpaSpecificationExecutor<Product> (interface multiple inheritance)
+  - ProductSpecification utility class: 6 static methods returning Specification<Product> (hasName, hasBrandId, hasCategoryId, hasMinPrice, hasMaxPrice, isActive)
+  - Each specification returns Specification.unrestricted() for null params (replaces deprecated Specification.where() null-handling)
+  - ProductSearchRequest record: all-optional filter fields (name, brandId, categoryId, minPrice, maxPrice, active)
+  - PagedResponse<T> generic record in commons: reusable paginated response wrapper with static factory from(Page<T>)
+  - Specification.allOf() composes all filters with AND — null-safe via unrestricted()
+  - Pageable auto-resolved from query params (page, size, sort) by Spring's PageableHandlerMethodArgumentResolver
+  - GET /api/products with query params: search, filter, sort, paginate — all tested and working
+  - Fixed: isActive specification missing null check — caused empty results when active param not passed
+  - `-parameters` compiler flag moved to root build.gradle subprojects block (applies to all modules)
+
+### Phase 2 Remaining
+- [ ] Step 7: Batch import (Spring Batch or bulk insert)
+- [ ] Step 8: Unit + Integration tests
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
-- [ ] Phase 2: Product Catalog & Batch Import (Weeks 4-5) ← CURRENT
+- [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) ← CURRENT
 - [ ] Phase 3: Order Service & Cart (Weeks 6-7)
 - [ ] Phase 4: Market Data - Reactive (Weeks 8-9)
 - [ ] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12)
@@ -186,6 +253,9 @@
 - [ ] Phase 8: Security Hardening (Weeks 19-20)
 - [ ] Phase 9: Observability (Weeks 21-22)
 - [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
+
+### Known Issues
+- 403 instead of 401 for unauthenticated requests — needs custom AuthenticationEntryPoint (future)
 
 ## Session Log
 - **2025-04-07**: Project conceived, domain finalized (Hybrid), roadmap created
@@ -205,3 +275,5 @@
 - **2026-04-24**: Step 13 complete — 10 curl tests, all auth flows verified. JWT filter blocks unauthenticated requests. Refresh token rotation works. Known: 403 vs 401 needs AuthenticationEntryPoint, valid token on missing endpoint gives 500. Next: Logout API.
 - **2026-04-24**: Step 14 complete — Logout API with separate UserController/UserService. Revokes all active refresh tokens. Learned: SecurityContextHolder is ThreadLocal, filter chain order via addFilterBefore, DelegatingFilterProxy bridges Servlet ↔ Spring. Next: RBAC.
 - **2026-04-24**: Step 15 complete — RBAC with @EnableMethodSecurity + URL-based rules + @PreAuthorize. URL rules use UserRoles enum, correct matcher ordering. Tested CUSTOMER → 403, ADMIN → 200. Learned: form login vs JWT auth, FilterChainProxy registration, DelegatingFilterProxy is sibling to DispatcherServlet (not child), catch-all exception handler flow. Next: Unit + Integration tests.
+- **2026-04-27**: Phase 2 started — Product module entities (Category, Brand, BrandTickerMapping, Product), repositories, DTOs, services, controllers all created. Self-referential Category hierarchy, soft delete for products, BigDecimal for price, composite unique constraints. Fixed: `-parameters` compiler flag needed for @PathVariable name resolution in Spring Boot 3. All CRUD APIs tested and working with RBAC. Next: Search/Filter with JPA Specifications + Pagination.
+- **2026-04-28**: Step 6 complete — JPA Specifications + Pagination for product search. ProductSpecification utility (6 composable specs), PagedResponse<T> generic wrapper in commons, Specification.allOf() with unrestricted() for null-safe composition. Fixed: isActive missing null check caused empty results. `-parameters` flag moved to root build.gradle. All search/filter/sort/pagination combos tested and working. Next: Batch Import.

@@ -33,7 +33,7 @@ public class BrandController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<BrandResponse> getBrandById(@PathVariable Long id) {
+    public ResponseEntity<BrandResponse> getBrandById(@PathVariable("id") Long id) {
         BrandResponse brandResponse = brandService.getBrandById(id);
 
         return ResponseEntity.ok(brandResponse);

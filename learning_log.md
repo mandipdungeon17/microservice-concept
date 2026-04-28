@@ -1260,3 +1260,177 @@ General rule: if a method does multiple related writes where partial completion 
 A: Spring's (`org.springframework.transaction.annotation.Transactional`). It has more features: `readOnly`, `isolation`, 7 propagation options, `timeout`, `rollbackFor`. Jakarta's (`jakarta.transaction.Transactional`) was designed for Java EE app servers and has fewer options. Spring bridges Jakarta's annotation internally, so it works, but with reduced control. The most common mistake is IDE auto-importing the wrong one.
 
 ---
+
+## Phase 2: Product Catalog (IN PROGRESS)
+
+### Date: 2026-04-27
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. @PathVariable Name Not Resolved — Missing `-parameters` Compiler Flag (2026-04-27)**
+
+- Problem: All APIs with path variables (e.g., `GET /api/categories/{id}`) threw `IllegalArgumentException: Name for argument of type [long] not specified, and parameter name information not available via reflection`.
+- Root cause: Java's `javac` does not preserve method parameter names in bytecode by default — they get erased to `arg0`, `arg1`, etc. So when you write `@PathVariable long id`, Spring can't match `id` to `{id}` in the URL path because the bytecode only has `arg0`.
+- Fix: Added `-parameters` compiler flag to `build.gradle`:
+  ```groovy
+  tasks.withType(JavaCompile).configureEach {
+      options.compilerArgs.add('-parameters')
+  }
+  ```
+- Alternative: Explicitly name each `@PathVariable("id") long id` — works without the compiler flag.
+- History: Before Java 8 (2014), parameter names were ALWAYS erased. Java 8 introduced `-parameters` as an opt-in flag. Spring Boot 2.x auto-configured this via the Gradle plugin. Spring Boot 3.x stopped auto-configuring it — you must set it yourself. This caught many people upgrading from Boot 2 to Boot 3.
+- Why off by default: (1) Increases `.class` file size, (2) Exposes parameter names in decompiled code (security/obfuscation concern), (3) Backward compatibility — changing `javac` default output would break tooling. It's a Java platform decision, not a Spring one.
+
+**2. isActive Specification Missing Null Check — Empty Results (2026-04-28)**
+
+- Problem: `GET /api/products?brandId=1` returned empty results even though products existed for that brand.
+- Root cause: The `isActive(Boolean active)` specification did NOT check for null — unlike all other spec methods. When `active` was not passed as a query param, `request.active()` was `null`, producing `cb.equal(root.get("active"), null)` which in SQL becomes `WHERE active = NULL` — always false (SQL uses `IS NULL`, not `= NULL`).
+- Fix: Added null check to return `Specification.unrestricted()` when active is null, consistent with all other specification methods.
+- Lesson: Every optional filter spec method must handle null. Missing one causes silent empty results — no error, just no data. Particularly tricky with `Boolean` (wrapper) vs `boolean` (primitive) — wrapper defaults to null, primitive defaults to false.
+
+**3. `-parameters` Flag Must Be in Root build.gradle for Multi-Module Projects (2026-04-28)**
+
+- Problem: Added `-parameters` to `app/build.gradle` but `ProductSearchRequest` (in product module) still couldn't bind query params.
+- Root cause: Each Gradle module has its own `compileJava` task. The flag in `app/build.gradle` only affects the app module's compilation. The product module compiles with its own `product/build.gradle`.
+- Fix: Moved the flag to root `build.gradle` inside the `subprojects` block — applies to all modules.
+- Lesson: In multi-module Gradle projects, compiler options in one module don't propagate to others. Project-wide settings go in `subprojects {}` in the root.
+
+---
+
+### Core Concepts Learned
+
+**1. Self-Referential Entity — Category Tree (2026-04-27)**
+
+- A category can have a parent category and many child categories — infinite nesting using a single table.
+- Implementation: `@ManyToOne` to itself for `parent` + `@OneToMany(mappedBy = "parent")` for `children`.
+- `findByParentIsNull()` returns top-level categories (roots of the tree).
+- `findByParentId(Long parentId)` returns immediate children of a category.
+- History: The "adjacency list" pattern (storing parentId) is the simplest hierarchical data model, used since the earliest relational databases (1970s). Alternatives for deeper queries: nested sets (Joe Celko, 1996), materialized paths, closure tables. Adjacency list is sufficient when you only need parent/children, not "all descendants."
+
+**2. Soft Delete vs Hard Delete (2026-04-27)**
+
+- Hard delete: `DELETE FROM products WHERE id = 1` — row is gone permanently.
+- Soft delete: `UPDATE products SET active = false WHERE id = 1` — row stays, marked inactive.
+- Why soft delete for products: (1) Orders reference products — hard delete breaks foreign key integrity, (2) Analytics/reporting needs historical data, (3) Undo/restore is trivial, (4) Audit trail preserved.
+- Implementation: `private boolean active = true` on Product entity + `@Builder.Default`. Delete endpoint calls `product.setActive(false)` + save.
+- Trade-off: soft-deleted rows accumulate — need periodic archival or filtered queries (`WHERE active = true`).
+- History: Soft delete became standard practice in the 2000s as data warehousing and compliance requirements grew. GDPR (2018) complicated this — "right to be deleted" may require actual deletion or anonymization, not just a flag.
+
+**3. Composite Unique Constraints (2026-04-27)**
+
+- `@Table(uniqueConstraints = @UniqueConstraint(columnNames = {"brand_id", "ticker_symbol"}))` — the combination must be unique, not each column individually.
+- Use case: one brand can have multiple ticker mappings (Apple → AAPL on NASDAQ, Apple → AAPL on LSE), but the same brand+ticker pair shouldn't be duplicated.
+- `existsByBrandIdAndTickerSymbol()` in the repository checks for duplicates before insert.
+
+**4. Entity-to-DTO Mapping in Service Layer (2026-04-27)**
+
+- Service methods accept request DTOs and return response DTOs — never expose entities to controllers.
+- Why: (1) Entities have JPA proxies, lazy-loading traps, circular references that break serialization, (2) Response shape can differ from entity shape (e.g., `brandName` in ProductResponse instead of entire Brand object), (3) API contract is decoupled from database schema.
+- Mapping done manually with static factory methods or constructor calls in the service — no need for MapStruct or ModelMapper at this scale.
+
+**5. @ManyToOne with FetchType.LAZY on Product (2026-04-27)**
+
+- Product has `@ManyToOne(fetch = FetchType.LAZY)` to both Brand and Category.
+- Without LAZY: every time you load a Product, Hibernate also loads the full Brand and Category objects (even if you don't need them).
+- With LAZY: Brand and Category are loaded as Hibernate proxies — only fetched from DB when you actually call `product.getBrand().getName()`.
+- In the service layer, we access `brand.getName()` within the `@Transactional` boundary, so the proxy resolves correctly. Outside the transaction, accessing an unloaded lazy proxy throws `LazyInitializationException`.
+
+**6. BigDecimal for Price Fields (2026-04-27)**
+
+- `private BigDecimal price` with `@Column(precision = 10, scale = 2)` — stores up to 99,999,999.99.
+- `@DecimalMin("0.01")` on the DTO ensures positive prices.
+- Why not `double`: `0.1 + 0.2 = 0.30000000000000004` in IEEE 754 floating point. Financial systems need exact decimal arithmetic. BigDecimal stores as scaled integers internally.
+- Already covered in Phase 1 for WalletAccount — same principle applied to product pricing.
+
+**7. @Builder.Default for Active Flag (2026-04-27)**
+
+- `@Builder.Default private boolean active = true` — ensures products are active by default when created via Lombok builder.
+- Without `@Builder.Default`: Lombok's `@Builder` ignores field initializers and sets `active = false` (Java's zero-value for boolean).
+- Already learned in Phase 1 — reapplied here for Product entity.
+
+**8. JPA Specification Pattern — Composable Dynamic Queries (2026-04-28)**
+
+- `Specification<T>` is a functional interface (Spring Data JPA) with one method: `Predicate toPredicate(Root<T>, CriteriaQuery<?>, CriteriaBuilder)`.
+- Each specification encapsulates ONE filter condition. You compose them: `Specification.allOf(spec1, spec2, spec3)` → AND combination.
+- `Root<T>` represents the entity — access fields via `root.get("name")`, navigate relationships via `root.get("brand").get("id")`.
+- `CriteriaBuilder` is the factory for predicates: `cb.equal()`, `cb.like()`, `cb.greaterThanOrEqualTo()`, `cb.lower()`.
+- History: The Specification pattern comes from Eric Evans' "Domain-Driven Design" (2003, Chapter 9) — business rules as composable, reusable predicate objects. Spring Data JPA married this concept to JPA's Criteria API (JPA 2.0, 2009), which was powerful but verbose. Specifications give DDD composability with Criteria type-safety.
+- The lambda `(root, query, cb) -> cb.like(...)` IS the implementation of `toPredicate()` — Java wraps the lambda into a `Specification` object (functional interface behavior).
+
+**9. Specification.allOf() and Specification.unrestricted() (2026-04-28)**
+
+- `Specification.where()` was the original way to start a spec chain — deprecated in Spring Data JPA 3.4+ (marked for removal).
+- Replacement: `Specification.allOf(spec1, spec2, ...)` — ANDs all specs together. But unlike `where()`, it does NOT handle null specs.
+- `Specification.unrestricted()` (added in same version) — returns a spec whose `toPredicate()` returns null, meaning "no condition." Use it instead of returning `null` from spec methods.
+- Pattern: each spec method returns `Specification.unrestricted()` when the filter param is null, otherwise returns the actual predicate.
+
+**10. JpaSpecificationExecutor — Interface Multiple Inheritance (2026-04-28)**
+
+- `ProductRepository extends JpaRepository<Product, Long>, JpaSpecificationExecutor<Product>` — an interface extending two interfaces.
+- Java allows multiple interface inheritance (no state conflicts). Class extending multiple classes is forbidden (diamond problem, avoided since Java 1.0).
+- Java 8 default methods reintroduced a mild diamond problem — if two interfaces have the same default method, the implementing class must override to resolve. Compile-time enforced.
+- `JpaSpecificationExecutor` adds `findAll(Specification<T>, Pageable)` — combine dynamic filters with pagination in a single query.
+
+**11. Spring Data Pagination — Page<T>, Pageable, PagedResponse (2026-04-28)**
+
+- `Pageable` — Spring Data abstraction for pagination params (page number, size, sort). Auto-resolved from query params (`?page=0&size=10&sort=name,asc`) by `PageableHandlerMethodArgumentResolver` (auto-configured since Spring Data 1.6, 2013).
+- `Page<T>` — result container with content + metadata (totalElements, totalPages, isLast). Runs an extra COUNT query.
+- `Slice<T>` — lighter alternative, only knows if there's a next page (fetches size+1 rows). Use for infinite scroll.
+- `PagedResponse<T>` — custom generic DTO wrapping Page metadata for clean API responses. Avoids leaking Spring Data internals to clients.
+
+**12. `-parameters` Flag Scope in Multi-Module Gradle (2026-04-28)**
+
+- Each Gradle module has its own `compileJava` task. Adding `-parameters` to `app/build.gradle` only affects the app module.
+- For project-wide effect, add to root `build.gradle` in the `subprojects` block — applies to all modules.
+- Needed for: `@PathVariable` name resolution, `@ModelAttribute` record binding, `Pageable` resolution from query params.
+
+**13. Lambdas and Functional Interfaces — Deferred Execution (2026-04-28)**
+
+- A functional interface has one abstract method. A lambda IS the implementation of that method — Java wraps it into an object of the interface type.
+- `hasName("iphone")` returns a `Specification<Product>` object (now). `toPredicate()` runs later (when Spring builds the SQL).
+- Two returns: the method returns the Specification object, the lambda (inside) returns the Predicate. Different levels, different times.
+- Same pattern everywhere: `Runnable` (lambda returns void, method returns Runnable), `Comparator` (lambda returns int, method returns Comparator).
+
+---
+
+### Interview Questions Discussed
+
+**Q67: "What is a self-referential entity and when would you use it?" (2026-04-27)**
+A: A self-referential entity has a foreign key pointing to its own table — `@ManyToOne` to itself for the parent, `@OneToMany(mappedBy)` for children. Used for hierarchical data: categories, organizational charts, file systems, comment threads. The "adjacency list" pattern (storing parentId) is the simplest model — works well for parent/children queries. For deep tree queries ("all descendants"), consider alternatives: materialized paths (store full path as string), nested sets (store left/right boundaries), or closure tables (store all ancestor-descendant pairs).
+
+**Q68: "Soft delete vs hard delete — when to use each?" (2026-04-27)**
+A: Soft delete (flag column like `active = false`) when: data is referenced by other tables (orders → products), audit/compliance requires history, business needs undo capability. Hard delete when: data has no references, storage is a concern, or regulations require actual deletion (GDPR "right to erasure"). Soft delete trade-offs: queries must filter by active flag (easy to forget), data accumulates (needs archival strategy), indexes should include the flag for performance.
+
+**Q69: "Why should services return DTOs instead of entities?" (2026-04-27)**
+A: (1) JPA entities have Hibernate proxies that can throw `LazyInitializationException` outside transactions, (2) Circular references (`product → brand → products`) cause infinite JSON serialization, (3) Internal fields (passwords, audit columns) leak to clients, (4) API shape can differ from DB schema — `ProductResponse` includes `brandName` string instead of the whole Brand object. DTOs create a clean contract boundary between your API and your database model.
+
+**Q70: "Why does Spring Boot 3 require the `-parameters` compiler flag for @PathVariable?" (2026-04-27)**
+A: Java erases method parameter names during compilation by default — `long id` becomes `arg0` in bytecode. The `-parameters` flag (Java 8+) preserves them. Spring Boot 2 auto-configured this via the Gradle/Maven plugin. Spring Boot 3 removed that auto-configuration for build transparency. Without the flag, `@PathVariable long id` can't match to `{id}` in the URL — Spring doesn't know the parameter is called `id`. Fix: add `-parameters` to compiler args, or explicitly name it: `@PathVariable("id") long id`.
+
+**Q71: "What is a composite unique constraint and how does it differ from individual unique columns?" (2026-04-27)**
+A: `@UniqueConstraint(columnNames = {"brand_id", "ticker_symbol"})` means the COMBINATION must be unique — brand_id=1 + ticker_symbol=AAPL can only appear once. Individual unique columns (`@Column(unique = true)` on each) means each column must be unique independently — ticker_symbol=AAPL could only appear once across ALL brands. Composite constraints are for "this pair/tuple must be unique" scenarios: user+role, brand+ticker, student+course.
+
+**Q72: "What happens if you access a LAZY-loaded field outside a transaction?" (2026-04-27)**
+A: `LazyInitializationException`. Hibernate creates a proxy object for LAZY fields. When you access the proxy (e.g., `product.getBrand().getName()`), Hibernate issues a SQL query — but it needs an active database session (tied to the `@Transactional` boundary). Outside the transaction, the session is closed. Solutions: (1) Access within the transaction and map to a DTO (best), (2) `JOIN FETCH` in JPQL to eagerly load specific associations, (3) `@EntityGraph` to override fetch strategy per query. Never use `FetchType.EAGER` as a blanket fix — it loads data you don't need on every query.
+
+**Q73: "What is the JPA Specification pattern and how does it differ from derived queries?" (2026-04-28)**
+A: Derived queries (`findByBrandId`) are static — one method per filter combination. If you have 6 optional filters, you'd need 64 method combinations (2^6). Specifications encapsulate each filter as a composable object: `hasName("iphone").and(hasBrandId(1))`. You compose at runtime based on which params the user provides. Specifications use JPA's Criteria API under the hood but wrap it in a clean, reusable API. Use derived queries for simple, fixed queries (80% of cases). Use Specifications when filters are dynamic and combinable.
+
+**Q74: "What are Root, CriteriaBuilder, and CriteriaQuery in JPA Criteria?" (2026-04-28)**
+A: `Root<T>` represents the FROM entity — you access fields via `root.get("name")` and navigate relationships via `root.get("brand").get("id")` (Hibernate is smart enough to use the FK directly without a JOIN). `CriteriaBuilder` is the factory for building WHERE conditions: `cb.equal()`, `cb.like()`, `cb.greaterThanOrEqualTo()`. `CriteriaQuery` represents the overall query (SELECT, GROUP BY, ORDER BY). Together they form JPA 2.0's type-safe query API — an alternative to string-based JPQL.
+
+**Q75: "Page vs Slice — when to use each?" (2026-04-28)**
+A: `Page<T>` runs two queries: one for data (with LIMIT/OFFSET) and one for COUNT (total rows). Use it when you need total page count — pagination UI with numbered pages. `Slice<T>` fetches `size + 1` rows — if it gets the extra row, there's a next page. No COUNT query, so it's faster. Use for infinite scroll or "Load More" buttons where total count doesn't matter. For large tables (millions of rows), COUNT can be expensive — `Slice` avoids that cost.
+
+**Q76: "How does Spring auto-resolve Pageable from query parameters?" (2026-04-28)**
+A: Spring Boot auto-configures `PageableHandlerMethodArgumentResolver` (via `SpringDataWebAutoConfiguration`). When a controller method has a `Pageable` parameter, the resolver reads `page` (0-based, default 0), `size` (default 20), and `sort` (e.g., `sort=price,desc`) from query params and constructs a `PageRequest`. Multiple sort params are supported: `sort=name,asc&sort=price,desc`. No manual parsing needed — just declare `Pageable` as a parameter.
+
+**Q77: "Why use a generic PagedResponse<T> instead of returning Page<T> directly?" (2026-04-28)**
+A: `Page<T>` is a Spring Data interface with internal implementation details — `Pageable` references, `Sort` objects, serialization noise. Returning it directly couples your API to Spring Data's structure. A custom `PagedResponse<T>` gives you a clean, stable contract: just `content`, `page`, `size`, `totalElements`, `totalPages`, `last`. If you switch from Spring Data to another library, the API doesn't change. It's the same DTO-over-entity principle applied to pagination metadata.
+
+**Q78: "What is Specification.unrestricted() and why was Specification.where() deprecated?" (2026-04-28)**
+A: `where(spec)` was the traditional starting point for spec chains — it handled null by treating it as "no condition." Deprecated in Spring Data JPA 3.4+ in favor of `allOf(spec1, spec2, ...)` which ANDs multiple specs at once. But `allOf` doesn't handle null specs — so `Specification.unrestricted()` was added as the explicit "no condition" replacement. It returns a spec whose `toPredicate()` returns null, which JPA Criteria interprets as "match everything." Pattern: return `unrestricted()` when filter param is null, return the actual predicate otherwise.
+
+---
