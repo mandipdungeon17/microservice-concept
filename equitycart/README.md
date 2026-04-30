@@ -12,15 +12,16 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 
 ### Modules
 
-| Module                | Package                     | Purpose                                           |
-| --------------------- | --------------------------- | ------------------------------------------------- |
-| `commons`             | `com.equitycart.commons`    | Shared DTOs, exceptions, constants                |
-| `user-service`        | `com.equitycart.user`       | Authentication, authorization, user profiles, KYC |
-| `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              |
-| `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    |
-| `market-data-service` | `com.equitycart.marketdata` | Real-time prices, brand-ticker mapping, WebFlux   |
-| `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     |
-| `app`                 | `com.equitycart`            | Monolith aggregator (runs all modules as one JAR) |
+| Module                | Package                     | Purpose                                           | Status      |
+| --------------------- | --------------------------- | ------------------------------------------------- | ----------- |
+| `commons`             | `com.equitycart.commons`    | Shared DTOs, exceptions, constants                | Implemented |
+| `user-service`        | `com.equitycart.user`       | Authentication, authorization, user profiles, KYC | Implemented |
+| `product-service`     | `com.equitycart.product`    | Product catalog, brands, categories, batch import | Implemented |
+| `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Planned     |
+| `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Planned     |
+| `market-data-service` | `com.equitycart.marketdata` | Real-time prices, brand-ticker mapping, WebFlux   | Planned     |
+| `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Planned     |
+| `app`                 | `com.equitycart`            | Monolith aggregator (runs all modules as one JAR) | Implemented |
 
 ### Folder Structure
 
@@ -34,11 +35,33 @@ equitycart/
 │   ├── build.gradle
 │   └── src/main/java/com/equitycart/EquityCartApplication.java
 ├── commons/                  (shared library)
+│   └── src/main/java/com/equitycart/commons/
+│       ├── dto/              (ErrorResponse, ValidationErrorResponse, PagedResponse)
+│       ├── entity/           (BaseEntity — auditing fields)
+│       ├── exception/        (ResourceNotFoundException, DuplicateResourceException, etc.)
+│       └── handler/          (GlobalExceptionHandler)
 ├── user/                     (user-service module)
-├── order/                    (order-service module)
-├── portfolio/                (portfolio-service module)
-├── market-data/              (market-data-service module)
-└── ledger/                   (ledger-service module)
+│   └── src/main/java/com/equitycart/user/
+│       ├── controller/       (AuthController, UserController)
+│       ├── dto/              (request/response DTOs)
+│       ├── entity/           (User, Role, UserProfile, KycDetail, RefreshToken, WalletAccount)
+│       ├── enums/            (RoleName, KycStatus)
+│       ├── repository/       (7 JPA repositories)
+│       ├── security/         (JwtAuthFilter, SecurityConfig)
+│       └── service/          (AuthService, JwtService, UserService + impls)
+├── product/                  (product-service module)
+│   └── src/main/java/com/equitycart/product/
+│       ├── batch/            (ProductBatchConfig — Spring Batch job)
+│       ├── controller/       (ProductController, BrandController, CategoryController, etc.)
+│       ├── dto/              (request/response DTOs, ProductCsvRow, ProductSearchRequest)
+│       ├── entity/           (Product, Brand, Category, BrandTickerMapping)
+│       ├── repository/       (4 JPA repositories + JpaSpecificationExecutor)
+│       ├── service/          (ProductService, BrandService, CategoryService + impls)
+│       └── specification/    (ProductSpecification — dynamic query builder)
+├── order/                    (order-service module — planned)
+├── portfolio/                (portfolio-service module — planned)
+├── market-data/              (market-data-service module — planned)
+└── ledger/                   (ledger-service module — planned)
 ```
 
 ## Tech Stack
@@ -46,41 +69,98 @@ equitycart/
 | Layer             | Technology                                    |
 | ----------------- | --------------------------------------------- |
 | Language          | Java 21 (LTS)                                 |
-| Framework         | Spring Boot 3.5.8, Spring WebFlux             |
+| Framework         | Spring Boot 3.5.8                             |
+| Batch Processing  | Spring Batch (chunk-oriented CSV import)      |
 | Build             | Gradle 8.14.2 (Groovy DSL)                    |
+| Code Formatting   | Spotless (Google Java Format)                 |
 | SQL Database      | PostgreSQL                                    |
-| NoSQL Database    | MongoDB                                       |
-| Cache             | Redis                                         |
-| Message Broker    | Apache Kafka                                  |
+| NoSQL Database    | MongoDB (planned)                             |
+| Cache             | Redis (planned)                               |
+| Message Broker    | Apache Kafka (planned)                        |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
-| API Gateway       | Spring Cloud Gateway                          |
-| Service Discovery | Netflix Eureka                                |
-| Monitoring        | Prometheus + Grafana                          |
-| Containerization  | Docker + Kubernetes                           |
+| API Gateway       | Spring Cloud Gateway (planned)                |
+| Service Discovery | Netflix Eureka (planned)                      |
+| Monitoring        | Prometheus + Grafana (planned)                |
+| Containerization  | Docker + Kubernetes (planned)                 |
+| API Docs          | SpringDoc OpenAPI (planned)                   |
+| Testing           | JUnit 5, Mockito, Testcontainers (planned)    |
 
-## Key Features
+## Implemented Features
 
-### Consumer-Facing
+### Phase 1 — User Service & Security
 
-- Stock-Back Reward System (fractional shares as discounts)
-- Unified Wealth Account (shopping credits + investment portfolio)
-- Independent Stock Trading (BUY/SELL any supported ticker)
-- Asset Liquidation for Shopping ("Sell to Spend")
-- Vesting Transparency (Pending/Vested status per reward)
-- Brand-Contextual Insights (Company Health score)
+- **User Registration & Login** with JWT (access + refresh tokens)
+- **Role-Based Access Control** (ADMIN, SELLER, CUSTOMER) via `@PreAuthorize`
+- **Spring Security Filter Chain** with stateless session + JWT validation
+- **Refresh Token** rotation and revocation (logout)
+- **KYC Entity** and user profile management
+- **Data Seeder** for initial admin account on startup
+- **Bean Validation** on all request DTOs
+- **Global Exception Handling** with structured error responses (404, 409, 401, 403, 400, 500)
 
-### Technical
+### Phase 2 — Product Catalog & Batch Import
 
-- Brand-to-Ticker Mapping Service
-- Reactive Market Data Wrapper (WebFlux)
-- Equity Calculation Engine
-- Spring Batch Vesting Job (daily)
-- Atomic Transaction Manager (Pay with Stock)
-- Double-Entry Ledger System
-- Event-Driven Order Pipeline (Kafka)
-- Idempotency Logic (request-key deduplication)
+- **Product CRUD** — create, read, update, delete with RBAC (ADMIN/SELLER only for writes)
+- **Brand Management** — CRUD for brands
+- **Category Management** — hierarchical categories with self-referential parent-child
+- **Brand-Ticker Mapping** — links brands to stock market tickers
+- **Product Search & Filter** — dynamic queries via JPA Specifications (name, brand, category, price range, active status)
+- **Pagination** — `PagedResponse<T>` generic wrapper with page metadata
+- **Bulk Product Import** — CSV upload via Spring Batch (chunk size 50, FlatFileItemReader + RepositoryItemWriter)
+- **Javadoc** — documentation on all classes and public methods
+- **Logging** — Log4j2 loggers across all modules
 
-## How to Build
+## API Endpoints
+
+### Authentication
+
+| Method | Endpoint             | Access | Description             |
+| ------ | -------------------- | ------ | ----------------------- |
+| POST   | `/api/auth/register` | Public | Register new user       |
+| POST   | `/api/auth/login`    | Public | Login, returns JWT pair |
+| POST   | `/api/auth/refresh`  | Public | Refresh access token    |
+| POST   | `/api/auth/logout`   | Auth   | Revoke refresh token    |
+
+### Products
+
+| Method | Endpoint               | Access       | Description                   |
+| ------ | ---------------------- | ------------ | ----------------------------- |
+| GET    | `/api/products`        | Auth         | Search/filter with pagination |
+| GET    | `/api/products/{id}`   | Auth         | Get product by ID             |
+| POST   | `/api/products`        | ADMIN/SELLER | Create product                |
+| PUT    | `/api/products/{id}`   | ADMIN/SELLER | Update product                |
+| DELETE | `/api/products/{id}`   | ADMIN        | Delete product                |
+| POST   | `/api/products/import` | ADMIN        | Bulk import from CSV          |
+
+### Brands
+
+| Method | Endpoint           | Access | Description     |
+| ------ | ------------------ | ------ | --------------- |
+| GET    | `/api/brands`      | Auth   | List all brands |
+| GET    | `/api/brands/{id}` | Auth   | Get brand by ID |
+| POST   | `/api/brands`      | ADMIN  | Create brand    |
+| PUT    | `/api/brands/{id}` | ADMIN  | Update brand    |
+| DELETE | `/api/brands/{id}` | ADMIN  | Delete brand    |
+
+### Categories
+
+| Method | Endpoint               | Access | Description         |
+| ------ | ---------------------- | ------ | ------------------- |
+| GET    | `/api/categories`      | Auth   | List all categories |
+| GET    | `/api/categories/{id}` | Auth   | Get category by ID  |
+| POST   | `/api/categories`      | ADMIN  | Create category     |
+| PUT    | `/api/categories/{id}` | ADMIN  | Update category     |
+| DELETE | `/api/categories/{id}` | ADMIN  | Delete category     |
+
+### Brand-Ticker Mappings
+
+| Method | Endpoint                          | Access | Description       |
+| ------ | --------------------------------- | ------ | ----------------- |
+| GET    | `/api/brand-ticker-mappings`      | Auth   | List all mappings |
+| POST   | `/api/brand-ticker-mappings`      | ADMIN  | Create mapping    |
+| DELETE | `/api/brand-ticker-mappings/{id}` | ADMIN  | Delete mapping    |
+
+## How to Build & Run
 
 ```bash
 # Build all modules
@@ -92,23 +172,63 @@ equitycart/
 # Build fat JAR
 ./gradlew :app:bootJar
 # JAR output: app/build/libs/equitycart-exec.jar
+
+# Format code with Spotless
+./gradlew spotlessApply
+
+# Check formatting without fixing
+./gradlew spotlessCheck
 ```
 
 ## Prerequisites
 
 - JDK 21
 - PostgreSQL (running on localhost:5432, database: equitycart)
-- MongoDB (running on localhost:27017)
+
+## Configuration
+
+Key application properties (`app/src/main/resources/application.yml`):
+
+| Property                              | Description                               |
+| ------------------------------------- | ----------------------------------------- |
+| `spring.datasource.url`               | PostgreSQL connection URL                 |
+| `spring.jpa.hibernate.ddl-auto`       | Schema generation strategy (update)       |
+| `jwt.secret`                          | HMAC secret for signing JWT tokens        |
+| `jwt.access-token-expiry`             | Access token TTL in milliseconds          |
+| `jwt.refresh-token-expiry`            | Refresh token TTL in milliseconds         |
+| `spring.batch.jdbc.initialize-schema` | Auto-create Spring Batch metadata tables  |
+| `spring.batch.job.enabled`            | Disable auto-run of batch jobs on startup |
 
 ## Project Documents
 
-- `equitycart-roadmap.md` — Full 10-phase, 26-week development roadmap
-- `progress.md` — Current phase status and next steps
-- `learning_log.md` — Roadblocks, concepts, and interview questions per phase
-- `learning-instructor-agent.md` — Agent system prompt
-- `project-development-prompt.md` — Project vision and roles
+| File                            | Purpose                                           |
+| ------------------------------- | ------------------------------------------------- |
+| `equitycart-roadmap.md`         | Full 10-phase, 20-26 week development roadmap     |
+| `progress.md`                   | Current phase status, steps completed, next steps |
+| `learning_log.md`               | Roadblocks, concepts learned, and interview Q&A   |
+| `learning-instructor-agent.md`  | Agent system prompt and teaching methodology      |
+| `project-development-prompt.md` | Project vision, roles, and requirements           |
 
 ## Current Status
 
-- **Phase 0**: Foundation & Setup — COMPLETE
-- **Phase 1**: User Service & Security — IN PROGRESS (entity design done, implementation next)
+| Phase   | Name                           | Status                                       |
+| ------- | ------------------------------ | -------------------------------------------- |
+| Phase 0 | Foundation & Setup             | COMPLETE                                     |
+| Phase 1 | User Service & Security        | COMPLETE (unit tests deferred)               |
+| Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests & Redis cache deferred) |
+| Phase 3 | Order Service & Cart           | Next                                         |
+
+## Known Issues
+
+- **403 instead of 401** for unauthenticated requests — needs custom `AuthenticationEntryPoint` (planned fix)
+
+## Roadmap Ahead
+
+- **Phase 3**: Order Service & Cart (Cart entity, checkout flow, inventory management, idempotency)
+- **Phase 4**: Market Data Service (WebFlux reactive, external stock API integration)
+- **Phase 5**: Portfolio Service & Stock-Back Engine (holdings, trading, vesting)
+- **Phase 6**: Event-Driven Architecture (Kafka, async order pipeline)
+- **Phase 7**: Microservices Decomposition (Eureka, Gateway, Config Server)
+- **Phase 8**: Security Hardening (OAuth2/Keycloak, rate limiting)
+- **Phase 9**: Observability (Prometheus, Grafana, distributed tracing)
+- **Phase 10**: Advanced Features & Scale (Kubernetes, CI/CD, load testing)
