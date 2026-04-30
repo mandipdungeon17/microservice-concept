@@ -13,6 +13,11 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Stores personal and address information for a {@link User}. Separated from the User entity to
+ * follow the Single Responsibility Principle -- authentication data stays in User while profile
+ * data lives here.
+ */
 @Entity
 @Table(name = "user_profiles")
 @Setter
@@ -22,27 +27,27 @@ import lombok.Setter;
 @Builder
 public class UserProfile extends BaseEntity {
 
-    @Column(nullable = false)
-    private String firstName;
+  @Column(nullable = false)
+  private String firstName;
 
-    @Column(nullable = false)
-    private String lastName;
+  @Column(nullable = false)
+  private String lastName;
 
-    private String address;
+  private String address;
 
-    @Column(nullable = false)
-    private String city;
+  @Column(nullable = false)
+  private String city;
 
-    @Column(nullable = false)
-    private String state;
+  @Column(nullable = false)
+  private String state;
 
-    @Column(nullable = false)
-    private String zipCode;
+  @Column(nullable = false)
+  private String zipCode;
 
-    @Column(nullable = false, unique = true)
-    private String phoneNumber;
+  @Column(nullable = false, unique = true)
+  private String phoneNumber;
 
-    @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id", nullable = false)
-    private User user;
+  @OneToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "user_id", nullable = false)
+  private User user;
 }

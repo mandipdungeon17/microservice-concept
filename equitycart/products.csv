@@ -1,0 +1,6 @@
+name,description,sku,price,stockQuantity,imageUrl,brandId,categoryId
+MacBook Pro 16,M4 Pro chip laptop,AAPL-MBP16-512,2499.99,50,https://example.com/macbook.png,1,1
+iPad Air,Lightweight tablet,AAPL-IPAD-AIR-256,599.99,200,https://example.com/ipad.png,1,1
+AirPods Pro 2,Active noise cancellation,AAPL-APP2,249.99,500,https://example.com/airpods.png,1,1
+Nike Pegasus 41,Daily running shoe,NIKE-PEG41-BLK-42,129.99,300,https://example.com/pegasus.png,2,2
+Nike Dunk Low,Retro basketball shoe,NIKE-DUNK-WHT-43,109.99,150,https://example.com/dunk.png,2,2

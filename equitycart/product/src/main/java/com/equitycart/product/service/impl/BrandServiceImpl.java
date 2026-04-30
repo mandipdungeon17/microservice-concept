@@ -7,54 +7,79 @@ import com.equitycart.product.dto.BrandResponse;
 import com.equitycart.product.entity.Brand;
 import com.equitycart.product.repository.BrandRepository;
 import com.equitycart.product.service.api.BrandService;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
-
+/**
+ * Implementation of {@link BrandService} that handles brand CRUD operations. Validates brand name
+ * uniqueness before creation.
+ */
 @Service
 @RequiredArgsConstructor
 public class BrandServiceImpl implements BrandService {
-    
-    private final BrandRepository brandRepository;
 
-    @Override
-    public BrandResponse createBrand(BrandRequest brandRequest) {
-        if (brandRepository.existsByNameIgnoreCase(brandRequest.name()))
-            throw new DuplicateResourceException("Brand already exists");
+  private static final Logger log = LogManager.getLogger(BrandServiceImpl.class);
 
-        Brand brand = Brand.builder()
-                .name(brandRequest.name())
-                .logoUrl(brandRequest.logoUrl())
-                .description(brandRequest.description())
-                .build();
-        
-        Brand savedBrand = brandRepository.save(brand);
+  private final BrandRepository brandRepository;
 
-        return toResponse(savedBrand);
-    }
+  /** {@inheritDoc} */
+  @Override
+  public BrandResponse createBrand(BrandRequest brandRequest) {
+    log.info("Creating brand with name: {}", brandRequest.name());
+    if (brandRepository.existsByNameIgnoreCase(brandRequest.name()))
+      throw new DuplicateResourceException("Brand already exists");
 
-    @Override
-    public BrandResponse getBrandById(Long brandId) {
-        Brand brand = brandRepository.findById(brandId)
-                .orElseThrow(() -> new ResourceNotFoundException("Brand not found with id: " + brandId));
+    Brand brand =
+        Brand.builder()
+            .name(brandRequest.name())
+            .logoUrl(brandRequest.logoUrl())
+            .description(brandRequest.description())
+            .build();
 
-        return toResponse(brand);
-    }
+    Brand savedBrand = brandRepository.save(brand);
+    log.info("Brand created successfully with id: {}", savedBrand.getId());
 
-    @Override
-    public List<BrandResponse> getAllBrands() {
-        List<Brand> brandList = brandRepository.findAll();
+    return toResponse(savedBrand);
+  }
 
-        return brandList.stream().map(this::toResponse).toList();
-    }
+  /** {@inheritDoc} */
+  @Override
+  public BrandResponse getBrandById(Long brandId) {
+    log.debug("Fetching brand by id: {}", brandId);
+    Brand brand =
+        brandRepository
+            .findById(brandId)
+            .orElseThrow(
+                () -> new ResourceNotFoundException("Brand not found with id: " + brandId));
 
-    private BrandResponse toResponse(Brand brand) {
-        return new BrandResponse(
-                brand.getId(),
-                brand.getName(),
-                brand.getDescription(),
-                brand.getLogoUrl(),
-                brand.isActive());
-    }
+    return toResponse(brand);
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public List<BrandResponse> getAllBrands() {
+    log.debug("Fetching all brands");
+    List<Brand> brandList = brandRepository.findAll();
+    log.info("Retrieved {} brands", brandList.size());
+
+    return brandList.stream().map(this::toResponse).toList();
+  }
+
+  /**
+   * Converts a {@link Brand} entity to a {@link BrandResponse} DTO.
+   *
+   * @param brand the brand entity
+   * @return the brand response DTO
+   */
+  private BrandResponse toResponse(Brand brand) {
+    return new BrandResponse(
+        brand.getId(),
+        brand.getName(),
+        brand.getDescription(),
+        brand.getLogoUrl(),
+        brand.isActive());
+  }
 }

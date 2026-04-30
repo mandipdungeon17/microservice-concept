@@ -7,6 +7,8 @@ import com.equitycart.product.dto.ProductSearchRequest;
 import com.equitycart.product.service.api.ProductService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,51 +22,91 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/** REST controller for product CRUD and search operations. Base path: {@code /api/products} */
 @RestController
 @RequestMapping("/api/products")
 @RequiredArgsConstructor
 public class ProductController {
 
-    private final ProductService productService;
+  private static final Logger log = LogManager.getLogger(ProductController.class);
 
-    @PreAuthorize("hasAnyRole('ADMIN', 'SELLER')")
-    @PostMapping
-    public ResponseEntity<ProductResponse> createProduct(@Valid @RequestBody ProductRequest request) {
-        ProductResponse productResponse = productService.createProduct(request);
+  private final ProductService productService;
 
-        return ResponseEntity.status(HttpStatus.CREATED).body(productResponse);
-    }
+  /**
+   * Creates a new product. Restricted to ADMIN and SELLER roles.
+   *
+   * @param request validated product request body
+   * @return the created product with HTTP 201 status
+   */
+  @PreAuthorize("hasAnyRole('ADMIN', 'SELLER')")
+  @PostMapping
+  public ResponseEntity<ProductResponse> createProduct(@Valid @RequestBody ProductRequest request) {
+    log.info("POST /api/products - SKU: {}", request.sku());
+    ProductResponse productResponse = productService.createProduct(request);
 
-    @GetMapping("/{id}")
-    public ResponseEntity<ProductResponse> getProductById(@PathVariable("id") Long id) {
-        ProductResponse productResponse = productService.getProductById(id);
+    return ResponseEntity.status(HttpStatus.CREATED).body(productResponse);
+  }
 
-        return ResponseEntity.ok(productResponse);
-    }
+  /**
+   * Retrieves a product by its identifier.
+   *
+   * @param id the product identifier
+   * @return the product response
+   */
+  @GetMapping("/{id}")
+  public ResponseEntity<ProductResponse> getProductById(@PathVariable("id") Long id) {
+    log.info("GET /api/products/{}", id);
+    ProductResponse productResponse = productService.getProductById(id);
 
-    @PreAuthorize("hasAnyRole('ADMIN', 'SELLER')")
-    @PutMapping("/{id}")
-    public ResponseEntity<ProductResponse> updateProduct(@PathVariable("id") Long id,
-                                                         @Valid @RequestBody ProductRequest request) {
+    return ResponseEntity.ok(productResponse);
+  }
 
-        ProductResponse productResponse = productService.updateProduct(id, request);
+  /**
+   * Updates an existing product. Restricted to ADMIN and SELLER roles.
+   *
+   * @param id the product identifier to update
+   * @param request validated product request body
+   * @return the updated product response
+   */
+  @PreAuthorize("hasAnyRole('ADMIN', 'SELLER')")
+  @PutMapping("/{id}")
+  public ResponseEntity<ProductResponse> updateProduct(
+      @PathVariable("id") Long id, @Valid @RequestBody ProductRequest request) {
+    log.info("PUT /api/products/{} - SKU: {}", id, request.sku());
 
-        return ResponseEntity.ok(productResponse);
-    }
+    ProductResponse productResponse = productService.updateProduct(id, request);
 
-    @PreAuthorize("hasRole('ADMIN')")
-    @DeleteMapping("/{id}")
-    public ResponseEntity<Void> deleteProduct(@PathVariable("id") Long id) {
-        productService.deleteProduct(id);
+    return ResponseEntity.ok(productResponse);
+  }
 
-        return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
-    }
+  /**
+   * Soft-deletes a product. Restricted to ADMIN role.
+   *
+   * @param id the product identifier to delete
+   * @return HTTP 204 No Content
+   */
+  @PreAuthorize("hasRole('ADMIN')")
+  @DeleteMapping("/{id}")
+  public ResponseEntity<Void> deleteProduct(@PathVariable("id") Long id) {
+    log.info("DELETE /api/products/{}", id);
+    productService.deleteProduct(id);
 
-    @GetMapping
-    public ResponseEntity<PagedResponse<ProductResponse>> searchProducts(
-            ProductSearchRequest request, Pageable pageable) {
-        PagedResponse<ProductResponse> response = productService.searchProduct(request, pageable);
+    return ResponseEntity.status(HttpStatus.NO_CONTENT).build();
+  }
 
-        return ResponseEntity.ok(response);
-    }
+  /**
+   * Searches products using optional query parameters with pagination.
+   *
+   * @param request the search filter criteria
+   * @param pageable pagination and sorting parameters
+   * @return paged list of matching products
+   */
+  @GetMapping
+  public ResponseEntity<PagedResponse<ProductResponse>> searchProducts(
+      ProductSearchRequest request, Pageable pageable) {
+    log.info("GET /api/products - search with filters");
+    PagedResponse<ProductResponse> response = productService.searchProduct(request, pageable);
+
+    return ResponseEntity.ok(response);
+  }
 }

@@ -1434,3 +1434,93 @@ A: `Page<T>` is a Spring Data interface with internal implementation details —
 A: `where(spec)` was the traditional starting point for spec chains — it handled null by treating it as "no condition." Deprecated in Spring Data JPA 3.4+ in favor of `allOf(spec1, spec2, ...)` which ANDs multiple specs at once. But `allOf` doesn't handle null specs — so `Specification.unrestricted()` was added as the explicit "no condition" replacement. It returns a spec whose `toPredicate()` returns null, which JPA Criteria interprets as "match everything." Pattern: return `unrestricted()` when filter param is null, return the actual predicate otherwise.
 
 ---
+
+### Spring Batch — Concepts Learned (2026-04-29)
+
+**14. Spring Batch Architecture — Job/Step/Reader/Processor/Writer (2026-04-29)**
+
+- History: Spring Batch first released 2007 (SpringSource + Accenture). Before this, Java batch processing was ad-hoc — custom loops, file parsers, manual error handling. IBM had batch frameworks in mainframe COBOL (since 1960s), but Java had no standard. JSR 352 (Java Batch, 2013) standardized it for Java EE, but Spring Batch predated it by 6 years and became the de-facto standard. Spring Batch actually influenced JSR 352's design.
+- Architecture: `Job` → `Step` → (`ItemReader` + `ItemProcessor` + `ItemWriter`)
+- **Job**: the project manager — decides which steps to run, manages overall state (STARTED/COMPLETED/FAILED), handles restartability, provides identity (job name + params = unique key).
+- **Step**: the team lead — opens transactions per chunk, runs the read-process-write loop, tracks metrics (readCount, writeCount, filterCount), handles rollback on failure.
+- **Reader**: reads one item at a time from a source (CSV, DB, API).
+- **Processor**: transforms/validates one item at a time. Returning null skips the item.
+- **Writer**: writes a chunk of items at once (batch insert for performance).
+
+**15. Chunk-Oriented Processing (2026-04-29)**
+
+- The execution order per chunk: read 1 + process 1, read 1 + process 1, ... N times, then write all N at once.
+- It is NOT "read N, then process N" — reader and processor alternate per item. The writer receives the whole chunk.
+- Why: memory efficiency — the raw DTO can be garbage collected as soon as the entity is created. Database writes benefit from batching (one transaction for N inserts).
+- Each chunk = one transaction. If item 47 fails in the writer, all 50 roll back. Previously committed chunks are safe.
+- Chunk size is configurable: `chunk(50, transactionManager)`. Trade-off: larger chunks = fewer transactions = faster, but more memory and bigger rollback scope.
+
+**16. @StepScope — Deferred Bean Creation (2026-04-29)**
+
+- Normal `@Bean` methods run at Spring context startup. But `FlatFileItemReader` needs `filePath` from `JobParameters` — which don't exist until the job is actually launched.
+- `@StepScope` tells Spring: "Don't create this bean now. Create a proxy. Create the real bean when the step actually executes."
+- At that point, `@Value("#{jobParameters['filePath']}")` resolves to the actual file path passed by the controller.
+- Without `@StepScope`: Spring tries to resolve `jobParameters` at startup → null → fails.
+- Similar concept to `@RequestScope` in web apps (create per HTTP request) — `@StepScope` creates per step execution.
+
+**17. FlatFileItemReader — CSV Reading (2026-04-29)**
+
+- Reads a file line-by-line. Each line becomes one DTO object.
+- `FlatFileItemReaderBuilder` (Spring Batch 4.0, 2017) wraps verbose setup: `DelimitedLineTokenizer` (splits by comma) + `BeanWrapperFieldSetMapper` (creates object via setters).
+- `linesToSkip(1)` — skips the CSV header row.
+- `.names(...)` — maps CSV column positions to DTO field names. Position 0 → field "name", position 1 → field "description", etc.
+- `.targetType(ProductCsvRow.class)` — the mapper creates `new ProductCsvRow()` and calls `setName()`, `setPrice()`, etc.
+- Why the DTO must be a mutable class (not record): `BeanWrapperFieldSetMapper` uses no-arg constructor + setters. Records have neither.
+
+**18. RepositoryItemWriter — JPA-Based Writing (2026-04-29)**
+
+- Calls `repository.save()` for each item in the chunk.
+- Configured with the repository bean and method name (`"save"`).
+- The entire chunk is written in one transaction — managed by the Step.
+- Alternative: `JdbcBatchItemWriter` for raw JDBC batch inserts (faster, bypasses JPA).
+
+**19. Spring Batch Metadata Tables (2026-04-29)**
+
+- Spring Batch tracks every job execution in DB tables: `BATCH_JOB_INSTANCE`, `BATCH_JOB_EXECUTION`, `BATCH_STEP_EXECUTION`, `BATCH_JOB_EXECUTION_PARAMS`, etc.
+- Provides: restartability (resume failed jobs), idempotency (prevent re-running completed jobs with same params), audit trail (when, how many rows, what failed).
+- `spring.batch.jdbc.initialize-schema: always` — auto-creates these tables on startup.
+- `spring.batch.job.enabled: false` — prevents auto-running all Job beans on startup. Jobs only run when explicitly launched via `JobLauncher`.
+
+**20. MultipartFile — HTTP File Upload (2026-04-29)**
+
+- `@RequestParam("file") MultipartFile file` — Spring handles multipart form data parsing automatically.
+- `MultipartFile` is Spring's abstraction over the uploaded file — provides bytes, original filename, content type.
+- `file.transferTo(tempFile)` — writes uploaded bytes to disk. Needed because `FlatFileItemReader` requires a file path, not a byte stream.
+- `File.createTempFile("products-", ".csv")` — creates a uniquely named temp file to avoid collisions.
+- History: `MultipartFile` since Spring 1.0 (2004). Servlet 3.0 (2009) added native `Part` support. Spring wraps it for a cleaner API.
+
+**21. JobParameters — Making Each Job Execution Unique (2026-04-29)**
+
+- Spring Batch uses job name + parameters hash as a unique key. Same job + same params = "already executed" → refused.
+- Adding `addLong("startTime", System.currentTimeMillis())` makes each execution unique even with the same CSV.
+- Parameters are stored in `BATCH_JOB_EXECUTION_PARAMS` table — available for audit and restart.
+- `@Value("#{jobParameters['filePath']}")` in `@StepScope` beans resolves parameters at step execution time (SpEL expression).
+
+---
+
+### Interview Questions Discussed (2026-04-29)
+
+**Q79: "What is Spring Batch and when would you use it instead of a REST API?" (2026-04-29)**
+A: Spring Batch is a framework for processing large volumes of data without user interaction — nightly reports, data migrations, bulk imports, ETL pipelines. Use a REST API for real-time, single-item operations (create one product). Use Spring Batch when you need to process thousands/millions of items with transaction management, error handling, skip/retry logic, and execution tracking. Spring Batch provides all this out of the box; building it manually is error-prone.
+
+**Q80: "Explain the chunk-oriented processing model in Spring Batch." (2026-04-29)**
+A: Items are processed in chunks. Within a chunk: read one + process one (alternating, one at a time), then write the entire chunk at once. Each chunk is one transaction — if the writer fails, the chunk rolls back but previously committed chunks are safe. Chunk size is configurable: larger = fewer transactions (faster) but more memory and bigger rollback scope. This model is more efficient than item-by-item (too many transactions) or all-at-once (too much memory, one failure loses everything).
+
+**Q81: "What is @StepScope and why is it needed?" (2026-04-29)**
+A: `@StepScope` defers bean creation from application startup to step execution time. Needed when a bean depends on runtime values like `JobParameters` — which don't exist at startup. Spring creates a proxy at startup and the real bean when the step runs. Without it, `@Value("#{jobParameters['filePath']}")` would resolve to null at startup and fail. Similar to `@RequestScope` (per HTTP request) — `@StepScope` creates a new instance per step execution.
+
+**Q82: "Why does FlatFileItemReader need a mutable class (not a record) for mapping?" (2026-04-29)**
+A: `BeanWrapperFieldSetMapper` (the default mapper) works by: (1) creating an empty object via no-arg constructor, (2) calling setters for each CSV column. Records have neither — no no-arg constructor, no setters, all fields are final. You'd need a custom `FieldSetMapper` implementation to use records. For Spring Batch DTOs, use a regular class with `@Data` + `@NoArgsConstructor`.
+
+**Q83: "How does Spring Batch prevent duplicate job executions?" (2026-04-29)**
+A: Spring Batch uses job name + parameters hash as a unique key stored in `BATCH_JOB_INSTANCE`. If you try to run the same job with identical parameters, it checks the table and refuses ("JobInstanceAlreadyCompleteException"). To allow re-runs, add a varying parameter like `addLong("startTime", System.currentTimeMillis())`. This is also how restartability works — a FAILED job with the same params can be restarted to resume from where it left off.
+
+**Q84: "What are Spring Batch metadata tables and why are they required?" (2026-04-29)**
+A: Tables like `BATCH_JOB_INSTANCE`, `BATCH_JOB_EXECUTION`, `BATCH_STEP_EXECUTION` track every job run — status, start/end time, read/write/skip counts, parameters, exit messages. They enable: restartability (resume from last committed chunk), idempotency (prevent re-running completed jobs), and audit trail (compliance, debugging). Spring Batch won't start without them — configure `spring.batch.jdbc.initialize-schema: always` to auto-create, or manage via Flyway/Liquibase in production.
+
+---

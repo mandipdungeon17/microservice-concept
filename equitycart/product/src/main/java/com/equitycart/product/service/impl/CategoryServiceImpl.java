@@ -7,69 +7,103 @@ import com.equitycart.product.dto.CategoryResponse;
 import com.equitycart.product.entity.Category;
 import com.equitycart.product.repository.CategoryRepository;
 import com.equitycart.product.service.api.CategoryService;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
-
+/**
+ * Implementation of {@link CategoryService} that handles category CRUD operations. Supports
+ * hierarchical parent-child category relationships.
+ */
 @Service
 @RequiredArgsConstructor
 public class CategoryServiceImpl implements CategoryService {
 
-    private final CategoryRepository categoryRepository;
+  private static final Logger log = LogManager.getLogger(CategoryServiceImpl.class);
 
-    @Override
-    public CategoryResponse createCategory(CategoryRequest request) {
-        if(categoryRepository.existsByNameIgnoreCase(request.name()))
-            throw new DuplicateResourceException("Category already exist");
+  private final CategoryRepository categoryRepository;
 
-        Category parent = null;
+  /** {@inheritDoc} */
+  @Override
+  public CategoryResponse createCategory(CategoryRequest request) {
+    log.info("Creating category with name: {}", request.name());
+    if (categoryRepository.existsByNameIgnoreCase(request.name()))
+      throw new DuplicateResourceException("Category already exist");
 
-        if(request.parentId() != null) {
-            parent = categoryRepository.findById(request.parentId()).orElseThrow(
-                    () -> new ResourceNotFoundException("Parent category not found with id: " + request.parentId()));
-        }
+    Category parent = null;
 
-        Category category = Category.builder()
-                .name(request.name())
-                .description(request.description())
-                .parent(parent)
-                .build();
-
-        Category savedCategory = categoryRepository.save(category);
-
-        return toResponse(savedCategory);
+    if (request.parentId() != null) {
+      parent =
+          categoryRepository
+              .findById(request.parentId())
+              .orElseThrow(
+                  () ->
+                      new ResourceNotFoundException(
+                          "Parent category not found with id: " + request.parentId()));
+      log.debug("Resolved parent category id: {}", request.parentId());
     }
 
-    @Override
-    public CategoryResponse getCategoryById(Long categoryId) {
-        Category category = categoryRepository.findById(categoryId).orElseThrow(
+    Category category =
+        Category.builder()
+            .name(request.name())
+            .description(request.description())
+            .parent(parent)
+            .build();
+
+    Category savedCategory = categoryRepository.save(category);
+    log.info("Category created successfully with id: {}", savedCategory.getId());
+
+    return toResponse(savedCategory);
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public CategoryResponse getCategoryById(Long categoryId) {
+    log.debug("Fetching category by id: {}", categoryId);
+    Category category =
+        categoryRepository
+            .findById(categoryId)
+            .orElseThrow(
                 () -> new ResourceNotFoundException("Category not found with id " + categoryId));
 
-        return toResponse(category);
-    }
+    return toResponse(category);
+  }
 
-    @Override
-    public List<CategoryResponse> getTopLevelCategories() {
-        List<Category> categories = categoryRepository.findByParentIsNull();
+  /** {@inheritDoc} */
+  @Override
+  public List<CategoryResponse> getTopLevelCategories() {
+    log.debug("Fetching top-level categories");
+    List<Category> categories = categoryRepository.findByParentIsNull();
+    log.info("Retrieved {} top-level categories", categories.size());
 
-        return categories.stream().map(this::toResponse).toList();
-    }
+    return categories.stream().map(this::toResponse).toList();
+  }
 
-    @Override
-    public List<CategoryResponse> getSubCategories(Long parentCategoryId) {
-        List<Category> categories = categoryRepository.findByParentId(parentCategoryId);
+  /** {@inheritDoc} */
+  @Override
+  public List<CategoryResponse> getSubCategories(Long parentCategoryId) {
+    log.debug("Fetching subcategories for parent id: {}", parentCategoryId);
+    List<Category> categories = categoryRepository.findByParentId(parentCategoryId);
+    log.info("Retrieved {} subcategories for parent id: {}", categories.size(), parentCategoryId);
 
-        return categories.stream().map(this::toResponse).toList();
-    }
+    return categories.stream().map(this::toResponse).toList();
+  }
 
-    private CategoryResponse toResponse(Category category) {
-        return new CategoryResponse(
-                category.getId(),
-                category.getName(),
-                category.getDescription(),
-                category.getParent() == null ? null : category.getParent().getId(),
-                category.getParent() == null ? null : category.getParent().getName(),
-                category.isActive());
-    }
+  /**
+   * Converts a {@link Category} entity to a {@link CategoryResponse} DTO.
+   *
+   * @param category the category entity
+   * @return the category response DTO
+   */
+  private CategoryResponse toResponse(Category category) {
+    return new CategoryResponse(
+        category.getId(),
+        category.getName(),
+        category.getDescription(),
+        category.getParent() == null ? null : category.getParent().getId(),
+        category.getParent() == null ? null : category.getParent().getName(),
+        category.isActive());
+  }
 }

@@ -237,15 +237,27 @@
   - Fixed: isActive specification missing null check — caused empty results when active param not passed
   - `-parameters` compiler flag moved to root build.gradle subprojects block (applies to all modules)
 
+- [x] Step 7: Batch Product Import with Spring Batch (CSV) — COMPLETE (2026-04-29)
+  - Spring Batch dependency added to product build.gradle
+  - ProductCsvRow DTO: mutable class with @Data (not record — FlatFileItemReader needs setters)
+  - ProductBatchConfig: @Configuration with 5 @Bean methods:
+    - FlatFileItemReader<ProductCsvRow>: @StepScope, reads CSV line-by-line, skips header, maps columns to DTO fields
+    - ItemProcessor<ProductCsvRow, Product>: looks up Brand/Category by ID, builds Product entity, returns null to skip invalid rows
+    - RepositoryItemWriter<Product>: writes via productRepository.save()
+    - Step: chunk-oriented (50 items per transaction), wires reader → processor → writer
+    - Job: single-step job named "productImportJob"
+  - ProductImportController: POST /api/products/import, multipart file upload, saves to temp file, launches job via JobLauncher
+  - application.yml: spring.batch.jdbc.initialize-schema=always (metadata tables), spring.batch.job.enabled=false (no auto-run)
+  - Tested: 5 products imported from CSV, verified via search API, RBAC enforced (ADMIN only)
+
 ### Phase 2 Remaining
-- [ ] Step 7: Batch import (Spring Batch or bulk insert)
-- [ ] Step 8: Unit + Integration tests
+- [ ] Step 8: Unit + Integration tests — DEFERRED (will write after Phase 3)
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
-- [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) ← CURRENT
-- [ ] Phase 3: Order Service & Cart (Weeks 6-7)
+- [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) — FUNCTIONAL COMPLETE (tests deferred)
+- [ ] Phase 3: Order Service & Cart (Weeks 6-7) ← NEXT
 - [ ] Phase 4: Market Data - Reactive (Weeks 8-9)
 - [ ] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12)
 - [ ] Phase 6: Event-Driven Architecture (Weeks 13-15)
@@ -277,3 +289,4 @@
 - **2026-04-24**: Step 15 complete — RBAC with @EnableMethodSecurity + URL-based rules + @PreAuthorize. URL rules use UserRoles enum, correct matcher ordering. Tested CUSTOMER → 403, ADMIN → 200. Learned: form login vs JWT auth, FilterChainProxy registration, DelegatingFilterProxy is sibling to DispatcherServlet (not child), catch-all exception handler flow. Next: Unit + Integration tests.
 - **2026-04-27**: Phase 2 started — Product module entities (Category, Brand, BrandTickerMapping, Product), repositories, DTOs, services, controllers all created. Self-referential Category hierarchy, soft delete for products, BigDecimal for price, composite unique constraints. Fixed: `-parameters` compiler flag needed for @PathVariable name resolution in Spring Boot 3. All CRUD APIs tested and working with RBAC. Next: Search/Filter with JPA Specifications + Pagination.
 - **2026-04-28**: Step 6 complete — JPA Specifications + Pagination for product search. ProductSpecification utility (6 composable specs), PagedResponse<T> generic wrapper in commons, Specification.allOf() with unrestricted() for null-safe composition. Fixed: isActive missing null check caused empty results. `-parameters` flag moved to root build.gradle. All search/filter/sort/pagination combos tested and working. Next: Batch Import.
+- **2026-04-29**: Step 7 complete — Spring Batch CSV import. ProductBatchConfig with Job/Step/Reader/Processor/Writer, chunk-oriented processing (50 per transaction). ProductImportController with multipart file upload + JobLauncher. Batch metadata tables auto-created. 5 products imported from CSV, verified via search API. Phase 2 FUNCTIONAL COMPLETE (tests deferred). Next: Phase 3 — Order Service & Cart.

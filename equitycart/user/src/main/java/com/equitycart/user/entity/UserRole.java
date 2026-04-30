@@ -13,21 +13,29 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Join entity that maps the many-to-many relationship between {@link User} and {@link Role}. A
+ * unique constraint prevents duplicate role assignments for the same user.
+ */
 @Entity
-@Table(name = "user_roles",
-        uniqueConstraints = @UniqueConstraint(columnNames = {"user_id", "role_id"}, name = "unique_user_role"))
+@Table(
+    name = "user_roles",
+    uniqueConstraints =
+        @UniqueConstraint(
+            columnNames = {"user_id", "role_id"},
+            name = "unique_user_role"))
 @Setter
 @Getter
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
-public class UserRole extends BaseEntity{
+public class UserRole extends BaseEntity {
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "user_id", nullable = false)
-    private User user;
+  @ManyToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "user_id", nullable = false)
+  private User user;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "role_id", nullable = false)
-    private Role role;
+  @ManyToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "role_id", nullable = false)
+  private Role role;
 }

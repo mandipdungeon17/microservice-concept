@@ -13,6 +13,10 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Represents a product category in the EquityCart catalog. Supports hierarchical categorization via
+ * a self-referencing {@code parent} relationship. Supports soft delete via the {@code active} flag.
+ */
 @Entity
 @Table(name = "categories")
 @Setter
@@ -22,15 +26,14 @@ import lombok.Setter;
 @Builder
 public class Category extends BaseEntity {
 
-    @Column(nullable = false, unique = true)
-    private String name;
+  @Column(nullable = false, unique = true)
+  private String name;
 
-    private String description;
+  private String description;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "parent_id")
-    private Category parent;
+  @ManyToOne(fetch = FetchType.LAZY)
+  @JoinColumn(name = "parent_id")
+  private Category parent;
 
-    @Builder.Default
-    private boolean active = true;
+  @Builder.Default private boolean active = true;
 }

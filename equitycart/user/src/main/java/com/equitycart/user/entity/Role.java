@@ -1,7 +1,6 @@
 package com.equitycart.user.entity;
 
 import com.equitycart.commons.entity.BaseEntity;
-import com.equitycart.user.enums.UserRoles;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
@@ -11,6 +10,11 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Represents an authorization role in the EquityCart system (e.g., CUSTOMER, ADMIN). Roles are
+ * assigned to users through the {@link UserRole} join entity to support a many-to-many
+ * relationship.
+ */
 @Entity
 @Table(name = "roles")
 @Setter
@@ -20,8 +24,8 @@ import lombok.Setter;
 @Builder
 public class Role extends BaseEntity {
 
-    @Column(nullable = false, unique = true)
-    private String name;
+  @Column(nullable = false, unique = true)
+  private String name;
 
-    private String description;
+  private String description;
 }

@@ -10,6 +10,11 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Represents a user in the EquityCart system. Lean authentication entity containing only
+ * credentials and account status. Personal details are separated into {@link UserProfile} for SRP
+ * compliance.
+ */
 @Entity
 @Table(name = "users")
 @Getter
@@ -19,14 +24,13 @@ import lombok.Setter;
 @Builder
 public class User extends BaseEntity {
 
-    @Column(nullable = false, unique = true)
-    private String email;
+  @Column(nullable = false, unique = true)
+  private String email;
 
-    @Column(nullable = false)
-    private String password;
+  @Column(nullable = false)
+  private String password;
 
-    @Builder.Default
-    private boolean enabled = true;
+  @Builder.Default private boolean enabled = true;
 
-    private boolean accountLocked;
+  private boolean accountLocked;
 }

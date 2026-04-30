@@ -7,30 +7,36 @@ import jakarta.persistence.Id;
 import jakarta.persistence.MappedSuperclass;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
+import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
 
-import java.time.LocalDateTime;
-
+/**
+ * Abstract base entity providing common audit fields (id, createdAt, updatedAt) for all JPA
+ * entities via {@link jakarta.persistence.MappedSuperclass}. Lifecycle callbacks auto-populate
+ * timestamps on persist and update.
+ */
 @MappedSuperclass
 @Getter
 @Setter
 public class BaseEntity {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-    @Column(updatable = false)
-    private LocalDateTime createdAt;
-    private LocalDateTime updatedAt;
+  @Id
+  @GeneratedValue(strategy = GenerationType.IDENTITY)
+  private Long id;
 
-    @PrePersist
-    protected void onCreate() {
-        this.createdAt = LocalDateTime.now();
-        this.updatedAt = LocalDateTime.now();
-    }
+  @Column(updatable = false)
+  private LocalDateTime createdAt;
 
-    @PreUpdate
-    protected void onUpdate() {
-        this.updatedAt = LocalDateTime.now();
-    }
+  private LocalDateTime updatedAt;
+
+  @PrePersist
+  protected void onCreate() {
+    this.createdAt = LocalDateTime.now();
+    this.updatedAt = LocalDateTime.now();
+  }
+
+  @PreUpdate
+  protected void onUpdate() {
+    this.updatedAt = LocalDateTime.now();
+  }
 }

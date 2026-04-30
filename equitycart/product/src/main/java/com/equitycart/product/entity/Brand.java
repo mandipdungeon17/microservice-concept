@@ -10,6 +10,10 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+/**
+ * Represents a brand in the EquityCart catalog. Products are associated with a brand via a
+ * many-to-one relationship. Supports soft delete via the {@code active} flag.
+ */
 @Entity
 @Table(name = "brands")
 @Setter
@@ -19,13 +23,12 @@ import lombok.Setter;
 @Builder
 public class Brand extends BaseEntity {
 
-    @Column(nullable = false, unique = true)
-    private String name;
+  @Column(nullable = false, unique = true)
+  private String name;
 
-    private String logoUrl;
+  private String logoUrl;
 
-    private String description;
+  private String description;
 
-    @Builder.Default
-    private boolean active = true;
+  @Builder.Default private boolean active = true;
 }
