@@ -27,6 +27,14 @@ spring:
     mongodb:
       uri: mongodb://localhost:27017/equitycart
 
+    redis:
+      host: localhost
+      port: 6379
+  cache:
+    type: redis
+    redis:
+      time-to-live: 600000   # 10 minutes in milliseconds
+
 
 server:
   port: 8080

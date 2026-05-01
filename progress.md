@@ -250,8 +250,20 @@
   - application.yml: spring.batch.jdbc.initialize-schema=always (metadata tables), spring.batch.job.enabled=false (no auto-run)
   - Tested: 5 products imported from CSV, verified via search API, RBAC enforced (ADMIN only)
 
+- [x] Step 8: Redis Caching for Product Listings — COMPLETE (2026-04-30)
+  - Added spring-boot-starter-data-redis + spring-boot-starter-cache to product build.gradle
+  - Configured Redis connection (localhost:6379) + cache TTL (10 min) in application.yml
+  - RedisCacheConfig: @EnableCaching + RedisCacheManager bean with GenericJackson2JsonRedisSerializer (JSON, not Java serialization)
+  - @Cacheable("product", key="#productId") on getProductById — cache single product
+  - @Cacheable("products", key="#request.toString() + page + size") on searchProduct — cache search results
+  - @CacheEvict("products", allEntries=true) on createProduct — evict stale list cache
+  - @CacheEvict("products") + @CachePut("product") on updateProduct — evict lists, update single cache
+  - @Caching(evict = {@CacheEvict("products"), @CacheEvict("product")}) on deleteProduct — evict from both caches
+  - Tested: cache HIT/MISS via Hibernate SQL logs, verified keys in redis-cli, eviction on writes confirmed
+  - Docker Redis: `docker run -d --name redis -p 6379:6379 redis`
+
 ### Phase 2 Remaining
-- [ ] Step 8: Unit + Integration tests — DEFERRED (will write after Phase 3)
+- [ ] Step 9: Unit + Integration tests — DEFERRED (will write after Phase 3)
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -289,4 +301,5 @@
 - **2026-04-24**: Step 15 complete — RBAC with @EnableMethodSecurity + URL-based rules + @PreAuthorize. URL rules use UserRoles enum, correct matcher ordering. Tested CUSTOMER → 403, ADMIN → 200. Learned: form login vs JWT auth, FilterChainProxy registration, DelegatingFilterProxy is sibling to DispatcherServlet (not child), catch-all exception handler flow. Next: Unit + Integration tests.
 - **2026-04-27**: Phase 2 started — Product module entities (Category, Brand, BrandTickerMapping, Product), repositories, DTOs, services, controllers all created. Self-referential Category hierarchy, soft delete for products, BigDecimal for price, composite unique constraints. Fixed: `-parameters` compiler flag needed for @PathVariable name resolution in Spring Boot 3. All CRUD APIs tested and working with RBAC. Next: Search/Filter with JPA Specifications + Pagination.
 - **2026-04-28**: Step 6 complete — JPA Specifications + Pagination for product search. ProductSpecification utility (6 composable specs), PagedResponse<T> generic wrapper in commons, Specification.allOf() with unrestricted() for null-safe composition. Fixed: isActive missing null check caused empty results. `-parameters` flag moved to root build.gradle. All search/filter/sort/pagination combos tested and working. Next: Batch Import.
-- **2026-04-29**: Step 7 complete — Spring Batch CSV import. ProductBatchConfig with Job/Step/Reader/Processor/Writer, chunk-oriented processing (50 per transaction). ProductImportController with multipart file upload + JobLauncher. Batch metadata tables auto-created. 5 products imported from CSV, verified via search API. Phase 2 FUNCTIONAL COMPLETE (tests deferred). Next: Phase 3 — Order Service & Cart.
+- **2026-04-29**: Step 7 complete — Spring Batch CSV import. ProductBatchConfig with Job/Step/Reader/Processor/Writer, chunk-oriented processing (50 per transaction). ProductImportController with multipart file upload + JobLauncher. Batch metadata tables auto-created. 5 products imported from CSV, verified via search API. Phase 2 FUNCTIONAL COMPLETE (tests deferred). Next: Redis caching.
+- **2026-04-30**: Step 8 complete — Redis caching for product listings. RedisCacheConfig with @EnableCaching + JSON serializer. @Cacheable on reads, @CacheEvict on writes. Verified cache HIT/MISS via SQL logs + redis-cli KEYS. Phase 2 FULLY COMPLETE. Next: Phase 3 — Order Service & Cart.

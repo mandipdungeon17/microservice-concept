@@ -52,6 +52,7 @@ equitycart/
 ├── product/                  (product-service module)
 │   └── src/main/java/com/equitycart/product/
 │       ├── batch/            (ProductBatchConfig — Spring Batch job)
+│       ├── cache/            (RedisCacheConfig — cache manager + serialization)
 │       ├── controller/       (ProductController, BrandController, CategoryController, etc.)
 │       ├── dto/              (request/response DTOs, ProductCsvRow, ProductSearchRequest)
 │       ├── entity/           (Product, Brand, Category, BrandTickerMapping)
@@ -75,7 +76,7 @@ equitycart/
 | Code Formatting   | Spotless (Google Java Format)                 |
 | SQL Database      | PostgreSQL                                    |
 | NoSQL Database    | MongoDB (planned)                             |
-| Cache             | Redis (planned)                               |
+| Cache             | Redis (@Cacheable, TTL-based eviction)        |
 | Message Broker    | Apache Kafka (planned)                        |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
 | API Gateway       | Spring Cloud Gateway (planned)                |
@@ -107,6 +108,7 @@ equitycart/
 - **Product Search & Filter** — dynamic queries via JPA Specifications (name, brand, category, price range, active status)
 - **Pagination** — `PagedResponse<T>` generic wrapper with page metadata
 - **Bulk Product Import** — CSV upload via Spring Batch (chunk size 50, FlatFileItemReader + RepositoryItemWriter)
+- **Redis Caching** — @Cacheable on reads, @CacheEvict on writes, 10-min TTL, JSON serialization
 - **Javadoc** — documentation on all classes and public methods
 - **Logging** — Log4j2 loggers across all modules
 
@@ -184,6 +186,7 @@ equitycart/
 
 - JDK 21
 - PostgreSQL (running on localhost:5432, database: equitycart)
+- Redis (running on localhost:6379 — via Docker: `docker run -d --name redis -p 6379:6379 redis`)
 
 ## Configuration
 
@@ -198,6 +201,10 @@ Key application properties (`app/src/main/resources/application.yml`):
 | `jwt.refresh-token-expiry`            | Refresh token TTL in milliseconds         |
 | `spring.batch.jdbc.initialize-schema` | Auto-create Spring Batch metadata tables  |
 | `spring.batch.job.enabled`            | Disable auto-run of batch jobs on startup |
+| `spring.data.redis.host`              | Redis server hostname (default: localhost)|
+| `spring.data.redis.port`              | Redis server port (default: 6379)         |
+| `spring.cache.type`                   | Cache provider (redis)                    |
+| `spring.cache.redis.time-to-live`     | Default TTL for cache entries (ms)        |
 
 ## Project Documents
 
@@ -215,7 +222,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | ------- | ------------------------------ | -------------------------------------------- |
 | Phase 0 | Foundation & Setup             | COMPLETE                                     |
 | Phase 1 | User Service & Security        | COMPLETE (unit tests deferred)               |
-| Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests & Redis cache deferred) |
+| Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)               |
 | Phase 3 | Order Service & Cart           | Next                                         |
 
 ## Known Issues

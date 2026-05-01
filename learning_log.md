@@ -1524,3 +1524,190 @@ A: Spring Batch uses job name + parameters hash as a unique key stored in `BATCH
 A: Tables like `BATCH_JOB_INSTANCE`, `BATCH_JOB_EXECUTION`, `BATCH_STEP_EXECUTION` track every job run — status, start/end time, read/write/skip counts, parameters, exit messages. They enable: restartability (resume from last committed chunk), idempotency (prevent re-running completed jobs), and audit trail (compliance, debugging). Spring Batch won't start without them — configure `spring.batch.jdbc.initialize-schema: always` to auto-create, or manage via Flyway/Liquibase in production.
 
 ---
+
+### Redis Caching — Concepts Learned (2026-04-30)
+
+**22. Cache-Aside Pattern (2026-04-30)**
+
+- The most common caching pattern: application checks cache first, on miss queries DB, then stores result in cache for future reads.
+- Flow: Client → Service → Check Redis → HIT? return cached → MISS? query DB → store in Redis → return.
+- Also called "lazy-loading" — cache is populated on demand, not pre-warmed.
+- History: The cache-aside pattern predates Redis — used with Memcached (Brad Fitzpatrick, 2003, LiveJournal), local HashMaps, and even CPU L1/L2 caches (same principle since 1960s). Redis (Salvatore Sanfilippo, 2009) became the dominant choice because it's in-memory (microsecond reads), supports TTL natively, works across multiple app instances (unlike per-JVM HashMaps), and has rich data structures.
+
+**23. Spring Cache Abstraction — @Cacheable, @CacheEvict, @CachePut (2026-04-30)**
+
+- Spring 3.1 (2011) introduced declarative caching via annotations — no need to write cache-get/cache-put logic manually.
+- `@Cacheable(value, key)`: before method executes, check cache. HIT → return cached, skip method. MISS → run method, store result, return.
+- `@CacheEvict(value, key/allEntries)`: after method executes, remove entries from cache. Used on write operations to invalidate stale data.
+- `@CachePut(value, key)`: always runs the method AND stores result in cache. Used when you want to update the cache with fresh data (e.g., after an update).
+- `@Caching(evict={...}, put={...})`: combine multiple cache operations on one method.
+- Spring creates a proxy around the service class — cache logic lives in the proxy, not your code (AOP-based). Important: internal method calls (this.method()) bypass the proxy and skip caching.
+
+**24. Redis Serialization — GenericJackson2JsonRedisSerializer (2026-04-30)**
+
+- Redis stores bytes — Java objects must be serialized before storing and deserialized when reading.
+- Three options: (1) `JdkSerializationRedisSerializer` (default) — uses `java.io.Serializable`, produces unreadable bytes, breaks on class changes. (2) `Jackson2JsonRedisSerializer` — needs explicit type per cache, poor generics support. (3) `GenericJackson2JsonRedisSerializer` — stores `@class` type info inside JSON, handles generics like `PagedResponse<ProductResponse>`, human-readable in redis-cli.
+- JSON serialization is preferred: debuggable, language-agnostic, no Java class version coupling.
+- Trade-off: slightly larger storage than binary, but worth it for observability.
+
+**25. Cache Invalidation Strategy (2026-04-30)**
+
+- "There are only two hard things in Computer Science: cache invalidation and naming things." — Phil Karlton (Netscape, 1996).
+- For list/search caches (`products`): must evict `allEntries = true` on any write — impossible to know which search results a new/updated product affects.
+- For single-item caches (`product`): can evict by key on delete, or update via `@CachePut` on update.
+- TTL as safety net: even if eviction logic has a bug, entries expire after 10 minutes — bounded staleness.
+- Never cache data that must be real-time (e.g., stock prices, inventory during flash sales).
+
+**26. TTL (Time-To-Live) — Bounded Staleness (2026-04-30)**
+
+- `entryTtl(Duration.ofMinutes(10))` — Redis auto-deletes the key after 10 minutes.
+- Why 10 minutes for product catalog: products change infrequently (admin adds/updates maybe a few times per day). 10 minutes of staleness is acceptable — users won't notice price changing 10 minutes late.
+- Without TTL: stale data lives forever if eviction logic misses an edge case. TTL guarantees eventual freshness.
+- Too short TTL: defeats the purpose of caching (too many cache misses). Too long: stale data shown to users.
+- Redis uses a combination of lazy expiry (check on access) and periodic sampling (background thread deletes 20 random expired keys every 100ms) — efficient even with millions of keys.
+
+---
+
+### Interview Questions Discussed (2026-04-30)
+
+**Q85: "What is the cache-aside pattern and how does it work?" (2026-04-30)**
+A: In cache-aside, the application (not the cache) manages data flow. On read: check cache first → HIT means return cached data, MISS means query DB → store in cache → return. On write: update DB → evict/invalidate cache. The cache is populated lazily (on demand). Advantages: simple, application controls freshness, cache failure doesn't break the app (fallback to DB). Alternatives: write-through (write to cache and DB simultaneously), write-behind (write to cache, async flush to DB), read-through (cache itself fetches from DB on miss — used in Hibernate L2 cache).
+
+**Q86: "Explain @Cacheable, @CacheEvict, and @CachePut. When would you use each?" (2026-04-30)**
+A: `@Cacheable` — on read methods. Checks cache before running method; on HIT returns cached value without executing the method body. `@CacheEvict` — on write methods. Removes stale cache entries after the method runs (or before, with `beforeInvocation=true`). Use `allEntries=true` for list caches where you can't predict which keys are affected. `@CachePut` — always runs the method AND updates the cache with the new return value. Use on update methods where you know the exact key and want to refresh it without a separate read. Important: `@CachePut` requires the method to return the cacheable value (can't use on void methods).
+
+**Q87: "Why use GenericJackson2JsonRedisSerializer instead of the default JDK serializer?" (2026-04-30)**
+A: JDK serialization: (1) requires `Serializable` interface on all cached objects (including nested), (2) produces opaque binary — unreadable in redis-cli for debugging, (3) breaks when you rename/move classes (class name is baked into bytes), (4) vulnerable to deserialization attacks. JSON serializer: (1) no interface needed — uses Jackson reflection, (2) human-readable in Redis, (3) tolerant of class changes (field additions don't break existing cache), (4) `GenericJackson2JsonRedisSerializer` stores `@class` metadata so it knows which type to deserialize to — handles generics and polymorphism.
+
+**Q88: "How do you handle cache invalidation for paginated/filtered list queries?" (2026-04-30)**
+A: You can't selectively invalidate individual list entries because you don't know which pages/filters a new item affects. Solution: `@CacheEvict(value = "products", allEntries = true)` on any write operation — nuke the entire list cache. This is acceptable because: (1) writes are infrequent compared to reads, (2) TTL bounds staleness anyway, (3) the alternative (tracking which queries an item appears in) is prohibitively complex. For single-item caches (by ID), you CAN evict/update the specific key.
+
+**Q89: "What happens if Redis goes down? Does the application crash?" (2026-04-30)**
+A: With Spring's default configuration, if Redis is unreachable, `@Cacheable` throws a connection exception — which bubbles up as a 500 error. To make it resilient: configure `CacheErrorHandler` (Spring interface) to log and swallow cache exceptions, falling back to the DB. The application degrades gracefully — slower (every request hits DB) but functional. In production: Redis Sentinel or Redis Cluster for high availability, plus a custom `CacheErrorHandler` as a safety net.
+
+---
+
+### How Spring "Manages" Cross-Cutting Concerns — Internals (2026-04-30)
+
+**27. Spring's Three Interception Mechanisms — Filters, Proxies, Framework Loops (2026-04-30)**
+
+- Spring adds behavior around your code without you manually writing plumbing. But it uses three different mechanisms depending on the layer:
+- **Servlet Filter Chain** (Spring Security): Tomcat receives HTTP request → passes through an ordered list of Filter objects → only if all filters pass does the request reach your Controller. Your `JwtAuthFilter` is one filter in this chain. Filters are a Servlet API concept (since Servlet 2.3, year 2001) — Spring Security just builds a sophisticated chain on top.
+- **CGLIB Proxy** (Cache, @Transactional, @Async): Spring generates a subclass of your service at runtime. When someone calls `productService.searchProduct()`, they're calling the proxy (subclass), not the real object. The proxy's overridden method contains interceptor logic (check cache, open transaction, etc.) and only calls `super.searchProduct()` (the real method) when needed.
+- **Framework Loop** (Spring Batch): No proxy, no filter. Instead, YOUR code (reader, processor, writer) is plugged into Spring Batch's internal loop. The framework calls your components at the right time — you don't control the flow. This is the Hollywood Principle: "Don't call us, we'll call you."
+- History: Filters = chain of responsibility pattern (GoF, 1994; Servlet 2.3, 2001). Proxies = AOP (Aspect-Oriented Programming — Gregor Kiczales at Xerox PARC, 1997; AspectJ 2001; Spring AOP since Spring 1.0, 2004). Framework loops = Template Method pattern (GoF, 1994; Spring Batch since 2007).
+
+**28. CGLIB Proxy — How Spring Creates It (2026-04-30)**
+
+- During component scan, Spring finds `ProductServiceImpl` with `@Service`
+- Spring creates the real object via constructor injection
+- A `BeanPostProcessor` (specifically `AbstractAutoProxyCreator`) inspects the class: "Does any method have @Cacheable, @Transactional, or @Async?"
+- If YES → Spring generates a CGLIB subclass dynamically at runtime (using bytecode manipulation). This subclass overrides your methods with interceptor logic.
+- Spring registers this PROXY in the ApplicationContext, not the real object. When Controller gets injected with `ProductService`, it receives the proxy.
+- The proxy holds a chain of `MethodInterceptor` objects (e.g., `CacheInterceptor`, `TransactionInterceptor`). Each decides whether to proceed or short-circuit.
+- CGLIB = Code Generation Library (originally by Eric Bruneton, 2002). Creates subclasses without needing interfaces. Alternative: JDK Dynamic Proxy (Java 1.3, 2000) — only works with interfaces, not concrete classes.
+
+**29. Why `this.method()` Bypasses Cache/@Transactional (2026-04-30)**
+
+- When you call `this.searchProduct()` from within `createProduct()`, `this` refers to the real object (you're already inside the proxy at that point).
+- The proxy can only intercept calls that come from OUTSIDE — through the injected reference.
+- Workaround (if needed): inject `self` reference (`@Lazy private ProductService self;`) and call `self.searchProduct()` — this goes through the proxy. But it's generally a code smell — prefer restructuring.
+- This is NOT a bug — it's a fundamental limitation of proxy-based AOP. AspectJ (compile-time weaving) doesn't have this limitation, but it's much more complex to set up.
+
+**30. Filter Chain vs Proxy vs Framework Loop — Comparison (2026-04-30)**
+
+| Mechanism | Spring's Trick | Your Code's Role | When it fires | Self-call problem? |
+|-----------|---------------|-----------------|---------------|-------------------|
+| Servlet Filter Chain | Ordered filter list in servlet context | Filter in the chain (JwtAuthFilter) | Every HTTP request, before Controller | NO — filters run before any method |
+| CGLIB Proxy | Runtime subclass with interceptors | The method being proxied (@Cacheable/@Transactional) | Every external method call on the bean | YES — `this` bypasses proxy |
+| Framework Loop | Batch framework calls your beans | Components plugged into the loop (Reader/Processor/Writer) | When JobLauncher.run() is called | NO — framework calls you, not the reverse |
+
+**31. @EnableCaching Internal Flow (2026-04-30)**
+
+- `@EnableCaching` imports `CachingConfigurationSelector` → registers `ProxyCachingConfiguration`
+- `ProxyCachingConfiguration` creates a `CacheInterceptor` bean + `BeanFactoryCacheOperationSourceAdvisor`
+- The advisor tells Spring's `AbstractAutoProxyCreator`: "Any bean with @Cacheable methods needs a proxy"
+- At runtime, `CacheInterceptor.invoke()` is called before/after the target method:
+  1. Evaluate SpEL key expression
+  2. Look up `CacheManager` → get/create `Cache` by name
+  3. Call `cache.get(key)` — HIT or MISS
+  4. On MISS: invoke target method, then `cache.put(key, result)`
+  5. On HIT: return cached value, skip target method entirely
+- Same pattern for `@EnableTransactionManagement` (TransactionInterceptor) and `@EnableAsync` (AsyncExecutionInterceptor) — different interceptors, same proxy mechanism.
+
+---
+
+### Interview Questions — Spring Internals (2026-04-30)
+
+**Q90: "How does Spring implement @Cacheable/@Transactional behind the scenes?" (2026-04-30)**
+A: Spring uses AOP proxies. At bean creation time, a `BeanPostProcessor` inspects each class for cache/transaction annotations. If found, it wraps the real bean in a CGLIB-generated subclass (proxy). The proxy overrides annotated methods with interceptor logic: `CacheInterceptor` for caching, `TransactionInterceptor` for transactions. External callers get the proxy (injected by Spring), so every call goes through the interceptor. The interceptor decides whether to proceed to the real method or short-circuit (e.g., return cached value). This is why self-calls (`this.method()`) bypass these annotations — `this` is the real object inside the proxy.
+
+**Q91: "Why does calling `this.method()` bypass @Cacheable and @Transactional?" (2026-04-30)**
+A: Spring's AOP works via proxies — a dynamically generated subclass that overrides your methods. When an external bean calls `productService.searchProduct()`, it's calling the proxy. But inside `ProductServiceImpl`, `this` refers to the real object (not the proxy), so `this.searchProduct()` calls the method directly without going through the interceptor chain. Solutions: (1) restructure code so cached methods are always called externally, (2) inject self-reference (`@Lazy private ProductService self; self.method()`), (3) use AspectJ compile-time weaving (no proxy limitation, but complex setup). Most projects choose option 1.
+
+**Q92: "Compare the three ways Spring adds behavior to your code: Filters, Proxies, and Framework Loops." (2026-04-30)**
+A: **Filters** (Spring Security): Servlet API mechanism — an ordered chain where each filter inspects/modifies the HTTP request/response. Your code IS a filter in the chain. Runs on every request before the Controller. **Proxies** (Cache, Transactions): AOP mechanism — Spring generates a subclass at runtime that intercepts method calls. Your code is the target being proxied. Only works on external calls (self-calls bypass). **Framework Loops** (Spring Batch): Template Method pattern — your code (reader/processor/writer) is plugged into the framework's execution loop. The framework calls you at the right time. No interception needed — it's plain method invocation controlled by the framework. Each mechanism fits a different layer: HTTP layer (filters), bean layer (proxies), batch processing layer (framework loops).
+
+**Q93: "What is CGLIB and how does it differ from JDK Dynamic Proxy?" (2026-04-30)**
+A: Both create proxy objects at runtime. **JDK Dynamic Proxy** (Java 1.3, 2000): requires the target to implement an interface. Creates a `Proxy` class implementing the same interfaces. Uses `InvocationHandler` for interception. Cannot proxy concrete classes without interfaces. **CGLIB** (2002): uses bytecode generation (ASM library) to create a subclass of the concrete class. Doesn't need interfaces. Overrides methods to add interceptor logic. Spring uses CGLIB by default since Spring Boot 2.0 (even if interfaces exist) because it's simpler — no need to inject by interface type. Limitation: can't proxy `final` classes or `final` methods (can't subclass/override them).
+
+---
+
+### @Transactional and @Async — Proxy Interceptor Deep Dive (2026-05-01)
+
+**32. @Transactional — What the Proxy Actually Does (2026-05-01)**
+
+- The method ALWAYS executes (unlike @Cacheable which can skip it). The proxy's job is to wrap the method in a database transaction.
+- Without @Transactional, each `repository.save()` gets its own connection from the pool, auto-commits immediately, and returns the connection. Three saves = three independent transactions. If the third fails, the first two are already committed — no atomicity.
+- With @Transactional, the proxy does:
+  1. **BEFORE method**: Get `PlatformTransactionManager` → call `txManager.getTransaction(definition)` → opens a DB connection from HikariCP pool → calls `connection.setAutoCommit(false)` → binds the connection to the current thread via `TransactionSynchronizationManager` (ThreadLocal).
+  2. **Method runs**: all repository calls within the method share the SAME connection (because they ask `DataSourceUtils.getConnection()` which checks the ThreadLocal first).
+  3. **AFTER method (success)**: `txManager.commit()` → `connection.commit()` → return connection to pool.
+  4. **AFTER method (exception)**: `txManager.rollback()` → `connection.rollback()` → return connection to pool → re-throw exception.
+- The invisible glue: `TransactionSynchronizationManager` stores the active connection in a `ThreadLocal<Map<DataSource, ConnectionHolder>>`. When JPA/Hibernate needs a connection, `DataSourceUtils.getConnection(dataSource)` checks this ThreadLocal: bound connection exists → use it. Not bound → get new connection, auto-commit = true.
+- History: Manual transaction management (try/begin/commit/catch/rollback/finally/close) was the standard in J2EE (1999). EJB had Container-Managed Transactions (CMT) but was heavyweight. Spring 1.0 (2004) introduced `@Transactional` — same declarative simplicity as EJB CMT but without the EJB container. It was one of Spring's killer features that drove adoption over J2EE.
+
+**33. @Async — What the Proxy Actually Does (2026-05-01)**
+
+- The method ALWAYS executes, but on a DIFFERENT thread. The proxy's job is to offload execution to a thread pool.
+- The proxy does:
+  1. Get the `TaskExecutor` (thread pool) bean.
+  2. Wrap the real method call in a `Runnable` (void return) or `Callable` (returns `Future<T>`).
+  3. Submit to thread pool → **return immediately** to the caller. The caller's thread is freed.
+  4. The real method executes later on a worker thread from the pool.
+- The caller gets back `null` (void), `Future<T>`, or `CompletableFuture<T>` depending on the return type.
+- Important: @Async runs on a different thread, which means `SecurityContextHolder` (ThreadLocal) and `TransactionSynchronizationManager` (ThreadLocal) are NOT carried over. The async method has no SecurityContext and no active transaction from the caller.
+- History: Before @Async (Spring 3.0, 2009), offloading work to another thread required manual `ExecutorService` management. @Async made it declarative — just annotate and Spring handles thread pool submission. Java's `CompletableFuture` (Java 8, 2014) later improved the return type story.
+
+**34. Same Proxy, Different Interceptor Behavior — Comparison (2026-05-01)**
+
+| Annotation | Does method run? | Proxy BEFORE | Proxy AFTER | ThreadLocal concerns |
+|-----------|-----------------|-------------|------------|---------------------|
+| `@Cacheable` | Only on MISS | Check Redis for key | Store result in Redis | N/A — same thread |
+| `@Transactional` | ALWAYS | Open transaction, bind connection to ThreadLocal | Commit or rollback | Connection shared via ThreadLocal |
+| `@Async` | ALWAYS (different thread) | Submit to thread pool, return immediately | Nothing — already returned | SecurityContext and Transaction NOT carried over |
+
+**35. ThreadLocal Connection Binding — Why Repository Calls "Just Work" (2026-05-01)**
+
+- When `@Transactional` opens a connection, it stores it in `TransactionSynchronizationManager` (a ThreadLocal).
+- When `productRepository.save(product)` is called, it internally calls `EntityManager.persist()` → which needs a DB connection → asks `DataSourceUtils.getConnection(dataSource)` → checks ThreadLocal: "Is there a connection bound to this thread?" → YES (the proxy put it there!) → uses it.
+- This is why multiple repository calls in one `@Transactional` method share ONE connection and ONE transaction without you passing a connection object around.
+- Without `@Transactional`: each `DataSourceUtils.getConnection()` call gets a new connection from the pool with `autoCommit = true`. Each save commits independently.
+
+---
+
+### Interview Questions — @Transactional and @Async Internals (2026-05-01)
+
+**Q94: "What exactly does @Transactional do behind the scenes? Why can't you just call repository.save() without it?" (2026-05-01)**
+A: `@Transactional` wraps your method in a database transaction via a CGLIB proxy. The `TransactionInterceptor` opens a connection, sets `autoCommit(false)`, binds it to the current thread via `TransactionSynchronizationManager` (ThreadLocal), runs your method, then commits or rolls back. Without it, each `repository.save()` auto-commits independently — if you have 3 writes and the 3rd fails, the first 2 are already committed (no atomicity). `@Transactional` ensures all-or-nothing: either all writes commit, or all roll back.
+
+**Q95: "How do multiple repository calls share the same transaction within a @Transactional method?" (2026-05-01)**
+A: Via ThreadLocal connection binding. The `TransactionInterceptor` stores the active DB connection in `TransactionSynchronizationManager` (a ThreadLocal). When any repository call needs a connection, `DataSourceUtils.getConnection()` checks this ThreadLocal first. If a connection is bound to the current thread, it reuses it. All repo calls on the same thread share the same connection and transaction. This is why you don't need to pass a `Connection` object around — the ThreadLocal acts as an invisible parameter.
+
+**Q96: "What happens to @Transactional and SecurityContext when you use @Async?" (2026-05-01)**
+A: Both are lost. `@Transactional` binds the DB connection to the caller's thread via ThreadLocal. `SecurityContextHolder` stores the authenticated user on the caller's thread. `@Async` runs the method on a DIFFERENT thread from the pool — that thread has empty ThreadLocals. So the async method has no active transaction (any DB calls will auto-commit independently) and no security context (attempting to read the authenticated user returns null). Solutions: (1) start a new `@Transactional` inside the async method, (2) pass security info as method parameters, (3) configure `SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL)` — but this is fragile with thread pools.
+
+**Q97: "Compare @Transactional, @Cacheable, and @Async — same proxy mechanism, different behavior." (2026-05-01)**
+A: All three use CGLIB proxy interception — Spring generates a subclass that overrides the annotated method. The difference is what the interceptor does. **@Cacheable**: BEFORE checks Redis → on HIT returns cached value (method SKIPPED), on MISS runs method + stores result. **@Transactional**: BEFORE opens transaction (connection + autoCommit off), ALWAYS runs method, AFTER commits or rolls back. **@Async**: BEFORE submits method to thread pool and returns immediately, method runs later on a worker thread. Same proxy plumbing, different interceptor strategy. All three share the self-call limitation (`this.method()` bypasses the proxy).
+
+---

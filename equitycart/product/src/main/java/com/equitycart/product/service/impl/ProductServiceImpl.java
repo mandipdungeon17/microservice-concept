@@ -18,6 +18,10 @@ import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.cache.annotation.Caching;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
@@ -40,6 +44,7 @@ public class ProductServiceImpl implements ProductService {
 
   /** {@inheritDoc} */
   @Transactional
+  @CacheEvict(value = "products", allEntries = true)
   @Override
   public ProductResponse createProduct(ProductRequest request) {
     log.info("Creating product with SKU: {}", request.sku());
@@ -81,6 +86,7 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** {@inheritDoc} */
+  @Cacheable(value = "product", key = "#productId")
   @Override
   public ProductResponse getProductById(Long productId) {
     log.debug("Fetching product by id: {}", productId);
@@ -95,6 +101,8 @@ public class ProductServiceImpl implements ProductService {
 
   /** {@inheritDoc} */
   @Transactional
+  @CacheEvict(value = "products", allEntries = true)
+  @CachePut(value = "product", key = "#productId")
   @Override
   public ProductResponse updateProduct(Long productId, ProductRequest request) {
     log.info("Updating product with id: {}", productId);
@@ -141,6 +149,11 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** {@inheritDoc} */
+  @Caching(
+      evict = {
+        @CacheEvict(value = "products", allEntries = true),
+        @CacheEvict(value = "product", key = "#productId")
+      })
   @Override
   public void deleteProduct(Long productId) {
     log.info("Soft-deleting product with id: {}", productId);
@@ -157,6 +170,9 @@ public class ProductServiceImpl implements ProductService {
   }
 
   /** {@inheritDoc} */
+  @Cacheable(
+      value = "products",
+      key = "#request.toString() + '-' + #pageable.pageNumber + '-' + #pageable.pageSize")
   @Override
   public PagedResponse<ProductResponse> searchProduct(
       ProductSearchRequest request, Pageable pageable) {
