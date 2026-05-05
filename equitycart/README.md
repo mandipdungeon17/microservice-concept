@@ -17,7 +17,7 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 | `commons`             | `com.equitycart.commons`    | Shared DTOs, exceptions, constants                | Implemented |
 | `user-service`        | `com.equitycart.user`       | Authentication, authorization, user profiles, KYC | Implemented |
 | `product-service`     | `com.equitycart.product`    | Product catalog, brands, categories, batch import | Implemented |
-| `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Planned     |
+| `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Implemented |
 | `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Planned     |
 | `market-data-service` | `com.equitycart.marketdata` | Real-time prices, brand-ticker mapping, WebFlux   | Planned     |
 | `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Planned     |
@@ -59,7 +59,19 @@ equitycart/
 │       ├── repository/       (4 JPA repositories + JpaSpecificationExecutor)
 │       ├── service/          (ProductService, BrandService, CategoryService + impls)
 │       └── specification/    (ProductSpecification — dynamic query builder)
-├── order/                    (order-service module — planned)
+├── order/                    (order-service module)
+│   └── src/main/java/com/equitycart/order/
+│       ├── cart/
+│       │   ├── controller/   (CartController — REST endpoints)
+│       │   ├── dto/          (AddToCartRequest, CartItemResponse, CartResponse)
+│       │   ├── repository/   (CartRedisRepository — Redis Hash operations)
+│       │   └── service/      (CartService + CartServiceImpl)
+│       ├── controller/       (OrderController — order lifecycle endpoints)
+│       ├── dto/              (PlaceOrderRequest, OrderResponse, UpdateOrderStatusRequest)
+│       ├── entity/           (Order, OrderItem)
+│       ├── enums/            (OrderStatus — state machine with EnumSet transitions)
+│       ├── repository/       (OrderRepository, OrderItemRepository)
+│       └── service/          (OrderService + OrderServiceImpl)
 ├── portfolio/                (portfolio-service module — planned)
 ├── market-data/              (market-data-service module — planned)
 └── ledger/                   (ledger-service module — planned)
@@ -76,7 +88,7 @@ equitycart/
 | Code Formatting   | Spotless (Google Java Format)                 |
 | SQL Database      | PostgreSQL                                    |
 | NoSQL Database    | MongoDB (planned)                             |
-| Cache             | Redis (@Cacheable, TTL-based eviction)        |
+| Cache             | Redis (@Cacheable + RedisTemplate for Cart)   |
 | Message Broker    | Apache Kafka (planned)                        |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
 | API Gateway       | Spring Cloud Gateway (planned)                |
@@ -112,6 +124,17 @@ equitycart/
 - **Javadoc** — documentation on all classes and public methods
 - **Logging** — Log4j2 loggers across all modules
 
+### Phase 3 — Order Service & Cart
+
+- **Shopping Cart (Redis-backed)** — add/remove/get/clear items using Redis Hash (per-user key, product fields, 30-min TTL)
+- **Cart SecurityContext** — userId extracted from JWT token (no path variable exposure)
+- **Order Placement** — pessimistic locking on product stock, cart-to-order conversion, stock decrement
+- **Idempotency** — client-generated idempotency key prevents duplicate orders on retry
+- **Order Status State Machine** — 9 states with EnumSet transition rules, `canTransition()` validation
+- **Admin Status Transitions** — PATCH endpoint with ADMIN-only access for order lifecycle progression
+- **Return/Refund Flow** — customer-initiated return request, ownership validation, stock restoration on RETURNED
+- **Javadoc + Logging** — Log4j2 loggers + Javadoc across all Order and Cart classes
+
 ## API Endpoints
 
 ### Authentication
@@ -122,6 +145,25 @@ equitycart/
 | POST   | `/api/auth/login`    | Public | Login, returns JWT pair |
 | POST   | `/api/auth/refresh`  | Public | Refresh access token    |
 | POST   | `/api/auth/logout`   | Auth   | Revoke refresh token    |
+
+### Cart
+
+| Method | Endpoint                    | Access | Description              |
+| ------ | --------------------------- | ------ | ------------------------ |
+| POST   | `/api/cart/items`           | Auth   | Add item to cart         |
+| GET    | `/api/cart`                 | Auth   | Get current user's cart  |
+| DELETE | `/api/cart/items/{productId}` | Auth | Remove item from cart    |
+| DELETE | `/api/cart`                 | Auth   | Clear entire cart        |
+
+### Orders
+
+| Method | Endpoint                     | Access | Description                          |
+| ------ | ---------------------------- | ------ | ------------------------------------ |
+| POST   | `/api/order`                 | Auth   | Place order from cart                |
+| GET    | `/api/order`                 | Auth   | Get all orders for current user      |
+| GET    | `/api/order/{orderId}`       | Auth   | Get order by ID                      |
+| PATCH  | `/api/order/{orderId}/status`| ADMIN  | Update order status (state machine)  |
+| PATCH  | `/api/order/{orderId}/return`| Auth   | Request return (owner only)          |
 
 ### Products
 
@@ -223,7 +265,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 0 | Foundation & Setup             | COMPLETE                                     |
 | Phase 1 | User Service & Security        | COMPLETE (unit tests deferred)               |
 | Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)               |
-| Phase 3 | Order Service & Cart           | Next                                         |
+| Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
 
 ## Known Issues
 
@@ -231,7 +273,6 @@ Key application properties (`app/src/main/resources/application.yml`):
 
 ## Roadmap Ahead
 
-- **Phase 3**: Order Service & Cart (Cart entity, checkout flow, inventory management, idempotency)
 - **Phase 4**: Market Data Service (WebFlux reactive, external stock API integration)
 - **Phase 5**: Portfolio Service & Stock-Back Engine (holdings, trading, vesting)
 - **Phase 6**: Event-Driven Architecture (Kafka, async order pipeline)

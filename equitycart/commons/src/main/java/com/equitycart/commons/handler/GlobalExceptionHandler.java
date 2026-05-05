@@ -5,6 +5,8 @@ import com.equitycart.commons.dto.ValidationErrorResponse;
 import com.equitycart.commons.exception.AccountDisabledException;
 import com.equitycart.commons.exception.AuthenticationException;
 import com.equitycart.commons.exception.DuplicateResourceException;
+import com.equitycart.commons.exception.InsufficientStockException;
+import com.equitycart.commons.exception.InvalidStatusTransitionException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
 import java.time.LocalDateTime;
 import org.apache.logging.log4j.LogManager;
@@ -45,6 +47,30 @@ public class GlobalExceptionHandler {
     return new ErrorResponse(
         HttpStatus.CONFLICT.value(),
         HttpStatus.CONFLICT.getReasonPhrase(),
+        ex.getMessage(),
+        LocalDateTime.now());
+  }
+
+  /** Handles Insufficient Stocks (e.g., product quantity is lesser cart quantity). */
+  @ExceptionHandler(InsufficientStockException.class)
+  @ResponseStatus(HttpStatus.BAD_REQUEST)
+  public ErrorResponse handleInsufficientStockException(InsufficientStockException ex) {
+    logger.warn("Insufficient Stocks: {}", ex.getMessage());
+    return new ErrorResponse(
+        HttpStatus.BAD_REQUEST.value(),
+        HttpStatus.BAD_REQUEST.getReasonPhrase(),
+        ex.getMessage(),
+        LocalDateTime.now());
+  }
+
+  /** Handles invalid status transition (e.g., DELIVERED -> CREATED). */
+  @ExceptionHandler(InvalidStatusTransitionException.class)
+  @ResponseStatus(HttpStatus.BAD_REQUEST)
+  public ErrorResponse handleInvalidStatusTransitionException(InvalidStatusTransitionException ex) {
+    logger.warn("Invalid status transition: {}", ex.getMessage());
+    return new ErrorResponse(
+        HttpStatus.BAD_REQUEST.value(),
+        HttpStatus.BAD_REQUEST.getReasonPhrase(),
         ex.getMessage(),
         LocalDateTime.now());
   }

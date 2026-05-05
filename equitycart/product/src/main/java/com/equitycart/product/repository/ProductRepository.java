@@ -1,10 +1,13 @@
 package com.equitycart.product.repository;
 
 import com.equitycart.product.entity.Product;
+import jakarta.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
 
 /**
  * Spring Data JPA repository for {@link Product} entities. Extends {@link JpaSpecificationExecutor}
@@ -44,4 +47,15 @@ public interface ProductRepository
    * @return list of products for the given category
    */
   List<Product> findByCategoryId(Long categoryId);
+
+  /**
+   * Retrieves a product by ID with a pessimistic write lock, blocking concurrent transactions from
+   * reading or modifying the same row until this transaction commits.
+   *
+   * @param productId the product primary key
+   * @return an {@link Optional} containing the locked product if found
+   */
+  @Query("SELECT p FROM Product p WHERE p.id = :productId")
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
+  Optional<Product> findByProductId(Long productId);
 }

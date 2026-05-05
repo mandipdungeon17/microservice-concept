@@ -1711,3 +1711,292 @@ A: Both are lost. `@Transactional` binds the DB connection to the caller's threa
 A: All three use CGLIB proxy interception — Spring generates a subclass that overrides the annotated method. The difference is what the interceptor does. **@Cacheable**: BEFORE checks Redis → on HIT returns cached value (method SKIPPED), on MISS runs method + stores result. **@Transactional**: BEFORE opens transaction (connection + autoCommit off), ALWAYS runs method, AFTER commits or rolls back. **@Async**: BEFORE submits method to thread pool and returns immediately, method runs later on a worker thread. Same proxy plumbing, different interceptor strategy. All three share the self-call limitation (`this.method()` bypasses the proxy).
 
 ---
+
+## Phase 3: Order Service & Cart (IN PROGRESS)
+
+### Date: 2026-05-03
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. Inconsistent DI Pattern — Explicit Constructor vs @RequiredArgsConstructor (2026-05-03)**
+
+- Problem: Agent-provided Cart implementation guidance used explicit constructor injection, while all Phase 1 & 2 classes use `@RequiredArgsConstructor` + `private final` fields.
+- Resolution: Student caught the inconsistency and already used `@RequiredArgsConstructor` in the actual implementation. Agent corrected guidance and established consistency enforcement as a mandatory process step.
+- Lesson: Consistency across modules matters — in an interview, inconsistent patterns signal lack of code review discipline.
+
+**2. {@inheritDoc} Without Source Javadoc (2026-05-03)**
+
+- Problem: `CartServiceImpl` methods had `{@inheritDoc}` but `CartService` interface had no Javadoc — so there was nothing to inherit. Generated docs would show empty descriptions.
+- Fix: Added Javadoc to `CartService` interface methods (the source for inheritance).
+- Lesson: `{@inheritDoc}` works by walking up the inheritance tree (interface → superclass) looking for the nearest method with documentation. If the source has nothing, the tag resolves to empty. Always document the interface (contract), use `{@inheritDoc}` on impls.
+
+**3. URL Path Versioning Inconsistency (2026-05-03)**
+
+- Problem: Cart used `/api/v1/cart` while User used `/api/auth` and Product used `/api/products` — no version prefix.
+- Fix: Removed `/v1/` from Cart to match existing pattern. URL versioning will be addressed project-wide in Phase 7 (microservices decomposition).
+- Lesson: Don't introduce versioning in one module without a project-wide strategy. Inconsistent API versioning confuses clients.
+
+**4. BCrypt Hash Mismatch — Can't Retrieve Passwords (2026-05-03)**
+
+- Problem: Forgot test account passwords. BCrypt is a one-way hash — no retrieval possible.
+- Resolution: Generated a fresh hash via `new BCryptPasswordEncoder().encode("password")` and updated directly in PostgreSQL.
+- Lesson: BCrypt (Provos & Mazières, 1999) is designed to be irreversible. Each hash includes a random salt, so even identical passwords produce different hashes. The `$2a$10$` prefix = algorithm version + cost factor (2^10 = 1024 rounds).
+
+---
+
+### Core Concepts Learned
+
+**1. Redis as Data Store vs Cache — Two Different Usage Patterns (2026-05-03)**
+
+- In Phase 2, Redis was used as a **cache** (via `@Cacheable`) — Spring Cache abstraction, automatic get/put, TTL-based eviction, transparent to service logic.
+- In Phase 3, Redis is used as a **data store** (via `RedisTemplate`) — manual Hash operations, explicit serialization, direct TTL management, Redis IS the persistence layer for cart data.
+- Key difference: Cache = "I have a DB, Redis speeds it up." Data store = "Redis IS where the data lives. No DB backup."
+- `StringRedisTemplate` is a type-safe `RedisTemplate<String, String>` — all keys and values are Strings. Simpler than generic `RedisTemplate<K,V>` for Hash-based patterns.
+
+**2. Redis Hash Structure — Why It Fits Shopping Carts (2026-05-03)**
+
+- Redis Hashes map field → value within a key. Structure: `Cart:{userId}` → `{productId: JSON, productId: JSON}`.
+- **Why Hash over String**: individual field HSET/HDEL is atomic per field — two concurrent "add to cart" requests for different products don't conflict. A String key with full-cart JSON requires read-modify-write (race condition: last write wins, items lost).
+  - Race condition with String approach: Thread A reads cart `{shoe}`, Thread B reads cart `{shoe}`. Thread A adds hat → writes `{shoe, hat}`. Thread B adds belt → writes `{shoe, belt}`. Hat is LOST — Thread B overwrote Thread A's write. With Hash: Thread A does `HSET cart hat '...'`, Thread B does `HSET cart belt '...'` — both survive because they write to different fields.
+- **Why Hash over List**: List stores items sequentially. No way to update quantity for a specific product without scanning the entire list (O(n)). Removing an item by productId = O(n) scan. Duplicate items possible (no field uniqueness).
+- **Why Hash over Set**: Sets store unique values. Changing quantity means removing the old item and adding a new one (non-atomic two-step operation). No field-level access by productId.
+- **Why Hash over Sorted Set**: Sorted Sets rank by score — useful for leaderboards, not for key-value field access. Overkill for a cart.
+- Redis Hashes use compact encoding called **listpack** (since Redis 7.0, previously **ziplist**) for small Hashes (<128 fields, each <64 bytes). A typical cart qualifies — uses less memory than equivalent String keys.
+- **Redis Hash commands used**: `HSET key field value` (add/update one field), `HGETALL key` (fetch all fields and values), `HDEL key field` (remove one field), `DEL key` (delete entire Hash). All are O(1) except HGETALL which is O(n) where n = number of fields.
+- History: Redis Hashes introduced in Redis 2.0 (2010) by Salvatore Sanfilippo specifically for this use case — objects with multiple fields where you need to read/write individual fields without deserializing the whole thing. Before Hashes, people serialized entire objects into String keys, leading to race conditions under concurrency.
+
+**3. ObjectMapper — Java ↔ JSON Bridge (2026-05-03)**
+
+- Jackson's `ObjectMapper` converts between Java objects and JSON strings. Core class since Jackson 1.0 (~2009). Jackson has been the de-facto JSON library in Java since ~2009, predating both Gson and the Jakarta JSON-B spec.
+- **Why we need it for Redis**: Redis Hash values are Strings. Our `AddToCartRequest` is a Java record. ObjectMapper bridges the gap: `writeValueAsString(item)` → JSON String for storage, `readValue(json, AddToCartRequest.class)` → Java object for retrieval.
+- **Why not `toString()`**: `toString()` is not reversible — there's no standard way to parse a `toString()` output back into an object. JSON is a structured, standardized format with a guaranteed round-trip: serialize → deserialize → identical object.
+- **When to use ObjectMapper vs let Spring handle it**:
+  - Storing Java objects in Redis/Kafka/RabbitMQ → YES, use ObjectMapper manually
+  - REST controller request/response bodies → NO, Spring does it automatically via `@RequestBody`/`@ResponseBody` (MappingJackson2HttpMessageConverter)
+  - Reading a JSON config file → YES
+  - Converting between DTOs manually → YES (`objectMapper.convertValue(source, TargetClass.class)`)
+  - Storing in JPA/SQL database → NO, JPA handles mapping via `@Column`
+- **Why inject it (not `new ObjectMapper()`)**: Spring Boot auto-configures an ObjectMapper bean with sensible defaults (Java 8 time module registered, proper date formatting, etc.). By injecting: (1) same configuration everywhere (consistent date formats, naming strategies), (2) singleton — ObjectMapper is thread-safe and expensive to create, (3) any customization (e.g., `spring.jackson.serialization.write-dates-as-timestamps=false`) applies globally.
+- Mental model: `Java Object → objectMapper.writeValueAsString() → JSON String → Redis HSET → Redis Hash Field` and `Redis Hash Field → Redis HGET → JSON String → objectMapper.readValue() → Java Object`
+
+**4. Why NOT @Data on JPA Entities (2026-05-03)**
+
+- `@Data` = `@Getter` + `@Setter` + `@ToString` + `@EqualsAndHashCode` + `@RequiredArgsConstructor`.
+- **@EqualsAndHashCode danger**: generates equals/hashCode using ALL fields. A new entity (id=null) added to a HashSet → after save (id=7) → hashCode changes → HashSet can't find it. Hibernate uses Sets internally for `@OneToMany` collections — corrupted identity = lost entities.
+- **@ToString danger**: bidirectional relationships cause infinite recursion. `Order.toString()` → prints items → `OrderItem.toString()` → prints order → StackOverflowError.
+- **@RequiredArgsConstructor conflict**: `@Data` generates constructor for `final` fields only, but `@Builder` needs `@AllArgsConstructor`. They conflict.
+- Correct pattern for entities: `@Getter` + `@Setter` + `@NoArgsConstructor` + `@AllArgsConstructor` + `@Builder`. Explicit and safe.
+- `@Data` IS appropriate for: DTOs, value objects, anything NOT a JPA entity. (Though Java records are even better for immutable DTOs.)
+
+**5. @OneToMany / @ManyToOne — Owning Side vs Inverse Side (2026-05-03)**
+
+- The FK column (`order_id`) always lives in the child table (`order_items`). The "many" side holds the pointer.
+- **Owning side** = `OrderItem.order` (@ManyToOne + @JoinColumn) — controls the FK column. Changes here are persisted to the FK.
+- **Inverse side** = `Order.items` (@OneToMany(mappedBy = "order")) — read-only mirror for navigation. `mappedBy` value = field name in child entity.
+- Only setting the inverse side (`order.getItems().add(item)`) without setting the owning side (`item.setOrder(order)`) → FK stays NULL in DB.
+- `addItem()` helper method sets BOTH sides — ensures in-memory model and database are consistent.
+- `CascadeType.ALL`: saving the parent automatically persists all children. `orphanRemoval = true`: removing a child from the parent's list deletes it from DB.
+
+**6. Cart getCart() Data Flow — Redis Hash to API Response Pipeline (2026-05-03)**
+
+- The `getCart()` method demonstrates a complete data transformation pipeline from raw Redis data to a structured API response:
+  1. **Redis HGETALL** → `Map<Object, Object>` — returns all fields and values from the Hash. Keys are productIds (as Strings), values are JSON Strings.
+  2. **Deserialize each JSON** → `AddToCartRequest` — each Map value (JSON String) is passed through `objectMapper.readValue()` to reconstruct the Java record.
+  3. **Transform to CartItemResponse** → compute `subtotal = price × quantity` for each item. This is the DTO transformation layer — the internal storage format (AddToCartRequest) differs from the response format (CartItemResponse with computed subtotal).
+  4. **Compute total** → `items.stream().map(CartItemResponse::subtotal).reduce(BigDecimal.ZERO, BigDecimal::add)` — sums all subtotals. Uses `BigDecimal::add` (not double) for financial precision.
+  5. **Compute expiresAt** → `redisTemplate.getExpire()` returns remaining TTL in seconds. Add to `Instant.now()` to get an absolute timestamp the frontend can display ("your cart expires at 3:45 PM").
+  6. **Wrap in CartResponse** → final DTO with userId, items list, total, and expiresAt.
+- Design decisions in the pipeline: (1) Empty cart returns `List.of()` not null — null collections force null-checks everywhere downstream. (2) `expiresAt` is null when cart doesn't exist — distinguishes "no cart" from "cart with items." (3) Service layer owns DTO transformation, not the repository — keeps repository reusable (raw data) and service responsible for business logic (subtotal, total computation).
+
+**8. @Enumerated(EnumType.STRING) — Never Use ORDINAL (2026-05-03)**
+
+- `EnumType.STRING` stores `"CONFIRMED"` in the DB. `EnumType.ORDINAL` stores `2` (the enum's position).
+- ORDINAL danger: adding a new enum value in the middle shifts all ordinals — existing DB rows now map to wrong values. Production data corruption.
+- STRING is slightly larger (varchar vs int) but safe against enum reordering.
+- Default is ORDINAL (for backward compatibility with JPA 1.0 / EJB 2.x) — must always explicitly set STRING.
+- History: This trap is so well-known that Vlad Mihalcea and Thorben Janssen have both written extensively about it. Top-5 Hibernate mistake since JPA 1.0 (2006).
+
+**9. @Builder.Default — Lombok Builder vs Field Initializers (2026-05-03)**
+
+- `@Builder` ignores Java field initializers (`= new ArrayList<>()`). Without `@Builder.Default`, builder creates object with `items = null`.
+- `@Builder.Default private List<OrderItem> items = new ArrayList<>()` tells Lombok: "use this initializer when builder doesn't set the field."
+- Important for collections in entities — NullPointerException when calling `order.getItems().add(...)` without it.
+
+**10. Spring Data Derived Query — Property Path Traversal (2026-05-03)**
+
+- Method names map to ENTITY FIELD names, never DB column names. Chain: method name → entity field → @Column → SQL column.
+- `findByOrderId(Long orderId)`: Spring splits on camelCase → `order` (field in OrderItem) + `id` (field in Order via BaseEntity) → traverses `orderItem.getOrder().getId()` → SQL: `WHERE oi.order_id = ?`.
+- Ambiguity: if entity has both `orderId` (plain Long) AND `order` (relationship), Spring prefers the direct field. Use underscore (`findByOrder_Id`) to force traversal.
+- History: Property expression parser introduced in Spring Data Commons 1.4 (2012). Traversal reduced boilerplate significantly but introduced the ambiguity edge case, leading to the underscore-disambiguation rule (Spring Data 1.6).
+
+**11. @Table(name = "orders") — SQL Reserved Keywords (2026-05-03)**
+
+- `ORDER` is a SQL reserved keyword (used in `ORDER BY`). Creating a table named `order` causes syntax errors in PostgreSQL.
+- Fix: `@Table(name = "orders")` — pluralize or prefix. Common alternatives: `customer_orders`, `purchase_orders`.
+- Other common reserved keyword traps: `user` (use `users`), `group`, `index`, `key`, `value`, `check`, `column`.
+
+---
+
+### Roadblocks & Issues Faced (continued)
+
+**5. JPQL Uses Entity Class Name, Not Table Name (2026-05-04)**
+
+- Problem: Wrote `SELECT p FROM Products p` in `@Query` — "Products" is the table name. JPQL uses the entity class name (`Product`).
+- Fix: `SELECT p FROM Product p WHERE p.id = :productId`
+- Lesson: JPQL is entity-oriented, SQL is table-oriented. `FROM Product` refers to `@Entity class Product`. If you had `@Entity(name = "Prod")`, you'd write `FROM Prod` — but never the `@Table(name)` value.
+
+**6. Builder Pattern Overwrites Object — Items Lost (2026-05-04)**
+
+- Problem: Added items to an `Order` object via `order.addItem()`, then reassigned `order` to a new builder-created object (`order = Order.builder()...build()`). All items were lost because the new object has an empty list.
+- Fix: Build the Order object first, THEN iterate and add items to it.
+- Lesson: Builders create entirely new instances. If you need to mutate an existing object, don't rebuild it — mutate directly. This is a common trap with Lombok `@Builder` when building objects incrementally.
+
+**7. Null Check vs isEmpty() — Understanding Return Types (2026-05-04)**
+
+- Problem: Checked `cartResponse == null` but `getCart()` never returns null — it returns a `CartResponse` with an empty list.
+- Fix: Check `cartResponse.items().isEmpty()` instead.
+- Lesson: Know your API contracts. If a method returns a wrapper object, it may have "empty" state (empty list, zero total) rather than null. Read the interface Javadoc.
+
+**8. Swapped Exception Types — Match Exception to Failure Condition (2026-05-04)**
+
+- Problem: Used `InsufficientStockException` when product wasn't found, and `ResourceNotFoundException` when stock was too low. Both technically "work" but confuse API consumers — HTTP 400 for "product not found" makes no sense.
+- Fix: Product not found → `ResourceNotFoundException` (404). Insufficient stock → `InsufficientStockException` (400).
+- Lesson: Exception types define HTTP semantics. Choose the exception that matches the *actual failure reason*, not just the first one you import.
+
+**9. @GetMapping Path Variable Without Curly Braces (2026-05-04)**
+
+- Problem: `@GetMapping("/orderId")` — a literal string path `/api/order/orderId`. Without `{}`, Spring doesn't bind the `@PathVariable`.
+- Fix: `@GetMapping("/{orderId}")`
+- Lesson: Path variable template syntax requires curly braces. Without them, it's treated as a literal URL segment. The `@PathVariable` annotation won't throw an error — it just never receives a value.
+
+**10. Control Flow Bug — Throw After If Block Always Executes (2026-05-04)**
+
+- Problem: `if(canTransition) { save(); } throw new Exception();` — the throw executes regardless of the if condition. After the if-block saves, execution falls through to the throw.
+- Fix: Either `return` inside the if, or move the throw to an `else` block.
+- Lesson: In Java, code after an if-block executes unconditionally unless the if-block exits (return/throw). This is a classic "missing else" bug — especially dangerous in methods without a return type (void) where the compiler doesn't force you to handle all paths.
+
+**11. Enum.valueOf() Throws IllegalArgumentException on Invalid Input (2026-05-04)**
+
+- Problem: `OrderStatus.valueOf(request.status())` — if client sends "BLAH", this throws `IllegalArgumentException` with an unhelpful message. If called in two places (once inside canTransition, once for setStatus), the first throws before reaching any try-catch.
+- Fix: Parse once into a local variable, wrap in try-catch, throw user-friendly exception.
+- Lesson: `Enum.valueOf()` is strict — no partial matching, case-sensitive. Always validate user input before passing to `valueOf()`. Parse once, use the variable everywhere.
+
+**12. @Slf4j vs Log4j — Project-Wide Logger Consistency (2026-05-05)**
+
+- Problem: Used `@Slf4j` (Lombok + SLF4J facade) in OrderServiceImpl while the entire project uses Log4j directly (`LogManager.getLogger()`).
+- Fix: Replaced with `private static final Logger log = LogManager.getLogger(OrderServiceImpl.class);`
+- Lesson: Pick one logging pattern and enforce it everywhere. Mixing approaches confuses developers reading the code — "which logger abstraction are we using?" SLF4J is a facade over logging implementations, Log4j is a direct implementation. Both work, but mixing them signals no established convention.
+
+---
+
+### Core Concepts Learned (continued)
+
+**12. Pessimistic Locking — Blocking Concurrent Access at the Database Level (2026-05-04)**
+
+- **The problem it solves**: The "lost update" race condition. Two threads read the same stock value (1), both check "stock >= 1? yes", both decrement to 0 and save. Result: oversold.
+- **How it works**: `SELECT ... FOR UPDATE` acquires an exclusive row-level lock in PostgreSQL. Any other transaction trying to read-for-update or write the same row BLOCKS (waits) until the first transaction commits or rolls back.
+- **In Spring/JPA**: `@Lock(LockModeType.PESSIMISTIC_WRITE)` on a repository method + `@Transactional` on the service caller. JPA translates to `SELECT ... FOR UPDATE`.
+- **Sequence**: Thread A acquires lock → reads stock=1 → decrements → commits → releases lock. Thread B was blocked → now reads stock=0 → throws InsufficientStockException. No oversell.
+- **Trade-offs**: Simple reasoning (impossible to get wrong), guarantees consistency, no retry logic needed. BUT: reduces throughput (blocked threads idle), deadlock risk (circular waits), doesn't scale across distributed systems (DB-specific).
+- **Historical context**: Oldest concurrency strategy, inherited from mainframe-era databases (1970s-80s, IBM System R). Name reflects the assumption: conflicts are *likely*, so prevent them upfront.
+
+**13. Optimistic Locking — Detect-and-Retry at Write Time (2026-05-04)**
+
+- **How it works**: No lock acquired during read. Each row has a `@Version` column (integer). On UPDATE, SQL includes: `WHERE id = ? AND version = ?`. If another transaction already changed the row (bumped version), zero rows match → `OptimisticLockException` → application retries.
+- **In Spring/JPA**: Add `@Version private Long version;` to the entity. Hibernate automatically includes version check in every UPDATE.
+- **Trade-offs**: No blocking (max throughput under low contention), works across distributed systems, no deadlocks. BUT: requires retry logic in application code, cascading retries under high contention degrade performance worse than pessimistic, more complex to implement correctly.
+- **Historical context**: Gained popularity in 1990s-2000s with web applications — many users reading, few writing same row simultaneously. Name reflects assumption: conflicts are *unlikely*.
+
+**14. When to Use Pessimistic vs Optimistic (2026-05-04)**
+
+| Scenario | Choice | Reason |
+|----------|--------|--------|
+| E-commerce checkout (stock) | Pessimistic | High contention on popular items, overselling catastrophic, short transaction |
+| User profile edit | Optimistic | Rare concurrent edits to same profile |
+| Wiki/document editing | Optimistic | Conflicts detectable, user can merge |
+| Bank transfer | Pessimistic | Financial correctness > throughput |
+| Cart updates | Neither | Redis is single-threaded, no concurrent mutation |
+| Distributed microservices | Optimistic | Can't hold DB locks across service boundaries |
+
+**15. Idempotency Keys — Preventing Duplicate Side Effects (2026-05-05)**
+
+- **The problem**: Network failures between client and server cause retries. Without idempotency: Client sends order → Server creates it → Response lost → Client retries → Server creates ANOTHER order. User double-charged.
+- **Why orderId can't solve it**: `orderId` is generated AFTER the row is inserted. By the time you could check, the duplicate is already created.
+- **How idempotency key works**: Client generates a unique value (UUID) BEFORE sending. Server checks: "Have I processed this key?" → If yes, return existing result. If no, proceed and store the key with the result.
+- **Who generates it**: Always the CLIENT. It's in the request body, not generated server-side. Common approaches: `UUID.randomUUID()`, or deterministic: `userId + cartHash + timestamp`.
+- **Implementation pattern**: Unique constraint on `idempotency_key` column. First line of `placeOrder()`: check DB for existing order with this key → return it if found. This is the "check-before-create" pattern.
+- **Historical context**: Popularized by Stripe (~2015) via `Idempotency-Key` HTTP header after merchants reported double-charges during timeouts. Now standard in all financial APIs (Stripe, Razorpay, PayPal). Mathematical origin: idempotent operations satisfy f(f(x)) = f(x) — applying them multiple times produces the same result as once.
+- **Difference from database unique constraint on orderId**: Unique constraint on `orderId` prevents duplicate IDs (a database concern). Idempotency key prevents duplicate *business operations* (an application concern). They operate at different levels.
+
+**16. Order Status State Machine — EnumSet Transition Rules (2026-05-04)**
+
+- A state machine constrains which transitions are valid. Not every status change makes sense: DELIVERED → CREATED would "un-deliver" an order.
+- **Implementation**: `Map<OrderStatus, EnumSet<OrderStatus>>` — each status maps to the set of states it can transition TO. `canTransition(next)` is a simple `contains()` check.
+- **Why in the enum itself**: The enum owns the knowledge of its own valid transitions. Putting transition logic in the service layer means the rules are scattered and can diverge between methods.
+- **EnumSet**: Specialized `Set` implementation for enums — uses a bit vector internally (one bit per enum constant). O(1) for `contains()`. More memory-efficient than `HashSet<OrderStatus>`.
+- **Terminal states**: CANCELLED and REFUNDED map to `EnumSet.noneOf()` — no transitions allowed from these states.
+
+**17. Stock Restoration on Returns — Same Lock Pattern in Reverse (2026-05-05)**
+
+- When an order transitions to RETURNED, stock must be added back. Same pessimistic lock pattern as checkout (prevents race conditions during restock).
+- `findByProductId()` with `@Lock(PESSIMISTIC_WRITE)` → add quantity → save. Prevents: two returns for the same product causing incorrect stock (same lost-update problem, just in the add direction).
+- **Ownership validation**: Customer can only return their own orders. Server checks `order.getUserId().equals(requestingUserId)` — returns generic "not found" rather than "access denied" to avoid leaking order existence to non-owners (security best practice: don't confirm resource existence to unauthorized users).
+
+**18. HTTP Methods — Semantics, Routing, and Infrastructure Behavior (2026-05-05)**
+
+- **What Spring does with @GetMapping/@PostMapping/etc.**: Registers handler mappings at startup — routing rules of `(HTTP method + URL pattern) → controller method`. At runtime, `DispatcherServlet` asks `RequestMappingHandlerMapping` to match. If URL matches but method doesn't → 405 Method Not Allowed.
+- **Spring does NOT validate** that your method body matches the verb. You CAN do "get" behavior inside a POST handler — Spring won't complain. The distinction matters for infrastructure OUTSIDE Spring.
+- **GET**: Idempotent, safe, cacheable. Browsers/CDNs/proxies cache GET responses. No request body (proxies may strip it).
+- **POST**: Not idempotent, not cached, not retried by infrastructure. Use for creating resources or actions with side effects.
+- **PUT**: Idempotent. "Replace the ENTIRE resource." Client must send complete representation. Load balancers may auto-retry.
+- **PATCH**: Partial modification. Client sends only changed fields. RFC 5789 (2010) — added because PUT's "full replacement" didn't fit real-world partial updates.
+- **DELETE**: Idempotent. Calling it multiple times on same resource produces same result.
+- **Why it matters beyond routing**: (1) Caching: only GET is cached by CDN/browser. (2) Retry safety: gateways retry GET/PUT/DELETE but never POST. (3) CORS: PUT/PATCH/DELETE trigger preflight OPTIONS request. (4) Tooling: Swagger/monitoring infers behavior from verb. (5) Contract: API consumers expect semantic consistency.
+- **Historical context**: Roy Fielding's REST dissertation (2000) defined the "uniform interface" constraint — leveraging HTTP methods so intermediaries (caches, proxies) make intelligent decisions without inspecting payloads. PATCH added in 2010 (RFC 5789) to fill the gap between "replace everything" (PUT) and "modify a part" (real-world need).
+
+---
+
+### Interview Questions Discussed (continued)
+
+**Q104: "What happens if two users try to buy the last item simultaneously?" (2026-05-04)**
+A: Without locking: both read stock=1, both pass the `stock >= quantity` check, both decrement to 0, both save — oversold. With pessimistic locking: the first transaction acquires a `SELECT ... FOR UPDATE` lock on the product row. The second transaction blocks until the first commits. First user succeeds (stock→0). Second user unblocks, reads stock=0, fails with `InsufficientStockException`. No oversell possible.
+
+**Q105: "Why pessimistic over optimistic locking for e-commerce checkout?" (2026-05-04)**
+A: Three reasons: (1) High contention on popular products during flash sales — optimistic would cause cascading retries, worse than blocking. (2) Overselling has real-world cost (refunds, customer trust damage) — can't afford even one lost update. (3) The critical section is short (read stock, decrement, save within one transaction) — holding a lock briefly is acceptable. Optimistic is better when conflicts are rare (profile edits, wiki pages) where retry cost is low.
+
+**Q106: "What is an idempotency key and why is it necessary even with unique orderId?" (2026-05-05)**
+A: An idempotency key is a client-generated unique value (UUID) sent with the request that allows the server to detect and safely handle retries. `orderId` is server-generated AFTER creation — it can't prevent duplicates because it doesn't exist until the first request succeeds. The key exists BEFORE the request, so on retry, the server checks: "did I already process this key?" → returns cached result without side effects. Critical for payment flows where network failures between "order created" and "response received" would otherwise cause double-charges.
+
+**Q107: "How would you implement an order status state machine in Java?" (2026-05-04)**
+A: Store valid transitions as a `Map<OrderStatus, EnumSet<OrderStatus>>` inside the enum itself. Each constant maps to the set of states it can transition to. Add a `canTransition(OrderStatus next)` method that checks `TRANSITIONS.get(this).contains(next)`. Terminal states (CANCELLED, REFUNDED) map to `EnumSet.noneOf()`. This keeps transition rules co-located with the enum, uses EnumSet's O(1) bit-vector lookup, and makes it impossible to accidentally allow invalid transitions — the state machine is self-documenting.
+
+**Q108: "Why return 404 instead of 403 when a user tries to access another user's order?" (2026-05-05)**
+A: Returning 403 ("Forbidden") confirms the resource EXISTS but the user lacks access. This leaks information — an attacker can enumerate valid order IDs. Returning 404 ("Not Found") reveals nothing: the order might not exist, or it might belong to someone else — the attacker can't tell. This is called "not confirming resource existence to unauthorized users" and is a standard security practice (OWASP recommendation).
+
+**Q109: "Why use PATCH instead of PUT for updating order status?" (2026-05-05)**
+A: PUT semantics mean "replace the ENTIRE resource with this payload" — the client must send all fields (userId, totalAmount, items, shippingAddress, etc.) or they become null. PATCH means "apply a partial modification" — sending only the fields being changed (just `status` in our case). Status transition additionally has business validation (state machine), which PATCH better communicates: this isn't a simple field overwrite but a controlled operation with rules. PUT would be appropriate for full order updates where the client sends a complete replacement.
+
+**Q110: "If you can expose a POST endpoint and do 'get' behavior inside, why does the HTTP method annotation matter?" (2026-05-05)**
+A: Spring uses the annotation purely for routing (matching incoming requests to handlers). It doesn't validate your method body matches the verb semantics. But the HTTP method choice matters for infrastructure beyond Spring: (1) Caches (CDN, browser) only cache GET — POST responses are never cached; (2) Load balancers may auto-retry GET/PUT/DELETE (idempotent) but never POST (might create duplicates); (3) CORS preflight is triggered for PUT/PATCH/DELETE, not simple GET/POST; (4) The method communicates a contract — API consumers, Swagger docs, and monitoring tools all interpret semantics from the verb.
+
+---
+A: Redis Hash maps field → value within a single key. For a cart: `Cart:user123` → `{prod1: json, prod2: json}`. Each field operation (HSET/HDEL) is atomic at the field level — two concurrent "add to cart" for different products don't conflict. With a String key (entire cart as JSON), every modification requires GET → deserialize → modify → serialize → SET — a read-modify-write cycle with race conditions (last write wins, items lost). Hash also uses compact encoding (listpack) for small objects, saving memory.
+
+**Q99: "What is ObjectMapper and when should you use it vs letting Spring handle serialization?" (2026-05-03)**
+A: `ObjectMapper` is Jackson's core class for Java ↔ JSON conversion. Let Spring handle it automatically for: REST request/response bodies (`@RequestBody`/`@ResponseBody`), where `MappingJackson2HttpMessageConverter` does it transparently. Use `ObjectMapper` manually when: storing objects in Redis (Hash values must be Strings), reading JSON config files, or converting between DTOs programmatically. Always inject the Spring-managed singleton — it has auto-configured modules (Java 8 time, etc.) and consistent settings.
+
+**Q100: "Why should you never use @Data on JPA entities?" (2026-05-03)**
+A: `@Data` generates `@EqualsAndHashCode` using all fields — dangerous for entities where `id` starts as null (pre-persist). Adding an entity to a HashSet, then saving it (id assigned), changes its hashCode — the Set can't find it anymore. Hibernate uses Sets for `@OneToMany` collections, so this corrupts entity tracking. `@Data` also generates `@ToString` — bidirectional relationships (`Order ↔ OrderItem`) cause infinite recursion → StackOverflowError. Use `@Getter` + `@Setter` + `@NoArgsConstructor` + `@AllArgsConstructor` + `@Builder` instead.
+
+**Q101: "Explain the owning side vs inverse side in JPA bidirectional relationships." (2026-05-03)**
+A: The owning side has `@JoinColumn` and controls the FK column in the database — only changes to the owning side are persisted to the FK. The inverse side has `@OneToMany(mappedBy = "fieldName")` — it's a read-only navigation mirror. `mappedBy` tells JPA: "don't manage the FK from this side, look at the named field in the child entity." If you only set the inverse side (`parent.getChildren().add(child)`) without setting the owning side (`child.setParent(parent)`), the FK column stays NULL. That's why bidirectional relationships need a helper method that sets both sides.
+
+**Q102: "Why use EnumType.STRING instead of ORDINAL for JPA enums?" (2026-05-03)**
+A: ORDINAL stores the enum's position (0, 1, 2...). If you add a new value in the middle of the enum, all positions after it shift — existing DB rows now map to the wrong enum value. Data corruption in production. STRING stores the enum name as text ("CONFIRMED", "SHIPPED") — immune to reordering. The cost is slightly more storage (varchar vs int), which is negligible. ORDINAL is the JPA default (backward compatibility with EJB 2.x), so you must always explicitly annotate with `@Enumerated(EnumType.STRING)`.
+
+**Q103: "How does Spring Data resolve `findByOrderId` when the entity has no `orderId` field?" (2026-05-03)**
+A: Spring Data's property expression parser splits the method name on camelCase boundaries and walks the entity graph. `findByOrderId` → tries `orderId` field (not found) → splits into `order` + `id` → finds `OrderItem.order` (@ManyToOne) → traverses to `Order.id` (from BaseEntity). Generates SQL: `WHERE oi.order_id = ?`. If the entity had BOTH an `orderId` field AND an `order` relationship, there'd be ambiguity — Spring prefers the direct field. Use underscore (`findByOrder_Id`) to force traversal through the relationship.
+
+---

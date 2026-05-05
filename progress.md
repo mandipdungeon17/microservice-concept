@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 1 - User Service & Security (IN PROGRESS)
+## Status: Phase 3 - Order Service & Cart (FUNCTIONAL COMPLETE)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -265,11 +265,108 @@
 ### Phase 2 Remaining
 - [ ] Step 9: Unit + Integration tests — DEFERRED (will write after Phase 3)
 
+## Phase 3: Order Service & Cart — IN PROGRESS (started 2026-05-03)
+### Design Completed
+- [x] Cart design: Redis Hash (per-user key, product fields, 30-min TTL)
+- [x] Cart API design: add/remove/get/clear with userId from SecurityContext
+- [x] Order entity design: Order + OrderItem + OrderStatus enum
+- [x] Order lifecycle state machine: CREATED → CONFIRMED → ... → DELIVERED → RETURN_REQUESTED → RETURNED → REFUNDED
+- [x] Design decisions: price snapshot in OrderItem, no FK to Product (bounded context), idempotencyKey on Order, CascadeType.ALL + orphanRemoval
+
+### Implementation Completed
+- [x] Step 1-6: Cart implementation — COMPLETE (2026-05-03)
+  - Dependencies added: spring-boot-starter-data-redis, spring-boot-starter-validation, spring-security-core
+  - AddToCartRequest, CartItemResponse, CartResponse — Java records with Bean Validation
+  - CartRedisRepository: StringRedisTemplate + HashOperations (HSET/HGETALL/HDEL), 30-min TTL reset on write, ObjectMapper for JSON serialization
+  - CartService interface with Javadoc + CartServiceImpl: DTO transformation, total calculation, TTL-based expiresAt
+  - CartController: POST /api/cart/items, DELETE /api/cart/items/{productId}, GET /api/cart, DELETE /api/cart
+  - Corrective fixes: added Logger + Javadoc + logging to all Cart classes, fixed URI from /api/v1/cart to /api/cart (consistent with project), added Javadoc to CartService interface (source for {@inheritDoc})
+  - BUILD SUCCESSFUL
+
+- [x] Step 7: Cart end-to-end testing — COMPLETE (2026-05-03)
+  - All CRUD operations tested via curl with JWT authentication
+  - Verified: add item (201), get cart (200 with items/total/expiresAt), remove item (204), clear cart (204), empty cart response
+  - Validation tested: missing/invalid fields return 400
+  - Redis verified: KEYS, HGETALL, TTL in redis-cli
+
+- [x] Step 8: SecurityContext integration — COMPLETE (2026-05-03)
+  - Replaced {userId} path variable with Authentication parameter from SecurityContext
+  - userId extracted via authentication.getPrincipal().toString() — matches JwtAuthFilter's principal (Long userId)
+  - URLs simplified: no more userId in path, cart is scoped to authenticated user
+  - Security: users can only access their own cart
+
+- [x] Step 9: Order entity design discussion — COMPLETE (2026-05-03)
+  - Entity diagram and relationships approved
+  - OrderStatus enum: 9 states with valid transition rules
+  - Key decisions: @Enumerated(STRING) not ORDINAL, BigDecimal(19,4) for money, productId+productName snapshot (no FK to Product), @Builder.Default on items list, addItem() helper for bidirectional consistency
+
+- [x] Step 10: Create Order + OrderItem + OrderStatus entities — COMPLETE (2026-05-03)
+  - OrderStatus enum in enums package (consistent with UserRoles)
+  - Order entity: @Table("orders") avoiding SQL reserved keyword, userId (Long, no FK), status, totalAmount, idempotencyKey (unique), shippingAddress, paymentMethod, @OneToMany with cascade ALL + orphanRemoval
+  - OrderItem entity: @ManyToOne(LAZY) to Order, productId, productName, quantity, priceAtPurchase, subTotal — all snapshots
+  - addItem() helper: public, sets both sides of bidirectional relationship
+  - BUILD SUCCESSFUL
+
+- [x] Step 11: Create Order repositories — COMPLETE (2026-05-03)
+  - OrderRepository: findByUserId (order history), findByIdempotencyKey (duplicate prevention), findByUserIdAndStatus (filtered history)
+  - OrderItemRepository: findByOrderId (line items for an order)
+  - BUILD SUCCESSFUL
+
+- [x] Step 12: Create Order DTOs — COMPLETE (2026-05-04)
+  - PlaceOrderRequest: idempotencyKey, shippingAddress, paymentMethod with @NotBlank validation
+  - OrderResponse: record with orderId, userId, status, totalAmount, items, timestamps
+  - OrderItemResponse: record with productId, productName, quantity, priceAtPurchase, subTotal
+  - UpdateOrderStatusRequest: @NotBlank status string
+  - BUILD SUCCESSFUL
+
+- [x] Step 13: OrderService — placeOrder with pessimistic locking — COMPLETE (2026-05-04)
+  - Idempotency check first (findByIdempotencyKey → return existing if present)
+  - Cart retrieval + empty check (items().isEmpty())
+  - Pessimistic write lock on ProductRepository.findByProductId (JPQL + @Lock)
+  - Stock validation → InsufficientStockException, product not found → ResourceNotFoundException
+  - Stock decrement + OrderItem snapshot (price, name at purchase time)
+  - Order saved with CascadeType.ALL, cart cleared after successful save
+  - Fixed 5 bugs: JPQL entity name, builder overwrite, null check vs isEmpty, hardcoded values, swapped exceptions
+
+- [x] Step 14: OrderController — COMPLETE (2026-05-04)
+  - POST /api/order — place order (201 CREATED), userId from Authentication principal
+  - GET /api/order/{orderId} — get single order (200 OK)
+  - GET /api/order — get all orders for authenticated user (200 OK)
+  - @ResponseStatus on each endpoint, @Valid on request body
+
+- [x] Step 15: Order status transitions (state machine) — COMPLETE (2026-05-05)
+  - OrderStatus enum enhanced: static Map<OrderStatus, EnumSet<OrderStatus>> TRANSITIONS
+  - canTransition(OrderStatus next) method on enum — validates allowed transitions
+  - PATCH /api/order/{orderId}/status — @PreAuthorize("hasRole('ADMIN')")
+  - InvalidStatusTransitionException in commons/exception
+  - updateOrderStatus() in OrderService — stock restoration on RETURNED transition
+  - Fixed: control flow bug (throw always reached), enum valueOf without try-catch, missing @Transactional
+
+- [x] Step 16: Return/Refund initiation flow — COMPLETE (2026-05-05)
+  - POST /api/order/{orderId}/return — customer-facing return request
+  - requestReturn() validates ownership (userId matches order.getUserId)
+  - Only DELIVERED orders can be returned — transitions to RETURN_REQUESTED
+  - Security: returns generic 404 for non-owned orders (doesn't leak existence)
+  - Stock restoration: updateOrderStatus RETURNED → iterates items, pessimistic lock on product, adds quantity back
+  - Full lifecycle: DELIVERED → RETURN_REQUESTED (customer) → RETURNED (admin, restocks) → REFUNDED (admin, terminal)
+
+### Phase 3 Remaining
+- [x] Step 17: Test all Order APIs end-to-end — COMPLETE (2026-05-05)
+  - 15 curl tests covering: place order, idempotency duplicate detection, get by ID, get by user, status transitions (valid + invalid + invalid string), full lifecycle (CREATED → CONFIRMED → PROCESSING → SHIPPED → DELIVERED), customer return request, stock restoration on RETURNED, REFUNDED terminal state, validation errors, empty cart rejection
+  - All tests passed with expected HTTP status codes and response bodies
+
+- [x] Step 18: End-of-phase re-audit — COMPLETE (2026-05-05)
+  - Added Javadoc to ALL uncommitted files: Order, OrderItem, OrderRepository, OrderItemRepository, OrderStatus, PlaceOrderRequest, OrderResponse, OrderItemResponse, UpdateOrderStatusRequest
+  - Fixed logging inconsistency: replaced @Slf4j with Log4j (LogManager.getLogger) in OrderServiceImpl and OrderController
+  - Fixed exception class Javadoc: corrected "400 Not Found" → "400 Bad Request"
+  - Updated learning_log.md with all Phase 3 concepts, roadblocks, and interview questions
+  - Updated progress.md with all step completions
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) — FUNCTIONAL COMPLETE (tests deferred)
-- [ ] Phase 3: Order Service & Cart (Weeks 6-7) ← NEXT
+- [~] Phase 3: Order Service & Cart (Weeks 6-7) — FUNCTIONAL COMPLETE (tests deferred)
 - [ ] Phase 4: Market Data - Reactive (Weeks 8-9)
 - [ ] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12)
 - [ ] Phase 6: Event-Driven Architecture (Weeks 13-15)
@@ -303,3 +400,7 @@
 - **2026-04-28**: Step 6 complete — JPA Specifications + Pagination for product search. ProductSpecification utility (6 composable specs), PagedResponse<T> generic wrapper in commons, Specification.allOf() with unrestricted() for null-safe composition. Fixed: isActive missing null check caused empty results. `-parameters` flag moved to root build.gradle. All search/filter/sort/pagination combos tested and working. Next: Batch Import.
 - **2026-04-29**: Step 7 complete — Spring Batch CSV import. ProductBatchConfig with Job/Step/Reader/Processor/Writer, chunk-oriented processing (50 per transaction). ProductImportController with multipart file upload + JobLauncher. Batch metadata tables auto-created. 5 products imported from CSV, verified via search API. Phase 2 FUNCTIONAL COMPLETE (tests deferred). Next: Redis caching.
 - **2026-04-30**: Step 8 complete — Redis caching for product listings. RedisCacheConfig with @EnableCaching + JSON serializer. @Cacheable on reads, @CacheEvict on writes. Verified cache HIT/MISS via SQL logs + redis-cli KEYS. Phase 2 FULLY COMPLETE. Next: Phase 3 — Order Service & Cart.
+- **2026-05-03**: Phase 3 started — Cart implementation complete (Steps 1-8). Redis Hash for cart storage, StringRedisTemplate + ObjectMapper, CartController with SecurityContext userId extraction (no path variable). All CRUD tested via curl. Corrective audit: added Logger/Javadoc/logging to all Cart classes, fixed URI consistency, added Javadoc source to CartService interface. Next: Order entities.
+- **2026-05-03**: Steps 9-11 complete — Order entity design approved. Order + OrderItem + OrderStatus entities created. OrderRepository (3 query methods) + OrderItemRepository created. Learned: @Data vs individual annotations on JPA entities (equals/hashCode/toString dangers), @OneToMany/@ManyToOne bidirectional mapping (owning vs inverse side), property path traversal in Spring Data derived queries. BUILD SUCCESSFUL. Next: Order DTOs.
+- **2026-05-04**: Steps 12-15 in progress — Order DTOs (PlaceOrderRequest, OrderResponse, OrderItemResponse, UpdateOrderStatusRequest) created. OrderServiceImpl completed: placeOrder with pessimistic locking + idempotency, getOrderById, getOrdersByUserId. OrderController with 3 endpoints (POST, GET/{id}, GET). Order status transitions: OrderStatus enum with EnumSet transition map + canTransition(), PATCH endpoint with ADMIN-only access. Fixed bugs: JPQL entity name (Product not Products), swapped exception types, missing path variable braces. Next: fix updateOrderStatus control flow bug, then test all APIs.
+- **2026-05-05**: Steps 15-16 complete — Status transitions fixed (control flow, valueOf try-catch, @Transactional). Return/Refund flow: PATCH /api/order/{id}/return (customer), ownership validation, stock restoration on RETURNED with pessimistic lock. Fixed: @Slf4j→Log4j consistency, added Javadoc to exception classes. Learned: Pessimistic vs Optimistic locking (trade-offs, when to use), idempotency keys (client-generated UUID, check-before-create pattern, Stripe history). Next: test all Order APIs end-to-end.
