@@ -2000,3 +2000,753 @@ A: ORDINAL stores the enum's position (0, 1, 2...). If you add a new value in th
 A: Spring Data's property expression parser splits the method name on camelCase boundaries and walks the entity graph. `findByOrderId` → tries `orderId` field (not found) → splits into `order` + `id` → finds `OrderItem.order` (@ManyToOne) → traverses to `Order.id` (from BaseEntity). Generates SQL: `WHERE oi.order_id = ?`. If the entity had BOTH an `orderId` field AND an `order` relationship, there'd be ambiguity — Spring prefers the direct field. Use underscore (`findByOrder_Id`) to force traversal through the relationship.
 
 ---
+
+## Phase 4: Market Data Service — Reactive (IN PROGRESS)
+
+### Date: 2026-05-08
+
+---
+
+### Core Concepts Learned
+
+**1. @Configuration + @Bean — Spring's Bean Factory Pattern (2026-05-08)**
+
+- `@Configuration` is a specialized `@Component`. Spring creates a CGLIB proxy of this class to ensure singleton semantics — calling a `@Bean` method from within another `@Bean` method in the same class returns the SAME instance, not a new one.
+- Each `@Bean`-annotated method is invoked exactly once (singleton scope). The return value is stored in the ApplicationContext. Bean name defaults to method name.
+- Analogy: `@Configuration` = recipe book, `@Bean` method = recipe, Spring = chef. At startup, chef cooks each recipe once, stores dishes in the pantry (ApplicationContext). When any class requests a `WebClient`, Spring serves the pre-made instance.
+- Why not `new WebClient.builder()...build()` in the service: (1) No singleton guarantee — each class creates its own instance (wasted connection pools), (2) No centralized configuration, (3) No testability (can't swap with mock), (4) No lifecycle management (Spring can't shut down connection pools on app shutdown).
+- History: The `@Configuration` + `@Bean` style was introduced in Spring 3.0 (2009) as a Java-based alternative to XML bean definitions. Before this, every bean was declared in `applicationContext.xml` — verbose and not type-safe.
+
+**2. WebClient — Non-Blocking HTTP Client (RestTemplate Replacement) (2026-05-08)**
+
+- `RestTemplate` (Spring 3.0, 2009) was synchronous — one thread per HTTP call, blocked until response arrived. At scale (50 stock price fetches), 50 threads sit blocked.
+- `WebClient` (Spring 5, 2017) is built on Reactor Netty, uses non-blocking I/O. Returns `Mono<T>` (0-or-1 result) or `Flux<T>` (0-to-N stream).
+- **Restaurant analogy**: RestTemplate = "dedicated waiter" (stands in kitchen waiting for each dish). WebClient = "buzzer model" (waiter gives you a buzzer/`Mono`, goes to serve other tables, buzzer vibrates when dish is ready).
+- **Critical insight**: Adding `spring-boot-starter-webflux` alongside `spring-boot-starter-web` does NOT switch the server to Netty. Spring Boot detects `web` is present and stays on Tomcat. You only get the reactive *client* libraries.
+- **`.block()` at service boundary**: MVC controllers expect synchronous return values. `.block()` waits for the Mono to complete and unwraps the value. Even with `.block()`, the underlying HTTP call still uses non-blocking I/O — the Netty event loop thread is freed while waiting.
+- `RestTemplate` was officially deprecated in Spring 5.0 docs ("prefer WebClient") though not removed for backward compatibility.
+
+**3. Mono<T> — A Promise of Future Data (2026-05-08)**
+
+- `Mono<T>` = "a container that will eventually hold 0 or 1 value, or an error." Nothing happens until someone subscribes or calls `.block()`.
+- Writing `webClient.get().uri(...).retrieve().bodyToMono(...)` builds a *pipeline description*, not an execution. Like writing a recipe without cooking.
+- `.map(fn)` = transform the value when it arrives (like Stream.map). Can only produce a value.
+- `.flatMap(fn)` = transform the value into ANOTHER Mono (like Stream.flatMap). Can return `Mono.error()` to signal failure, which `.map()` cannot.
+- This is why `AlphaVantageClient` uses `.flatMap()` for JSON parsing — it needs to return `Mono.error()` when the response is invalid.
+
+**4. Reactor Netty HttpClient — Timeout Configuration (2026-05-08)**
+
+- `HttpClient.create()` creates a Reactor Netty HTTP client (separate from WebClient — it's the underlying transport).
+- `.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)` — TCP connect timeout. Controls how long the SYN → SYN-ACK → ACK handshake can take. This is a Netty channel-level option inherited from NIO socket configuration.
+- `.responseTimeout(Duration.ofSeconds(10))` — time waiting for the first response byte after the request is fully sent. Similar to Socket's `setSoTimeout()`.
+- **Two timeouts protect different failure modes**: Connect timeout = server unreachable (firewall drop, wrong IP). Response timeout = connection established but server slow (overloaded, deadlocked).
+- Without timeouts: if Alpha Vantage hangs, your thread blocks indefinitely. With them, you fail fast and let Resilience4j handle fallback.
+
+**5. Jackson JsonNode — Tree-Based JSON Parsing (2026-05-08)**
+
+- `ObjectMapper.readTree(String)` parses JSON into a navigable tree of `JsonNode` objects in two phases:
+  - **Phase 1 — Tokenization**: reads character-by-character, produces tokens (`TOKEN_START_OBJECT`, `TOKEN_FIELD_NAME`, `TOKEN_VALUE_STRING`, etc.)
+  - **Phase 2 — Tree Construction**: builds a tree of typed nodes from the tokens
+- **JsonNode type hierarchy**: `JsonNode` is the abstract parent. Subtypes created based on JSON value type:
+  - `ObjectNode` for `{ }` — stores children in `LinkedHashMap<String, JsonNode>` (preserves insertion order)
+  - `ArrayNode` for `[ ]`
+  - `TextNode` for `"string"`
+  - `IntNode`/`LongNode` for integers
+  - `DecimalNode`/`DoubleNode` for decimals
+  - `BooleanNode` for `true/false`
+  - `NullNode` for `null`
+- **`.path("key")` vs `.get("key")`**: Both navigate the tree. `.get()` returns `null` on missing key (NPE risk). `.path()` returns `MissingNode` singleton (never null) — safe for chaining: `root.path("Global Quote").path("05. price").asText()`.
+- **Why not `String.split()`**: JSON is a tree structure, not flat text. Split can't handle nested objects, escaped quotes, arrays, or mixed types. Before Jackson/Gson existed (early 2000s), developers parsed JSON with regex/split — fragile, broke on edge cases. Jackson (2009) solved this with proper tree parsing.
+- **Why JsonNode over `@JsonProperty` mapping**: Alpha Vantage's keys are `"01. symbol"`, `"05. price"` — numbered with dots and spaces. These can't be Java field names. You'd need `@JsonProperty("05. price")` on every field plus a wrapper class for the outer `"Global Quote"` key. Manual JsonNode navigation is simpler for irregular/messy JSON.
+
+---
+
+### Interview Questions Discussed
+
+**Q111: "What is @Configuration and how does Spring manage @Bean methods?" (2026-05-08)**
+A: `@Configuration` marks a class as a bean definition source. Spring creates a CGLIB proxy subclass that intercepts `@Bean` method calls to enforce singleton semantics — calling a `@Bean` method multiple times returns the same instance. Each `@Bean` method is invoked once at startup, and the return value is registered in the ApplicationContext with the method name as the bean ID. This replaced XML-based bean definitions (Spring 3.0, 2009). Without the proxy, inter-bean references (`beanA()` called from `beanB()`) would create separate instances, violating singleton scope.
+
+**Q112: "What is WebClient and why was RestTemplate deprecated?" (2026-05-08)**
+A: WebClient (Spring 5, 2017) is a non-blocking HTTP client built on Reactor Netty. RestTemplate (Spring 3.0, 2009) was synchronous — one thread blocked per HTTP call. Under high concurrency (50 parallel API calls), RestTemplate pins 50 threads; WebClient uses an event loop and releases threads while waiting for responses. WebClient returns `Mono<T>`/`Flux<T>` (reactive types), supports streaming, and integrates with Resilience4j. Even within an MVC app (Tomcat), WebClient's I/O is non-blocking — you call `.block()` at the service boundary to bridge back to synchronous controllers. Adding `spring-boot-starter-webflux` alongside `spring-boot-starter-web` only adds the client libraries; the server stays on Tomcat.
+
+**Q113: "What is Mono<T> and how does it differ from Optional<T> and CompletableFuture<T>?" (2026-05-08)**
+A: All three represent "a value that might exist," but at different levels. `Optional<T>` is synchronous and already resolved — it HAS or DOESN'T HAVE a value right now. `CompletableFuture<T>` is async — will complete in the future, but once you create it the computation is already running. `Mono<T>` is lazy AND async — nothing happens until someone subscribes. Writing `webClient.get()...bodyToMono(String.class)` builds a pipeline blueprint but makes no HTTP call. The call fires only on `.subscribe()` or `.block()`. This laziness enables composition: you can add `.retry()`, `.timeout()`, `.map()` to the pipeline before anything executes. Mono also supports backpressure (Reactive Streams spec), which CompletableFuture doesn't.
+
+**Q114: "Explain .map() vs .flatMap() in reactive streams." (2026-05-08)**
+A: `.map(fn)` transforms the value synchronously — the function returns a plain value T, which gets wrapped back into Mono<T>. `.flatMap(fn)` transforms the value into ANOTHER Mono — the function returns Mono<T>, and flatMap "flattens" the nested Mono<Mono<T>> into Mono<T>. Key difference: flatMap can return `Mono.error()` to signal failure, while map can only throw exceptions (which get wrapped in onError signal anyway, but less idiomatic). Use map for simple transformations (parse string to int), flatMap when the transformation itself can fail or involves another async operation (call another service, validate and potentially reject).
+
+**Q115: "What is Jackson's JsonNode and when would you use it over POJO mapping?" (2026-05-08)**
+A: `JsonNode` is Jackson's tree model — `readTree()` parses JSON into a tree of typed nodes (`ObjectNode`, `TextNode`, `ArrayNode`, etc.) without needing a Java class. Use it when: (1) JSON keys can't map to Java field names (Alpha Vantage's `"05. price"`), (2) you only need a few fields from a large response, (3) the schema is dynamic/unknown at compile time, (4) you need to inspect the JSON structure before deciding how to parse it. Use POJO mapping (`readValue()` with `@JsonProperty`) when the JSON structure is stable, maps cleanly to Java fields, and you need type safety. JsonNode is more flexible but loses compile-time type checking.
+
+**Q116: "What's the difference between .path() and .get() on JsonNode?" (2026-05-08)**
+A: Both navigate the JSON tree. `.get("key")` returns `null` if the key doesn't exist — calling `.asText()` on null throws NPE. `.path("key")` returns a `MissingNode` singleton (never null) — calling `.asText()` on MissingNode returns empty string `""`. This makes `.path()` safe for chaining: `root.path("A").path("B").path("C").asText()` won't NPE even if intermediate keys are missing. Use `.path()` for defensive navigation, `.get()` when you explicitly want to null-check and handle missing keys differently.
+
+---
+
+### Redis opsForValue vs opsForHash — Data Structure Choice (2026-05-09)
+
+**6. Choosing the Right Redis Data Structure (2026-05-09)**
+
+- `opsForValue()` — stores one atomic value per key. Read/write the entire value. Each key has its own TTL. Used for price cache: `price:AAPL → {full JSON}` because you always read/write the complete price, never a sub-field.
+- `opsForHash()` — stores multiple fields inside one key (a mini key-value store within a key). Read/write individual fields. TTL is per-key (all fields expire together). Used for cart: `Cart:user1 → {prod1: json, prod2: json}` because you add/remove individual products without touching others.
+- **Why not Hash for prices**: Redis TTL is per-key, not per-field. If you stored all prices in one Hash (`prices → {AAPL: json, MSFT: json}`), all symbols would expire together. With opsForValue, each symbol gets its own key and its own 30-second TTL.
+- **Why not String for cart**: Storing the entire cart as one JSON string requires read-modify-write on every operation (GET → deserialize → modify → serialize → SET). Under concurrency, this causes the "last write wins" race condition — Thread A adds hat, Thread B adds belt, B overwrites A's write, hat is lost. Hash field-level operations (`HSET`, `HDEL`) are atomic per field.
+- **Decision rule**: one atomic blob per key → opsForValue. Multiple independently-accessible fields per key → opsForHash.
+
+---
+
+### Spring AOP — Native Advisor vs AspectJ @Aspect (2026-05-09)
+
+**7. Why @Transactional/@Cacheable Don't Need AOP Dependency But Resilience4j Does (2026-05-09)**
+
+Spring has **two different AOP mechanisms** that look identical from the outside (both create CGLIB proxies) but work differently internally:
+
+**Spring's Native Advisor System (used by @Transactional, @Cacheable):**
+- Spring registers `Advisor` + `MethodInterceptor` classes programmatically via auto-configurations (`TransactionAutoConfiguration`, `CacheAutoConfiguration`)
+- These use Spring's built-in `AbstractAutoProxyCreator` which lives in the `spring-aop` module
+- `spring-aop` is already on the classpath — pulled in transitively by `spring-context`, which is in every Spring Boot starter
+- Chain: `spring-boot-starter-web` → `spring-context` → `spring-aop` → native AOP works
+
+**AspectJ @Aspect System (used by Resilience4j, custom aspects):**
+- Third-party libraries define `@Aspect`-annotated classes (e.g., `CircuitBreakerAspect`, `RetryAspect`)
+- Spring needs `AnnotationAwareAspectJAutoProxyCreator` to detect and process `@Aspect` classes
+- This creator is activated by `@EnableAspectJAutoProxy`, which is auto-configured by `AopAutoConfiguration`
+- BUT `AopAutoConfiguration` has `@ConditionalOnClass(Advice.class)` — the `Advice` class comes from the `aspectjweaver` library
+- Without `spring-boot-starter-aop`, `aspectjweaver` isn't on classpath → `AopAutoConfiguration` doesn't activate → `@Aspect` classes silently ignored → Resilience4j annotations do nothing
+- `spring-boot-starter-aop` provides: `aspectjweaver` + triggers `AopAutoConfiguration`
+
+**Why two systems?** Spring's native Advisors (2004) were designed for internal framework use — tightly coupled to Spring's bean lifecycle. AspectJ's `@Aspect` style (adopted by Spring 2.0, 2006) is the public extension point for third-party libraries and application developers who need custom AOP without accessing Spring internals.
+
+---
+
+### CGLIB Proxy Internals — Real Object + Proxy Coexistence (2026-05-09)
+
+**8. How CGLIB Proxy Wraps the Real Object (2026-05-09)**
+
+The proxy doesn't REPLACE the real object — it WRAPS it. Both exist in memory:
+
+```
+Step 1: Spring creates the REAL AlphaVantageClient
+  → Constructor runs (@RequiredArgsConstructor)
+  → webClient, objectMapper, apiKey all injected
+  → Fully functional object in memory
+
+Step 2: BeanPostProcessor inspects the real object
+  → Finds @CircuitBreaker, @Retry, @RateLimiter on methods
+  → Decides: needs a proxy
+
+Step 3: CGLIB generates a subclass at runtime
+  → AlphaVantageClient$$SpringCGLIB extends AlphaVantageClient
+  → Proxy stores: target (real object) + interceptors (aspect chain)
+  → Proxy does NOT have webClient/objectMapper/apiKey populated
+  → It never runs method bodies — only interceptor chain, then delegates to target
+
+Step 4: Spring registers PROXY in ApplicationContext
+  → All injection points receive the proxy
+  → Real object only reachable via proxy's internal target reference
+```
+
+Memory layout:
+```
+MarketDataServiceImpl
+  .alphaVantageClient ──→ CGLIB Proxy
+                            .target ──→ Real AlphaVantageClient
+                            .interceptors    .webClient = [injected]
+                              [RetryAspect]  .objectMapper = [injected]
+                              [CBaspect]     .apiKey = "GABC..."
+                              [RLaspect]     .getStockQuote() { actual code }
+```
+
+At runtime: `serviceImpl.alphaVantageClient.getStockQuote("AAPL")` → hits proxy → runs interceptor chain → proxy calls `target.getStockQuote("AAPL")` → real object's method runs with real dependencies.
+
+**9. Private Fallback Methods Work Via Reflection (2026-05-09)**
+
+When the circuit breaker catches a failure and needs to invoke the fallback:
+1. The `CircuitBreakerAspect` uses `targetClass.getDeclaredMethod("getStockQuoteFallback", String.class, Throwable.class)`
+2. Calls `fallbackMethod.setAccessible(true)` — bypasses Java's access modifier check
+3. Invokes `fallbackMethod.invoke(targetObject, symbol, exception)` on the **real object** (not through proxy)
+
+The fallback should be `private` — it's an internal implementation detail. No external code should call it directly. `setAccessible(true)` is the same mechanism Spring uses for `@Autowired` on private fields and Jackson uses for private field serialization.
+
+---
+
+### Resilience4j — Circuit Breaker, Retry, Rate Limiter (2026-05-09)
+
+**10. Circuit Breaker Pattern — Three States (2026-05-09)**
+
+- **Problem it solves**: When a downstream service (Alpha Vantage) is down, your app keeps sending requests that will fail, wasting resources and slowing responses. Each failed request might also time out (10 seconds of thread blocking for nothing).
+- **Three states**:
+  - CLOSED (normal) — requests pass through. Failures counted in sliding window.
+  - OPEN (tripped) — requests immediately rejected with fallback. No calls to downstream. Stays open for configured duration.
+  - HALF-OPEN (testing) — allows limited test requests. If they succeed → CLOSED. If they fail → OPEN again.
+- **Electrical circuit breaker analogy**: Too many appliances short-circuit (failures) → breaker trips open (cuts the circuit). After cooldown, cautiously test one appliance (half-open). Works → close breaker. Fails → stay open.
+- **Configuration**: sliding-window-size=10 (track last 10 calls), failure-rate-threshold=50 (open if 50%+ fail), wait-duration-in-open-state=30s (stay open 30s before testing).
+- **History**: Netflix Hystrix (2012) popularized the pattern for Java microservices. Martin Fowler documented it as a formal pattern in 2014. Hystrix entered maintenance mode 2018; Resilience4j became the successor — lighter, functional-style API, Spring Boot 3 compatible.
+
+**11. Retry Pattern — Handling Transient Failures (2026-05-09)**
+
+- Transient failures (network hiccup, DNS timeout, 503 from overloaded server) often resolve on the next attempt.
+- Retry automatically re-executes the call with configurable delay between attempts.
+- Configuration: max-attempts=3 (1 original + 2 retries), wait-duration=2s (wait between attempts).
+- Important: only retry on transient errors. Retrying a 400 Bad Request or 401 Unauthorized is pointless — it'll fail every time.
+
+**12. Rate Limiter — Respecting External API Limits (2026-05-09)**
+
+- External APIs enforce rate limits (Alpha Vantage: 25 requests/day free tier). Exceeding them gets you blocked or returns errors.
+- Rate limiter caps outgoing requests: limit-for-period=5 (max 5 calls per period), limit-refresh-period=60s (period resets every 60s).
+- timeout-duration=0s means don't queue excess requests — fail immediately. Alternative: set a timeout to wait for a permit.
+
+**13. Annotation Stacking Order — Outermost to Innermost (2026-05-09)**
+
+- When multiple Resilience4j annotations are stacked, they wrap like onion layers. Order: `@Retry` (outermost) → `@CircuitBreaker` → `@RateLimiter` (innermost) → actual method.
+- Why this order matters: Retry wraps everything — if circuit breaker rejects (OPEN state), retry doesn't retry (correct behavior, no point retrying a tripped breaker). Circuit breaker monitors failures from both rate limiter rejections and actual API failures. Rate limiter is the last gate before the HTTP call.
+
+**14. Resilience4j YAML Config — `instances` vs `default` (2026-05-09)**
+
+- `resilience4j.circuitbreaker.instances.alphaVantage` configures a named instance matching `@CircuitBreaker(name = "alphaVantage")`.
+- `resilience4j.circuitbreaker.default` configures fallback defaults for unnamed or unconfigured instances.
+- If annotation uses `name = "alphaVantage"` but YAML only has `default`, the named instance gets Resilience4j's hardcoded defaults — NOT the YAML `default` section. Name must match exactly (case-sensitive).
+
+---
+
+### Interview Questions Discussed (2026-05-09)
+
+**Q117: "When would you use Redis opsForValue vs opsForHash?" (2026-05-09)**
+A: `opsForValue` stores one atomic value per key — use when you always read/write the complete object (price cache, session data, simple counters). Each key has independent TTL. `opsForHash` stores multiple fields per key — use when you need independent field-level access within one logical entity (shopping cart with multiple products, user profile with individual fields). TTL is per-key (all fields expire together). Decision: if you need per-field operations or different fields change independently → Hash. If it's always all-or-nothing → String (opsForValue).
+
+**Q118: "Why does @Transactional work without spring-boot-starter-aop but @CircuitBreaker doesn't?" (2026-05-09)**
+A: Different AOP mechanisms. `@Transactional` and `@Cacheable` use Spring's native Advisor/MethodInterceptor system, registered programmatically by auto-configurations (`TransactionAutoConfiguration`). This only needs `spring-aop` module — already on classpath via `spring-context` (in every starter). Resilience4j uses AspectJ-style `@Aspect` classes, which require `aspectjweaver` library + `@EnableAspectJAutoProxy` (activated by `AopAutoConfiguration`, which is conditional on `aspectjweaver` being present). Without `spring-boot-starter-aop`, `aspectjweaver` isn't available → `AopAutoConfiguration` doesn't activate → `@Aspect` classes are silently ignored → annotations do nothing.
+
+**Q119: "How does a CGLIB proxy relate to the real object? Does the proxy replace it?" (2026-05-09)**
+A: Both coexist in memory. Spring first creates the real object (constructor injection, all fields populated). Then a `BeanPostProcessor` detects proxy-worthy annotations, generates a CGLIB subclass, and registers the PROXY in the ApplicationContext — not the real object. The proxy holds a `target` reference to the real object plus an interceptor chain. The proxy itself has no business fields populated (no `webClient`, no `objectMapper`) — it never runs method bodies. On method call: proxy runs interceptors → interceptors decide to proceed → proxy calls `target.method()` → real object's code runs with its real dependencies. All injection points receive the proxy, so every external call goes through the interceptor chain.
+
+**Q120: "How does a private fallback method work with Resilience4j's circuit breaker?" (2026-05-09)**
+A: The `CircuitBreakerAspect` uses Java reflection to invoke the fallback. When the circuit breaker catches a failure: (1) `targetClass.getDeclaredMethod("fallbackName", ...)` finds the method regardless of access modifier, (2) `method.setAccessible(true)` bypasses Java's private access check, (3) `method.invoke(targetObject, args)` calls it on the real object (not through the proxy). This is the same reflection mechanism Spring uses for `@Autowired` on private fields and Jackson uses for private field serialization. The fallback SHOULD be private — it's an implementation detail that no external code should call directly.
+
+**Q121: "What is the circuit breaker pattern and what are its three states?" (2026-05-09)**
+A: The circuit breaker prevents an application from repeatedly calling a failing downstream service. Three states: **CLOSED** (normal) — requests pass through, failures counted in a sliding window. When failure rate exceeds threshold → transitions to OPEN. **OPEN** — all requests immediately rejected with fallback, no calls to downstream. Saves resources and prevents cascade failures. After a wait duration → transitions to HALF-OPEN. **HALF-OPEN** — allows a limited number of test requests. If they succeed → CLOSED (service recovered). If they fail → OPEN (still broken). Named after electrical circuit breakers — same principle of cutting the circuit to prevent damage, then cautiously testing before restoring.
+
+**Q122: "Why should a Resilience4j fallback return an error instead of zeroed/default data?" (2026-05-09)**
+A: Returning fake data (price=$0.00, volume=0) is dangerous because: (1) the caller has no way to distinguish real data from fallback data, (2) fake data gets cached (Redis, browser) and served to users as real, (3) downstream decisions based on fake data cause business errors (stock-back rewards calculated on $0 price). Returning `Mono.error()` with a descriptive exception lets `GlobalExceptionHandler` send a proper error response (503 Service Unavailable), which clients can handle appropriately (retry later, show "data unavailable" message). Exception: if you have a last-known-good value in MongoDB, returning stale-but-real data with a "stale" flag IS acceptable.
+
+---
+
+### MongoDB Historical Price Storage (2026-05-09)
+
+**15. Spring Data MongoDB — @Document vs JPA @Entity (2026-05-09)**
+
+- `@Document(collection = "price_history")` maps a Java class to a MongoDB collection (like `@Entity` + `@Table` in JPA). MongoDB stores BSON documents (binary JSON), not rows.
+- `@Id` on a `String` field maps to MongoDB's `_id`. If you use `String`, Spring auto-generates an `ObjectId` hex string. If you use `Long`, you'd need manual ID generation (MongoDB has no auto-increment like SQL `SERIAL`).
+- `@Indexed(expireAfter = "90d")` creates a TTL index on `fetchedAt`. MongoDB's background thread checks every 60 seconds and deletes documents whose indexed field is older than the TTL. This is automatic garbage collection — no cron job or scheduled task needed.
+- `MongoRepository<PriceHistory, String>` gives you `save()`, `findById()`, `findAll()` plus Spring Data derived query methods — same interface style as `JpaRepository` but targeting MongoDB.
+- Key difference from JPA: no schema enforcement (MongoDB is schemaless), no `ALTER TABLE` migrations. Adding a new field to the document class just works — old documents without the field get `null` when read.
+
+**16. CompletableFuture.runAsync() — Fire-and-Forget Side Effects (2026-05-09)**
+
+- `CompletableFuture.runAsync(() -> {...})` submits a `Runnable` to the common `ForkJoinPool` and returns immediately. The caller doesn't wait for completion.
+- Use case: saving `PriceHistory` to MongoDB on cache miss. The price response goes back to the client immediately; the DB write happens asynchronously. If MongoDB is slow (100ms), the API response isn't delayed by it.
+- `.whenComplete((result, ex) -> {...})` attaches a callback for logging success/failure — doesn't block the caller.
+- **Caveat**: if the application shuts down while the async task is running, it may not complete. For critical writes, use `@Async` with a `TaskExecutor` that has graceful shutdown, or write synchronously. For analytics/logging snapshots, fire-and-forget is acceptable.
+- History: `CompletableFuture` was introduced in Java 8 (2014) as a composable alternative to raw `Thread` + `Runnable` or `ExecutorService.submit()`. Before Java 8, fire-and-forget required manual thread pool management.
+
+---
+
+### Company Health Score — Composite Signal Algorithm (2026-05-10)
+
+**17. BigDecimal.compareTo() — Never Use == for Financial Comparisons (2026-05-10)**
+
+- `BigDecimal` is an object — `==` compares references, not values. `new BigDecimal("1.0") == new BigDecimal("1.0")` is `false`.
+- Even `.equals()` has a trap: `new BigDecimal("1.0").equals(new BigDecimal("1.00"))` is `false` because `.equals()` compares both value AND scale.
+- `.compareTo()` compares only the numeric value: returns -1 (less), 0 (equal), or +1 (greater). `compareTo(BigDecimal.ZERO)` is the standard idiom for checking positive/negative.
+- History: `BigDecimal` was in Java since 1.1 (1997), but the `compareTo` vs `equals` gotcha has caused production bugs for decades. The Javadoc explicitly warns about it, but many developers still fall into the trap.
+
+**18. LinkedHashMap — Insertion-Ordered Map (2026-05-10)**
+
+- `HashMap` makes no guarantees about iteration order — it can change between runs or JVM versions. `LinkedHashMap` maintains a doubly-linked list of entries alongside the hash table, guaranteeing iteration in insertion order.
+- Used for the `signals` map in health score: signals appear in the order they were computed (priceChange → changePercent → weeklyTrend → volume), making the API response predictable and readable.
+- Overhead: ~30% more memory per entry (two extra pointers for the linked list). Negligible for small maps, but matters at scale (millions of entries). For API response DTOs, always prefer readability over micro-optimization.
+
+---
+
+### SSE — Server-Sent Events for Live Streaming (2026-05-10)
+
+**19. SSE vs WebSocket vs Polling (2026-05-10)**
+
+- **Polling** (pre-2009): client sends repeated HTTP requests on a timer. Simple but wasteful — most responses return "no change." Latency equals the polling interval. Each request carries full HTTP overhead (headers, TCP handshake if not keep-alive).
+- **SSE** (HTML5, 2009): client opens one long-lived HTTP connection (`Content-Type: text/event-stream`). Server pushes data whenever it wants. Unidirectional (server → client). Built on plain HTTP — works through proxies, load balancers, firewalls with no special configuration. Browsers auto-reconnect on disconnect. Format is simple text: `data: {...}\n\n`.
+- **WebSocket** (RFC 6455, 2011): full-duplex (both directions). Starts as HTTP then upgrades to `ws://` protocol via handshake. Needed when the client also sends frequent messages (chat apps, collaborative editing, gaming). More complex infrastructure — some corporate proxies and firewalls block the upgrade.
+- **Decision rule**: server pushes data, client just listens → SSE. Both sides send frequently → WebSocket. Simple, low-frequency checks → Polling.
+
+**20. Flux.interval() + concatMap — Ordered Periodic Emission (2026-05-10)**
+
+- `Flux.interval(Duration.ofSeconds(5))` emits `0L, 1L, 2L, ...` every 5 seconds on Reactor's `Schedulers.parallel()` timer thread.
+- `.concatMap(tick -> alphaVantageClient.getStockQuote(symbol))` subscribes to each inner `Mono` sequentially — waits for tick N's response before subscribing to tick N+1. This guarantees price events arrive in order.
+- `.flatMap()` would subscribe to all inner Monos eagerly (concurrently). If tick 6's API call takes 8 seconds and tick 7's takes 2 seconds, flatMap delivers tick 7 first. For a price stream, out-of-order data is confusing.
+- `.onErrorResume(e -> Mono.empty())` skips individual tick failures (API error, rate limit) without killing the entire stream. The next tick will try again.
+- `.distinctUntilChanged(StockPriceResponse::price)` suppresses consecutive identical prices. During off-hours (market closed), every tick returns the same price — no point pushing duplicate data. Uses the key selector overload because `StockPriceResponse` has a `cachedAt` field that changes every time, making the default `.equals()` always false.
+
+**21. ServerSentEvent<T> Wrapper — Standard SSE Fields (2026-05-10)**
+
+- Returning raw `Flux<T>` with `text/event-stream` produces: `data: {json}\n\n` for each element. Works but limited.
+- `ServerSentEvent<T>` gives control over SSE protocol fields: `id` (for client reconnect — browser sends `Last-Event-ID` header), `event` (event type for `EventSource.addEventListener()`), `retry` (reconnect interval in ms), `comment` (keep-alive ping without triggering event handler).
+- Spring auto-serializes `.data()` to JSON. The builder pattern: `ServerSentEvent.<StockPriceResponse>builder().data(price).build()`.
+- The `.<StockPriceResponse>builder()` syntax is a "type witness" — tells Java's type inference what `T` is for the generic builder.
+
+**22. Reactive End-to-End — No .block() in SSE (2026-05-10)**
+
+- Synchronous endpoints (getPrice, getHealthScore) use `.block()` at the service boundary to bridge reactive Mono into MVC's synchronous return.
+- SSE endpoint returns `Flux<ServerSentEvent<T>>` directly — Spring's reactive support writes each element to the HTTP response as it arrives, using chunked transfer encoding. No thread is blocked waiting.
+- This is the key architectural benefit: one SSE connection per client, but no thread pinned per connection. Reactor's event loop handles all connections on a small thread pool (default = CPU cores).
+
+---
+
+### Interview Questions Discussed (2026-05-09 — 2026-05-10)
+
+**Q123: "What is a MongoDB TTL index and when would you use one?" (2026-05-09)**
+A: A TTL (Time To Live) index is a special single-field index on a date field. MongoDB's background thread checks every 60 seconds and deletes documents whose indexed field value is older than the specified duration. Use it for: session tokens, temporary logs, analytics data, or price history snapshots that become irrelevant after a period. Example: `@Indexed(expireAfter = "90d")` on a `fetchedAt` field auto-deletes documents after 90 days. Advantage over application-level cleanup: no scheduled job to maintain, no bulk deletes that spike load. Limitation: granularity is ~60 seconds (the background thread's check interval), so it's not suitable for precise expiration.
+
+**Q124: "What is CompletableFuture.runAsync() and when is it appropriate for fire-and-forget?" (2026-05-09)**
+A: `CompletableFuture.runAsync(Runnable)` submits a task to the ForkJoinPool common pool and returns immediately — the caller doesn't wait for completion. Appropriate for non-critical side effects where the main operation should not be delayed: logging to analytics DB, saving snapshots, sending non-essential notifications. NOT appropriate for critical writes (payment records, order creation) where data loss on shutdown is unacceptable. For those, use synchronous calls or an `@Async` method with a graceful-shutdown `TaskExecutor`. Always attach `.whenComplete()` for error logging — otherwise failures are silently swallowed.
+
+**Q125: "Why use BigDecimal.compareTo() instead of equals() for financial comparisons?" (2026-05-10)**
+A: `BigDecimal.equals()` compares both value AND scale: `new BigDecimal("1.0").equals(new BigDecimal("1.00"))` is `false` because scales differ (1 vs 2). `compareTo()` compares only the numeric value, returning -1/0/+1. For financial code (prices, balances, totals), `compareTo` is always correct. The `==` operator is even worse — it compares object references, not values. Standard idiom: `amount.compareTo(BigDecimal.ZERO) > 0` to check positive. This is a notorious Java gotcha — the Javadoc warns about it, but it causes production bugs regularly.
+
+**Q126: "What is the difference between concatMap and flatMap in reactive streams?" (2026-05-10)**
+A: Both transform each element into a Publisher and flatten the results. `flatMap` subscribes to all inner publishers eagerly (concurrently) — results can arrive out of order. `concatMap` subscribes to each inner publisher sequentially — waits for the current one to complete before subscribing to the next. Use `flatMap` when order doesn't matter and you want maximum throughput (parallel API calls). Use `concatMap` when ordering matters (price stream, event log) or when the downstream can't handle concurrent requests (rate-limited API). There's also `switchMap` — on each new element, cancels the previous inner publisher and subscribes to the new one. Used for "latest value wins" scenarios (search-as-you-type).
+
+**Q127: "Explain SSE vs WebSocket. When would you choose each?" (2026-05-10)**
+A: SSE (Server-Sent Events) is a unidirectional protocol — server pushes to client over a standard HTTP connection (`text/event-stream`). WebSocket is bidirectional — both sides send messages over a single TCP connection after an HTTP upgrade handshake. Choose SSE when: server pushes data, client just listens (stock prices, notifications, live scores). SSE advantages: works through all HTTP proxies/firewalls, auto-reconnects with `Last-Event-ID`, simpler server implementation, uses standard HTTP caching/compression. Choose WebSocket when: both sides send frequently (chat, collaborative editing, multiplayer games). WebSocket advantages: lower per-message overhead (no HTTP headers), true bidirectional communication. SSE limitation: browsers allow ~6 concurrent SSE connections per domain (HTTP/1.1 limit, not present in HTTP/2).
+
+---
+
+## Phase 4: Complete Debug-Mode Walkthrough — What Happens Step by Step
+
+This section traces exactly what happens in the market-data module from application startup through each API call, like stepping through a debugger.
+
+### BEFORE THE APPLICATION STARTS — Build & Wiring
+
+**1. Gradle Resolves Dependencies (build time)**
+
+When you run `./gradlew build`, Gradle reads `market-data/build.gradle` and resolves:
+- `spring-boot-starter-webflux` → pulls in Reactor Netty (non-blocking HTTP client), `spring-webflux` (reactive web layer), `reactor-core` (Mono/Flux types)
+- `spring-boot-starter-data-mongodb` → pulls in MongoDB Java driver, Spring Data MongoDB (`MongoRepository`, `@Document` support)
+- `spring-boot-starter-data-redis` → pulls in Lettuce (Redis client), `StringRedisTemplate`
+- `resilience4j-spring-boot3` + `resilience4j-reactor` → pulls in Resilience4j aspects (@CircuitBreaker, @Retry, @RateLimiter)
+- `spring-boot-starter-aop` → pulls in `aspectjweaver` which activates `AopAutoConfiguration` → enables `@Aspect` scanning for Resilience4j
+
+The `app` module depends on `market-data`, so the fat JAR includes all these classes.
+
+**2. Spring Boot Starts — Auto-Configuration (startup)**
+
+`EquityCartApplication.main()` calls `SpringApplication.run()`. Spring Boot's auto-configuration detects classes on the classpath and creates beans:
+
+```
+Classpath Detection → Auto-Configuration → Bean Creation:
+
+WebClient on classpath        → [no auto-config — we provide our own @Bean]
+MongoClient on classpath      → MongoAutoConfiguration creates MongoClient bean → connects to mongodb://localhost:27017/equitycart
+StringRedisTemplate on classpath → RedisAutoConfiguration creates StringRedisTemplate bean → connects to localhost:6379
+aspectjweaver on classpath    → AopAutoConfiguration activates → enables @Aspect scanning
+Resilience4j on classpath     → CircuitBreakerAutoConfiguration reads YAML → creates CircuitBreakerRegistry, RetryRegistry, RateLimiterRegistry
+```
+
+**3. Bean Creation Order for Market-Data Module**
+
+Spring creates beans in dependency order (constructor injection forces this):
+
+```
+Step 1: WebClientConfig.webClient()
+  → @Configuration class processed
+  → webClient() @Bean method called
+  → HttpClient.create() with connect timeout (5s) + response timeout (10s)
+  → WebClient.builder().baseUrl("https://www.alphavantage.co").build()
+  → WebClient bean registered in ApplicationContext
+
+Step 2: ObjectMapper (already exists — Spring Boot auto-creates one)
+
+Step 3: AlphaVantageClient (real object)
+  → @Component detected by component scan
+  → Constructor injection: (WebClient, ObjectMapper) ← both already exist
+  → @Value("${alphaVantage.api-key}") → Spring reads YAML → injects API key string into field
+  → Real object fully constructed with all dependencies
+
+Step 4: AlphaVantageClient (CGLIB proxy wraps real object)
+  → BeanPostProcessor inspects real AlphaVantageClient
+  → Finds @Retry, @CircuitBreaker, @RateLimiter on getStockQuote()
+  → CGLIB generates subclass: AlphaVantageClient$$SpringCGLIB
+  → Proxy stores: target (real object) + interceptor chain [RetryAspect, CircuitBreakerAspect, RateLimiterAspect]
+  → PROXY registered in ApplicationContext (replaces real object as the injectable bean)
+
+Step 5: PriceHistoryRepository
+  → Spring Data MongoDB detects MongoRepository interface
+  → Creates a dynamic proxy implementing findBySymbolAndFetchedAtBetween() etc.
+  → Registers proxy as bean
+
+Step 6: StringRedisTemplate (already exists — auto-configured)
+
+Step 7: MarketDataServiceImpl
+  → @Service detected
+  → Constructor injection: (AlphaVantageClient [PROXY], StringRedisTemplate, ObjectMapper, PriceHistoryRepository [PROXY])
+  → All 4 dependencies already exist → bean created
+
+Step 8: MarketDataController
+  → @RestController detected
+  → Constructor injection: (MarketDataService) ← MarketDataServiceImpl satisfies this
+  → Bean created, request mappings registered with DispatcherServlet
+```
+
+**4. Resilience4j Instances Created from YAML**
+
+```yaml
+resilience4j:
+  circuitbreaker:
+    instances:
+      alphaVantage:                    # ← name must match @CircuitBreaker(name = "alphaVantage")
+        sliding-window-size: 10        # track last 10 calls
+        failure-rate-threshold: 50     # open if 50%+ fail
+        wait-duration-in-open-state: 30s
+  retry:
+    instances:
+      alphaVantage:
+        max-attempts: 3
+        wait-duration: 2s
+  ratelimiter:
+    instances:
+      alphaVantage:
+        limit-for-period: 5           # max 5 calls per 60s window
+        limit-refresh-period: 60s
+        timeout-duration: 0s          # fail immediately if limit reached
+```
+
+Spring reads this YAML, creates named instances in CircuitBreakerRegistry/RetryRegistry/RateLimiterRegistry. The `@CircuitBreaker(name = "alphaVantage")` annotation matches the YAML key exactly.
+
+**5. MongoDB Connection Established**
+
+```
+MongoClient created → connects to localhost:27017
+→ mode=SINGLE (standalone, not replica set)
+→ no authentication (default for local dev)
+→ database "equitycart" selected (from URI)
+→ collection "price_history" auto-created on first write
+→ TTL index on fetchedAt created (if not exists) — MongoDB background thread will auto-delete documents older than 90 days
+```
+
+**6. SecurityFilterChain Loaded**
+
+```
+SecurityConfig's SecurityFilterChain bean:
+→ /api/auth/** → permitAll
+→ /api/admin/** → ADMIN only
+→ POST /api/products/** → ADMIN or SELLER
+→ anyRequest().authenticated() ← this covers /api/market-data/**
+→ JwtAuthFilter registered BEFORE UsernamePasswordAuthenticationFilter
+```
+
+All market-data endpoints require a valid JWT token.
+
+### AFTER APPLICATION STARTS — Request Flows
+
+#### Flow 1: GET /api/market-data/price/AAPL (Cache MISS)
+
+```
+CLIENT → sends HTTP GET with Authorization: Bearer <JWT>
+
+──── Servlet Container (Tomcat) ────
+1. Tomcat receives request on port 8080
+2. Allocates a thread from the thread pool (nio-8080-exec-N)
+3. Passes request to Spring's FilterChain
+
+──── Security Filter Chain ────
+4. JwtAuthFilter.doFilterInternal() runs:
+   → Extracts "Bearer eyJhbG..." from Authorization header
+   → Calls jwtService.validateToken(token) → parses JWT, verifies HMAC signature, checks expiry
+   → Extracts userId (subject) and roles (custom claim) from JWT payload
+   → Creates UsernamePasswordAuthenticationToken(userId, null, [ROLE_CUSTOMER, ROLE_ADMIN])
+   → Sets SecurityContextHolder.getContext().setAuthentication(authToken)
+   → Calls filterChain.doFilter() → passes to next filter
+
+5. AuthorizationFilter runs:
+   → Checks: does /api/market-data/price/AAPL match any specific rule? No.
+   → Falls to anyRequest().authenticated() → is SecurityContext populated? Yes → ALLOWED
+
+──── DispatcherServlet ────
+6. DispatcherServlet.doDispatch():
+   → HandlerMapping matches GET /api/market-data/price/{symbol} → MarketDataController.getPrice()
+   → HandlerAdapter invokes the method
+
+──── Controller ────
+7. MarketDataController.getPrice("AAPL"):
+   → log.info("GET /price/AAPL — single price lookup")
+   → Calls marketDataService.getPrice("AAPL")
+
+──── Service ────
+8. MarketDataServiceImpl.getPrice("AAPL"):
+   → Builds Redis key: "price:AAPL"
+   → Calls redisTemplate.opsForValue().get("price:AAPL")
+   → Redis returns null → CACHE MISS
+   → log.info("Cache MISS for symbol: AAPL — calling Alpha Vantage API")
+
+──── Alpha Vantage Client (through CGLIB proxy) ────
+9. Calls alphaVantageClient.getStockQuote("AAPL")
+   → This hits the CGLIB PROXY, not the real object
+   → Proxy's interceptor chain executes:
+
+   Layer 1 — @Retry (outermost):
+     → RetryAspect checks: attempt 1 of 3
+     → Proceeds to next layer
+
+   Layer 2 — @CircuitBreaker:
+     → CircuitBreakerAspect checks: state = CLOSED, failure count < threshold
+     → Proceeds to next layer
+
+   Layer 3 — @RateLimiter (innermost):
+     → RateLimiterAspect checks: 1 of 5 permits used this 60s window
+     → Permits request → proceeds to real method
+
+   Layer 4 — Real AlphaVantageClient.getStockQuote("AAPL"):
+     → log.info("Fetching stock quote for symbol: AAPL")
+     → Builds reactive pipeline (NO HTTP call yet — lazy assembly):
+        webClient.get()
+          .uri("/query?function=GLOBAL_QUOTE&symbol=AAPL&apikey=YOUR_KEY")
+          .retrieve()
+          .bodyToMono(String.class)
+          .flatMap(parse JSON → StockQuote)
+     → Returns Mono<StockQuote> (still no HTTP call — just a blueprint)
+
+──── Back in Service (.block()) ────
+10. stockQuoteMono.map(this::toResponse).block()
+    → .block() subscribes to the Mono → triggers the actual HTTP call
+    → Reactor Netty sends GET https://www.alphavantage.co/query?...
+    → Netty event loop thread handles the I/O (non-blocking)
+    → Response arrives: {"Global Quote": {"01. symbol": "AAPL", "05. price": "293.32", ...}}
+    → .flatMap() runs: objectMapper.readTree(responseBody)
+    → JsonNode tree navigated: rootNode.path("Global Quote").path("05. price").asText() → "293.32"
+    → StockQuote record created: (symbol="AAPL", price=293.32, change=5.88, ...)
+    → .map(this::toResponse) converts to StockPriceResponse (adds cachedAt = Instant.now())
+    → .block() unwraps the Mono and returns the StockPriceResponse to the calling thread
+
+──── Redis Cache Write ────
+11. objectMapper.writeValueAsString(stockPriceResponse) → JSON string
+12. redisTemplate.opsForValue().set("price:AAPL", json, Duration.ofSeconds(30))
+    → Atomic SET with TTL: key "price:AAPL" expires in 30 seconds
+    → log.info("Cached price for symbol: AAPL (TTL: PT30S)")
+
+──── MongoDB Async Write ────
+13. CompletableFuture.runAsync(() → { ... })
+    → Submits to ForkJoinPool common pool → returns immediately (fire-and-forget)
+    → On the pool thread (later):
+      → PriceHistory.builder().symbol("AAPL").price(293.32)...build()
+      → priceHistoryRepository.save(priceHistory) → MongoDB driver inserts document
+      → .whenComplete() → log.info("Saved price history for symbol: AAPL")
+    → Main thread does NOT wait for this
+
+──── Response ────
+14. StockPriceResponse returned to controller
+15. Spring serializes to JSON via Jackson
+16. Response: 200 OK + {"symbol":"AAPL","price":293.32,...,"cachedAt":"2026-05-10T12:15:15Z"}
+```
+
+#### Flow 2: GET /api/market-data/price/AAPL (Cache HIT — within 30s)
+
+```
+Steps 1-8 same as above, then:
+
+8b. redisTemplate.opsForValue().get("price:AAPL")
+    → Redis returns JSON string → NOT null → CACHE HIT
+    → log.debug("Cache HIT for symbol: AAPL")
+    → objectMapper.readValue(cachedData, StockPriceResponse.class) → deserialize
+    → Returns StockPriceResponse directly
+    → NO call to Alpha Vantage
+    → NO MongoDB write
+    → Response: 200 OK + same JSON (from cache)
+```
+
+#### Flow 3: GET /api/market-data/health/AAPL
+
+```
+Steps 1-7 same (JWT validation, authorization, routing)
+
+──── Controller ────
+7. MarketDataController.getHealthScore("AAPL"):
+   → Calls marketDataService.getHealthScore("AAPL")
+
+──── Service ────
+8. MarketDataServiceImpl.getHealthScore("AAPL"):
+   → log.info("Computing health score for symbol: AAPL")
+
+   Sub-call 1: this.getPrice("AAPL")
+     → Goes through the full getPrice() flow (cache check → API call or cache hit)
+     → Returns StockPriceResponse(price=293.32, change=+5.88, changePercent="2.0456%", volume=52692761)
+
+   Signal 1 — priceChange:
+     → change.compareTo(BigDecimal.ZERO) → 5.88 > 0 → changeSign = 1
+     → score = 50 + 15 = 65
+     → signals.put("priceChange", "POSITIVE (+15)")
+
+   Signal 2 — changePercent:
+     → "2.0456%".replace("%","") → "2.0456" → Double.parseDouble → 2.0456
+     → Math.abs(2.0456) = 2.0456 → > 2.0 → SIGNIFICANT
+     → changeSign > 0 → bonus = +10
+     → score = 65 + 10 = 75
+     → signals.put("changePercent", "SIGNIFICANT (+10)")
+
+   Sub-call 2: this.getHistory("AAPL", 7)
+     → priceHistoryRepository.findBySymbolAndFetchedAtBetween("AAPL", 7_days_ago, now)
+     → MongoDB returns List<PriceHistory> (documents saved from previous getPrice() calls)
+
+   Signal 3 — weeklyTrend:
+     → history.size() > 1 → compare earliest vs latest price
+     → If same day/same price → FLAT (+0)
+     → If latest > earliest → UPTREND (+15)
+     → score stays 75 or becomes 90
+
+   Signal 4 — volume:
+     → 52,692,761 > 1,000,000 → HIGH
+     → score += 10 → score = 85 (with FLAT trend)
+     → signals.put("volume", "HIGH (+10)")
+
+   Clamp: Math.max(0, Math.min(100, 85)) → 85
+   → log.info("Health score for AAPL: 85 — signals: {priceChange=POSITIVE (+15), ...}")
+   → Returns HealthScoreResponse(symbol="AAPL", score=85, signals={...}, calculatedAt=now)
+
+──── Response ────
+9. 200 OK + {"symbol":"AAPL","score":85,"signals":{...},"calculatedAt":"..."}
+```
+
+#### Flow 4: GET /api/market-data/stream/AAPL (SSE)
+
+```
+Steps 1-6 same (JWT, authorization)
+
+──── Controller ────
+7. MarketDataController.getStreamPrice("AAPL"):
+   → log.info("GET /stream/AAPL — opening SSE stream")
+   → Calls marketDataService.streamPrice("AAPL")
+   → Returns Flux<ServerSentEvent<StockPriceResponse>>
+   → Spring detects produces = "text/event-stream"
+   → Sets response Content-Type: text/event-stream
+   → Does NOT close the connection — keeps it open
+
+──── Reactive Stream (no .block() — fully async) ────
+8. Flux.interval(Duration.ofSeconds(5))
+   → Reactor scheduler thread emits: 0L at t=0s, 1L at t=5s, 2L at t=10s, ...
+
+   Tick 0 (t=0s):
+   → .concatMap(tick → alphaVantageClient.getStockQuote("AAPL"))
+   → Hits PROXY → Retry → CircuitBreaker → RateLimiter → real getStockQuote()
+   → WebClient calls Alpha Vantage API (non-blocking, Netty event loop)
+   → Response arrives → parsed to StockQuote → .map(toResponse) → StockPriceResponse
+   → .distinctUntilChanged(StockPriceResponse::price) → first emission → always passes
+   → .map(price → ServerSentEvent.builder().data(price).build())
+   → Spring writes to HTTP response: "data:{\"symbol\":\"AAPL\",\"price\":293.32,...}\n\n"
+   → Client receives event
+
+   Tick 1 (t=5s):
+   → Same flow → gets price 293.32
+   → .distinctUntilChanged(price) → same price as tick 0 → SUPPRESSED (not emitted)
+   → Client receives nothing
+
+   Tick 2 (t=10s):
+   → Same flow → gets price 294.10 (price changed!)
+   → .distinctUntilChanged(price) → different from last emitted → PASSES
+   → Client receives: "data:{\"symbol\":\"AAPL\",\"price\":294.10,...}\n\n"
+
+   On API error (tick N):
+   → .onErrorResume(e → Mono.empty()) → error swallowed, stream continues
+   → Next tick (N+1) tries again
+
+──── Connection stays open until: ────
+   → Client disconnects (closes browser tab, Ctrl+C in curl)
+   → Server shuts down
+   → No timeout (stream runs indefinitely)
+```
+
+#### Flow 5: DELETE /api/market-data/price/AAPL/cache (ADMIN only)
+
+```
+Steps 1-5 same, then:
+
+5b. AuthorizationFilter:
+    → @PreAuthorize("hasRole('ADMIN')") on the method
+    → Checks SecurityContext: does user have ROLE_ADMIN?
+    → If YES → proceeds
+    → If NO → throws AccessDeniedException → 403 Forbidden
+
+──── Controller ────
+6. MarketDataController.clearPriceCache("AAPL"):
+   → log.info("DELETE /price/AAPL/cache — evicting price cache (ADMIN)")
+   → Calls marketDataService.evictPriceCache("AAPL")
+
+──── Service ────
+7. MarketDataServiceImpl.evictPriceCache("AAPL"):
+   → redisTemplate.delete("price:AAPL") → removes key from Redis
+   → log.info("Evicted price cache for symbol: AAPL")
+
+──── Response ────
+8. 204 No Content (void return + @ResponseStatus(NO_CONTENT))
+   → Next getPrice("AAPL") call will be a cache MISS → fresh API call
+```
+
+#### Flow 6: GET /api/market-data/history/AAPL?days=7
+
+```
+Steps 1-6 same, then:
+
+──── Controller ────
+7. MarketDataController.getHistoricalData("AAPL", 7):
+   → @RequestParam(defaultValue = "7") → if client omits ?days=, defaults to 7
+   → log.info("GET /history/AAPL — last 7 days")
+   → Calls marketDataService.getHistory("AAPL", 7)
+
+──── Service ────
+8. MarketDataServiceImpl.getHistory("AAPL", 7):
+   → Calculates time range: Instant.now().minus(7, ChronoUnit.DAYS) to Instant.now()
+   → priceHistoryRepository.findBySymbolAndFetchedAtBetween("AAPL", startTime, endTime)
+   → Spring Data MongoDB converts method name to MongoDB query:
+     { "symbol": "AAPL", "fetchedAt": { "$gte": startTime, "$lte": endTime } }
+   → MongoDB returns matching documents sorted by fetchedAt
+   → Returns List<PriceHistory>
+
+──── Response ────
+9. 200 OK + [{"id":"...","symbol":"AAPL","price":293.32,"fetchedAt":"2026-05-10T12:15:15Z"}, ...]
+   → Note: returns raw PriceHistory entities (including MongoDB _id field)
+```
+
+### RESILIENCE SCENARIOS — What Happens When Things Fail
+
+**Scenario A: Alpha Vantage returns 500 (server error)**
+```
+Attempt 1 → WebClient gets 500 → Mono signals error
+@Retry catches → waits 2 seconds → Attempt 2
+Attempt 2 → 500 again → waits 2 seconds → Attempt 3
+Attempt 3 → 500 again → all retries exhausted
+@CircuitBreaker catches → records failure in sliding window
+If failure rate < 50% → error propagates to fallback
+getStockQuoteFallback() → returns Mono.error("Unable to fetch stock quote for AAPL")
+Service catches error → returns 500 to client
+```
+
+**Scenario B: Circuit breaker trips OPEN (too many failures)**
+```
+After 5+ failures in last 10 calls (>50% failure rate):
+@CircuitBreaker state → OPEN
+Next request arrives → CircuitBreaker immediately rejects (no API call made)
+Fallback invoked → Mono.error()
+After 30 seconds → state → HALF_OPEN
+Next request → allowed through as test
+If succeeds → state → CLOSED (normal)
+If fails → state → OPEN again (30s wait restarts)
+```
+
+**Scenario C: Rate limit exceeded (>5 calls in 60s)**
+```
+Call 6 within 60-second window:
+@RateLimiter checks → 0 permits remaining
+timeout-duration=0s → fail immediately (don't queue)
+RequestNotPermitted exception thrown
+@CircuitBreaker catches → records as failure
+Fallback invoked → Mono.error()
+After 60s window resets → 5 new permits available
+```
+
+---

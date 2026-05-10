@@ -19,7 +19,7 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 | `product-service`     | `com.equitycart.product`    | Product catalog, brands, categories, batch import | Implemented |
 | `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Implemented |
 | `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Planned     |
-| `market-data-service` | `com.equitycart.marketdata` | Real-time prices, brand-ticker mapping, WebFlux   | Planned     |
+| `market-data-service` | `com.equitycart.marketdata` | Real-time prices, health scores, SSE streaming  | Implemented |
 | `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Planned     |
 | `app`                 | `com.equitycart`            | Monolith aggregator (runs all modules as one JAR) | Implemented |
 
@@ -73,7 +73,15 @@ equitycart/
 │       ├── repository/       (OrderRepository, OrderItemRepository)
 │       └── service/          (OrderService + OrderServiceImpl)
 ├── portfolio/                (portfolio-service module — planned)
-├── market-data/              (market-data-service module — planned)
+├── market-data/              (market-data-service module)
+│   └── src/main/java/com/equitycart/marketdata/
+│       ├── client/           (AlphaVantageClient — reactive WebClient + Resilience4j)
+│       ├── config/           (WebClientConfig — Reactor Netty timeouts)
+│       ├── controller/       (MarketDataController — 6 endpoints + SSE)
+│       ├── dto/              (StockQuote, StockPriceResponse, HealthScoreResponse)
+│       ├── entity/           (PriceHistory — MongoDB document)
+│       ├── repository/       (PriceHistoryRepository — MongoRepository)
+│       └── service/          (MarketDataService + MarketDataServiceImpl)
 └── ledger/                   (ledger-service module — planned)
 ```
 
@@ -86,9 +94,11 @@ equitycart/
 | Batch Processing  | Spring Batch (chunk-oriented CSV import)      |
 | Build             | Gradle 8.14.2 (Groovy DSL)                    |
 | Code Formatting   | Spotless (Google Java Format)                 |
+| Resilience        | Resilience4j (Circuit Breaker, Retry, Rate Limiter) |
+| Reactive Client   | WebClient + Reactor Netty (non-blocking HTTP) |
 | SQL Database      | PostgreSQL                                    |
-| NoSQL Database    | MongoDB (planned)                             |
-| Cache             | Redis (@Cacheable + RedisTemplate for Cart)   |
+| NoSQL Database    | MongoDB (price history, TTL indexes)      |
+| Cache             | Redis (@Cacheable + RedisTemplate + manual opsForValue) |
 | Message Broker    | Apache Kafka (planned)                        |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
 | API Gateway       | Spring Cloud Gateway (planned)                |
@@ -134,6 +144,18 @@ equitycart/
 - **Admin Status Transitions** — PATCH endpoint with ADMIN-only access for order lifecycle progression
 - **Return/Refund Flow** — customer-initiated return request, ownership validation, stock restoration on RETURNED
 - **Javadoc + Logging** — Log4j2 loggers + Javadoc across all Order and Cart classes
+
+### Phase 4 — Market Data Service (Reactive)
+
+- **Real-Time Stock Prices** — WebClient + Alpha Vantage API (non-blocking I/O via Reactor Netty)
+- **Redis Price Cache** — manual cache-aside pattern with StringRedisTemplate (opsForValue, 30s TTL, atomic SET+expire)
+- **MongoDB Price History** — PriceHistory documents saved asynchronously (CompletableFuture.runAsync) on cache miss, TTL index auto-deletes after 90 days
+- **Resilience4j** — @CircuitBreaker (3 states: CLOSED/OPEN/HALF-OPEN), @Retry (3 attempts, 2s wait), @RateLimiter (5 calls/60s) on Alpha Vantage client
+- **Company Health Score** — composite score (0-100) from 4 signals: price change, change percent, weekly trend (MongoDB), volume
+- **SSE Live Streaming** — Server-Sent Events via Flux + concatMap, distinctUntilChanged suppresses duplicate prices
+- **Batch Price Lookup** — multi-symbol price query in single request
+- **Cache Management** — ADMIN-only cache eviction endpoint
+- **Javadoc + Logging** — Log4j2 loggers + Javadoc across all market-data classes
 
 ## API Endpoints
 
@@ -204,6 +226,17 @@ equitycart/
 | POST   | `/api/brand-ticker-mappings`      | ADMIN  | Create mapping    |
 | DELETE | `/api/brand-ticker-mappings/{id}` | ADMIN  | Delete mapping    |
 
+### Market Data
+
+| Method | Endpoint                               | Access | Description                          |
+| ------ | -------------------------------------- | ------ | ------------------------------------ |
+| GET    | `/api/market-data/price/{symbol}`      | Auth   | Get current stock price              |
+| GET    | `/api/market-data/prices?symbols=A,B`  | Auth   | Batch price lookup                   |
+| GET    | `/api/market-data/history/{symbol}`    | Auth   | Historical prices (default 7 days)   |
+| GET    | `/api/market-data/health/{symbol}`     | Auth   | Company health score (0-100)         |
+| GET    | `/api/market-data/stream/{symbol}`     | Auth   | SSE live price stream (5s interval)  |
+| DELETE | `/api/market-data/price/{symbol}/cache`| ADMIN  | Evict price cache                    |
+
 ## How to Build & Run
 
 ```bash
@@ -229,6 +262,7 @@ equitycart/
 - JDK 21
 - PostgreSQL (running on localhost:5432, database: equitycart)
 - Redis (running on localhost:6379 — via Docker: `docker run -d --name redis -p 6379:6379 redis`)
+- MongoDB (running on localhost:27017 — via Docker: `docker run -d --name mongodb -p 27017:27017 mongo`)
 
 ## Configuration
 
@@ -247,6 +281,9 @@ Key application properties (`app/src/main/resources/application.yml`):
 | `spring.data.redis.port`              | Redis server port (default: 6379)         |
 | `spring.cache.type`                   | Cache provider (redis)                    |
 | `spring.cache.redis.time-to-live`     | Default TTL for cache entries (ms)        |
+| `spring.data.mongodb.uri`             | MongoDB connection URI                    |
+| `alphavantage.base-url`               | Alpha Vantage API base URL                |
+| `alphaVantage.api-key`                | Alpha Vantage API key (env var)           |
 
 ## Project Documents
 
@@ -266,6 +303,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 1 | User Service & Security        | COMPLETE (unit tests deferred)               |
 | Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)               |
 | Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
+| Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)               |
 
 ## Known Issues
 
@@ -273,7 +311,6 @@ Key application properties (`app/src/main/resources/application.yml`):
 
 ## Roadmap Ahead
 
-- **Phase 4**: Market Data Service (WebFlux reactive, external stock API integration)
 - **Phase 5**: Portfolio Service & Stock-Back Engine (holdings, trading, vesting)
 - **Phase 6**: Event-Driven Architecture (Kafka, async order pipeline)
 - **Phase 7**: Microservices Decomposition (Eureka, Gateway, Config Server)

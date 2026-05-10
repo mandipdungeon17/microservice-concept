@@ -44,3 +44,27 @@ jwt:
   secret: dGhpcyBpcyBhIHNlY3JldCBrZXkgZm9yIGVxdWl0eWNhcnQgand0IHRva2Vu  # base64 of a 256-bit key
   access-token-expiry: 900000    # 15 minutes in milliseconds
   refresh-token-expiry: 7  # 7 days in days
+
+alphaVantage:
+  api-key: ${ALPHA_VANTAGE_API_KEY:GABC5OWOK7YA1TG9}
+  base-url: https://www.alphavantage.co
+
+resilience4j:
+  retry:
+    instances:
+      alphaVantage:
+        max-attempts: 3
+        wait-duration: 2s
+  circuitbreaker:
+    instances:
+      alphaVantage:
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        sliding-window-size: 10
+  rate-limiter:
+    instances:
+      alphaVantage:
+        limit-for-period: 5
+        limit-refresh-period: 60s
+        timeout-duration: 0s

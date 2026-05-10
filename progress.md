@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 3 - Order Service & Cart (FUNCTIONAL COMPLETE)
+## Status: Phase 4 - Market Data Service (FUNCTIONAL COMPLETE)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -362,12 +362,88 @@
   - Updated learning_log.md with all Phase 3 concepts, roadblocks, and interview questions
   - Updated progress.md with all step completions
 
+## Phase 4: Market Data Service — Reactive (started 2026-05-05) — FUNCTIONAL COMPLETE
+### Design Completed
+- [x] Architecture decision: WebClient + SSE within MVC monolith (not full WebFlux/Netty switch)
+- [x] External API: Alpha Vantage (free tier, rate-limited — forces proper caching/resilience)
+- [x] Module structure: client, config, controller, dto, service, repository
+- [x] Step sequence approved (8 steps)
+
+### Implementation
+- [x] Step 1: Dependencies + WebClient Configuration — COMPLETE (2026-05-08)
+  - market-data/build.gradle: removed spring-boot-starter-data-jpa, added webflux, data-mongodb, data-redis, resilience4j-spring-boot3, resilience4j-reactor, validation
+  - WebClientConfig: @Configuration + @Bean WebClient with Reactor Netty HttpClient, 5s connect timeout, 10s response timeout, base URL from @Value
+  - application.yml: added alphavantage.api-key (env var with demo fallback) + alphavantage.base-url
+  - Learned: @Configuration + @Bean lifecycle, WebClient as non-blocking HTTP client (RestTemplate replacement), timeout configuration via HttpClient.option() + responseTimeout()
+
+- [x] Step 2: Alpha Vantage Client + DTOs — COMPLETE (2026-05-08)
+  - StockQuote record: internal DTO for parsed Alpha Vantage response (symbol, price, change, changePercent, volume, latestTradingDay, timestamp)
+  - StockPriceResponse record: external API response DTO (same fields + cachedAt for freshness indicator)
+  - AlphaVantageClient: @Component with WebClient + ObjectMapper, Mono<StockQuote> getStockQuote(String symbol) reactive chain
+  - Reactive chain: webClient.get().uri(...).retrieve().bodyToMono(String.class).flatMap(parse JSON → StockQuote)
+  - JSON parsing via ObjectMapper.readTree() → JsonNode tree navigation (path("Global Quote").path("05. price"))
+  - Error handling: Mono.error() for missing/empty Global Quote node, catch-all for parse failures
+  - Learned: JsonNode tree structure (ObjectNode/TextNode/ArrayNode), readTree() tokenization + tree construction, .path() vs .get() (MissingNode vs null), flatMap vs map in reactive (flatMap can return Mono.error)
+
+- [x] Step 3: MarketDataService + Redis Price Cache — COMPLETE (2026-05-09)
+  - MarketDataService interface: getPrice, getPrices, evictPriceCache
+  - MarketDataServiceImpl: manual Redis cache (StringRedisTemplate + opsForValue), 30s TTL, cache-aside pattern
+  - Cache-aside flow: check Redis → MISS → call AlphaVantageClient → .block() → store in Redis → return
+  - .block() at service boundary bridges reactive Mono to synchronous MVC controller
+  - Atomic set+TTL: redisTemplate.opsForValue().set(key, json, CACHE_TTL) — 3-arg overload
+  - Learned: opsForValue vs opsForHash (data structure choice based on access pattern), .block() boundary placement
+
+- [x] Step 4: Resilience4j — Circuit Breaker + Retry + Rate Limiter — COMPLETE (2026-05-09)
+  - @Retry, @CircuitBreaker, @RateLimiter annotations on AlphaVantageClient.getStockQuote()
+  - Circuit breaker: sliding-window-size=10, failure-rate-threshold=50%, wait-duration-in-open-state=30s
+  - Retry: max-attempts=3, wait-duration=2s
+  - Rate limiter: limit-for-period=5, limit-refresh-period=60s, timeout-duration=0s
+  - Fallback method: getStockQuoteFallback returns Mono.error() (not fake data)
+  - spring-boot-starter-aop dependency added (required for AspectJ @Aspect scanning)
+  - Resilience4j YAML: instances.alphaVantage (named instance, not default)
+  - Learned: Circuit breaker 3 states (CLOSED/OPEN/HALF-OPEN), annotation stacking order, native Advisor vs AspectJ @Aspect AOP mechanisms, CGLIB proxy wraps real object (two objects in memory), private fallback via reflection (setAccessible)
+
+- [x] Step 5: MongoDB — Historical Price Storage — COMPLETE (2026-05-09)
+  - PriceHistory entity: @Document("price_history"), BigDecimal price/change, volume, tradingDay, @Indexed(expireAfter="90d") on fetchedAt for automatic TTL cleanup
+  - PriceHistoryRepository: findBySymbolOrderByFetchedAtDesc (paginated recent snapshots), findBySymbolAndFetchedAtBetween (time-range queries)
+  - Fire-and-forget persistence: CompletableFuture.runAsync() saves PriceHistory on cache MISS without blocking the price response
+  - getHistory() service method: queries MongoDB for snapshots within the last N days using Instant-based time range
+  - Learned: MongoDB @Document vs JPA @Entity, TTL indexes for automatic document expiry, CompletableFuture.runAsync for fire-and-forget side effects
+
+- [x] Step 6: Company Health Score Endpoint — COMPLETE (2026-05-10)
+  - HealthScoreResponse record: symbol, score (0–100), signals map (signal→contribution), calculatedAt
+  - getHealthScore() in MarketDataServiceImpl: composite score from 4 signals — priceChange (±15), changePercent magnitude (±10 if >2%), weeklyTrend from MongoDB (±15), volume (>1M → +10)
+  - Base score 50, clamped to [0, 100] via Math.max(0, Math.min(100, score))
+  - LinkedHashMap for signals to preserve insertion order
+  - MarketDataController: 6 endpoints — GET /price/{symbol}, GET /prices, GET /history/{symbol}, GET /health/{symbol}, DELETE /price/{symbol}/cache (ADMIN), GET /stream/{symbol} (SSE)
+  - Learned: BigDecimal.compareTo() for financial comparisons (never == with BigDecimal), LinkedHashMap preserves insertion order vs HashMap
+
+- [x] Step 7: SSE Endpoint for Live Price Streaming — COMPLETE (2026-05-10)
+  - streamPrice() in MarketDataServiceImpl: Flux.interval(5s) → concatMap (ordered, waits for each Mono) → toResponse → onErrorResume (skip failures) → distinctUntilChanged(StockPriceResponse::price)
+  - Controller: GET /stream/{symbol} with produces=TEXT_EVENT_STREAM_VALUE, returns Flux<ServerSentEvent<StockPriceResponse>>
+  - ServerSentEvent wrapper: provides SSE fields (id, event, retry, comment) — standard pattern over raw Flux
+  - concatMap vs flatMap: concatMap preserves ordering (waits for each inner Mono), flatMap can interleave if API calls take longer than interval
+  - No .block() in the stream — fully reactive end-to-end, Spring handles chunked transfer encoding
+  - Learned: SSE vs WebSocket vs Polling (SSE = server-push, unidirectional, plain HTTP, auto-reconnect; WebSocket = full-duplex, protocol upgrade; Polling = wasteful repeated requests), Flux.interval for time-based emission, distinctUntilChanged with key selector
+
+- [x] Step 8: Test All Endpoints + End-of-Phase Re-Audit — COMPLETE (2026-05-10)
+  - All 6 endpoints tested: GET /price/{symbol}, GET /prices, GET /history/{symbol}, GET /health/{symbol}, DELETE /price/{symbol}/cache (ADMIN), GET /stream/{symbol} (SSE)
+  - RBAC verified: ADMIN-only cache evict returns 403 for CUSTOMER
+  - Health score verified against raw data: score=85 matches manual calculation (50+15+10+0+10)
+  - SSE stream verified: events push every 5 seconds, distinctUntilChanged suppresses duplicates
+  - Redis verified: cache HIT/MISS via logs, KEYS/GET/TTL in redis-cli
+  - MongoDB verified: price_history documents saved on cache miss, queryable via mongosh
+  - Zscaler SSL issue resolved: imported Zscaler Root CA into Java truststore (keytool -import)
+  - Re-audit: Javadoc + Log4j logger on all 10 uncommitted Java files, stale comment removed from AlphaVantageClient
+  - Debug-mode walkthrough written in learning_log.md: full request flow traces for all 6 endpoints + resilience scenarios
+  - Fixed: @Value on final field causing UnsatisfiedDependencyException (removed final), flatMap→concatMap for SSE ordering, Math.max(0,...) lower bound on health score
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 3: Order Service & Cart (Weeks 6-7) — FUNCTIONAL COMPLETE (tests deferred)
-- [ ] Phase 4: Market Data - Reactive (Weeks 8-9)
+- [~] Phase 4: Market Data - Reactive (Weeks 8-9) — FUNCTIONAL COMPLETE (tests deferred)
 - [ ] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12)
 - [ ] Phase 6: Event-Driven Architecture (Weeks 13-15)
 - [ ] Phase 7: Microservices Decomposition (Weeks 16-18)
@@ -404,3 +480,8 @@
 - **2026-05-03**: Steps 9-11 complete — Order entity design approved. Order + OrderItem + OrderStatus entities created. OrderRepository (3 query methods) + OrderItemRepository created. Learned: @Data vs individual annotations on JPA entities (equals/hashCode/toString dangers), @OneToMany/@ManyToOne bidirectional mapping (owning vs inverse side), property path traversal in Spring Data derived queries. BUILD SUCCESSFUL. Next: Order DTOs.
 - **2026-05-04**: Steps 12-15 in progress — Order DTOs (PlaceOrderRequest, OrderResponse, OrderItemResponse, UpdateOrderStatusRequest) created. OrderServiceImpl completed: placeOrder with pessimistic locking + idempotency, getOrderById, getOrdersByUserId. OrderController with 3 endpoints (POST, GET/{id}, GET). Order status transitions: OrderStatus enum with EnumSet transition map + canTransition(), PATCH endpoint with ADMIN-only access. Fixed bugs: JPQL entity name (Product not Products), swapped exception types, missing path variable braces. Next: fix updateOrderStatus control flow bug, then test all APIs.
 - **2026-05-05**: Steps 15-16 complete — Status transitions fixed (control flow, valueOf try-catch, @Transactional). Return/Refund flow: PATCH /api/order/{id}/return (customer), ownership validation, stock restoration on RETURNED with pessimistic lock. Fixed: @Slf4j→Log4j consistency, added Javadoc to exception classes. Learned: Pessimistic vs Optimistic locking (trade-offs, when to use), idempotency keys (client-generated UUID, check-before-create pattern, Stripe history). Next: test all Order APIs end-to-end.
+- **2026-05-08**: Phase 4 Steps 1-2 complete — market-data module dependencies updated (webflux, mongodb, redis, resilience4j). WebClientConfig with Reactor Netty timeouts. AlphaVantageClient with reactive WebClient chain + JsonNode parsing. StockQuote + StockPriceResponse DTOs. Learned: @Configuration/@Bean lifecycle, WebClient vs RestTemplate (buzzer vs dedicated waiter), Mono<T> as deferred promise, JsonNode tree structure (ObjectNode→TextNode), readTree() tokenization, .path() null-safety vs .get(). Next: MarketDataService + Redis price cache.
+- **2026-05-09**: Phase 4 Steps 3-4 complete — MarketDataServiceImpl with manual Redis cache (opsForValue, 30s TTL, atomic set+expire). Resilience4j annotations (@Retry, @CircuitBreaker, @RateLimiter) on AlphaVantageClient with fallback returning Mono.error(). Fixed: TTL 30min→30s, two-step set+expire→atomic 3-arg set, YAML default→named instances, case mismatch in instance names, fallback returning fake data→Mono.error(). Deep dives: opsForValue vs opsForHash choice, Spring native Advisor vs AspectJ @Aspect AOP (why starter-aop needed), CGLIB proxy wraps real object (both in memory), private fallback via reflection setAccessible. Next: MongoDB historical price storage.
+- **2026-05-09**: Phase 4 Step 5 complete — PriceHistory MongoDB entity with TTL index (90d auto-expiry), PriceHistoryRepository with time-range and paginated queries. Fire-and-forget CompletableFuture.runAsync() persists snapshots on cache miss. getHistory() queries MongoDB for last N days. Next: health score endpoint.
+- **2026-05-10**: Phase 4 Steps 6-7 complete — HealthScoreResponse DTO, getHealthScore() with 4-signal composite (priceChange ±15, changePercent ±10, weeklyTrend ±15, volume +10), base 50, clamped [0,100]. MarketDataController with 6 endpoints. SSE streaming: Flux.interval(5s) + concatMap (ordered) + distinctUntilChanged(price). ServerSentEvent wrapper for standard SSE fields. Fixed: flatMap→concatMap for ordering, Math.max(0,...) lower bound. Javadoc + Log4j logger added to all uncommitted files. Next: test all endpoints end-to-end.
+- **2026-05-10**: Phase 4 Step 8 complete — All 6 endpoints tested (price, prices, history, health, cache evict, SSE stream). MongoDB via Docker (`docker run -d --name mongodb -p 27017:27017 mongo`). Zscaler SSL resolved (imported root CA into Java truststore). Health score verified: 85 = 50+15+10+0+10. Re-audit: all 10 files have Javadoc + Log4j. Debug-mode walkthrough written (startup bean wiring, 6 request flow traces, 3 resilience scenarios). Fixed: @Value on final field (UnsatisfiedDependencyException). Phase 4 FUNCTIONAL COMPLETE.
