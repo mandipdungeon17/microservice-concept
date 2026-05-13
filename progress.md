@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 4 - Market Data Service (FUNCTIONAL COMPLETE)
+## Status: Phase 5 - Portfolio & Stock-Back Engine (IN PROGRESS)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -438,13 +438,107 @@
   - Debug-mode walkthrough written in learning_log.md: full request flow traces for all 6 endpoints + resilience scenarios
   - Fixed: @Value on final field causing UnsatisfiedDependencyException (removed final), flatMap→concatMap for SSE ordering, Math.max(0,...) lower bound on health score
 
+## Phase 5: Portfolio & Stock-Back Engine — IN PROGRESS (started 2026-05-12)
+
+### Step Plan (derived from equitycart-roadmap.md Phase 5 deliverables)
+
+| Step | Deliverable | Status |
+|------|-------------|--------|
+| 1 | Ledger entity + double-entry bookkeeping (committed in prior session) | COMPLETE |
+| 2 | Design: Portfolio entities, stock-back concept, relationships | COMPLETE |
+| 3 | Dependencies (portfolio build.gradle) | COMPLETE |
+| 4 | Portfolio, Holding, StockBackReward entities + VestingStatus enum | COMPLETE |
+| 5 | Repositories + PortfolioService + VestingHelper (with REQUIRES_NEW) | COMPLETE |
+| 6 | PortfolioController (REST API) + DTOs + Facade | COMPLETE |
+| 7 | BUY/SELL Trade APIs (TradeService — manual trading) | PENDING |
+| 8 | "Sell to Spend" — liquidate stock to fund purchase + atomic transaction | PENDING |
+| 9 | Portfolio Analytics (total value, growth %, average buy price) | PENDING |
+| 10 | End-to-end testing + end-of-phase re-audit | PENDING |
+
+Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phase 6 (Event-Driven Architecture) per roadmap alignment.
+
+### Design Completed
+- [x] Portfolio entity design: Portfolio → Holdings (1:N via CascadeType.ALL + orphanRemoval)
+- [x] Holding: composite unique (portfolio_id + ticker_symbol), @Version for optimistic locking, BigDecimal precision (scale=6 qty, scale=4 price)
+- [x] StockBackReward: one-per-order (unique orderId), vesting lifecycle (PENDING → VESTED | CANCELLED), 30-day delay for return window
+- [x] VestingStatus enum: state machine with terminal states (VESTED, CANCELLED)
+- [x] Transaction strategy: class-level @Transactional(REQUIRED) + method-level overrides (readOnly, REQUIRES_NEW)
+- [x] VestingHelper extracted as separate @Service to solve Spring proxy self-invocation problem
+- [x] Stock-back reward concept: fractional share rewards on order completion, zero cost-basis, dollarValue for tax reporting
+
+### Implementation Completed
+- [x] Step 1: Ledger-service (committed dac0aae) — COMPLETE
+  - LedgerEntry entity with double-entry bookkeeping (DEBIT/CREDIT)
+  - AccountType enum (WALLET, STOCK, REWARD, PLATFORM)
+  - EntryType enum (DEBIT, CREDIT)
+  - ReferenceType enum (for linking entries to source events)
+  - LedgerEntryRepository + LedgerService interface + LedgerServiceImpl
+
+- [x] Step 2: Design phase — COMPLETE (2026-05-12)
+  - Entity relationships approved (Portfolio 1:N Holding, StockBackReward standalone)
+  - Stock-back reward lifecycle designed (PENDING → VESTED/CANCELLED)
+  - Vesting delay rationale: 30-day return window before shares become real
+
+- [x] Step 3: Portfolio module dependencies — COMPLETE (2026-05-12)
+  - portfolio/build.gradle: spring-boot-starter-data-jpa, spring-boot-starter-web, spring-boot-starter-validation
+  - Inherits from root subprojects block (postgres, lombok, commons module dependency)
+
+- [x] Step 4: Create Portfolio module entities — COMPLETE (2026-05-12)
+  - Portfolio: userId (unique), OneToMany holdings with cascade + orphanRemoval, Builder.Default for list
+  - Holding: tickerSymbol, quantity (scale=6 for fractional), averageBuyPrice (scale=4), @Version, ManyToOne(LAZY) to Portfolio, composite unique constraint (uk_portfolio_ticker)
+  - StockBackReward: orderId (unique for idempotency), userId, tickerSymbol, sharesEarned, dollarValue, VestingStatus, vestingDate, vestedAt
+  - VestingStatus: PENDING, VESTED, CANCELLED with state transition rules documented
+  - BUILD SUCCESSFUL
+
+- [x] Step 5: Repositories + Service layer — COMPLETE (2026-05-12)
+  - PortfolioRepository: findByUserId
+  - HoldingRepository: findByPortfolioAndTickerSymbol
+  - StockBackRewardRepository: findByStatusAndVestingDateBefore, findByOrderId
+  - PortfolioService interface (4 methods) + PortfolioServiceImpl
+  - VestingHelper interface + VestingHelperImpl (@Transactional(REQUIRES_NEW))
+  - getOrCreatePortfolio: lazy portfolio creation
+  - addOrUpdateHolding: weighted-average price recalculation + optimistic lock retry (3 attempts)
+  - grantReward: idempotent (findByOrderId check, skip duplicates)
+  - vestPendingRewards: @Scheduled(fixedDelay=60000) + @Transactional(readOnly=true), delegates to VestingHelper
+  - @EnableScheduling added to EquityCartApplication
+  - BUILD SUCCESSFUL
+
+### Concepts Learned (Phase 5 so far)
+- @Transactional class-level vs method-level: class sets default, method overrides for specific propagation/readOnly
+- All 7 propagation types: REQUIRED, REQUIRES_NEW, SUPPORTS, NOT_SUPPORTED, MANDATORY, NEVER, NESTED
+- REQUIRES_NEW suspends outer transaction, commits independently (used for per-reward isolation)
+- NESTED uses JDBC savepoints (not available in JPA/Hibernate)
+- Spring proxy self-invocation trap: internal this.method() bypasses proxy → no @Transactional processing
+- Solution: extract into separate @Service bean so calls go through the proxy
+- @Transactional(readOnly=true): optimizes Hibernate flush mode (no dirty checking), gives DB optimization hints
+- Optimistic locking retry pattern: catch OptimisticLockingFailureException, re-read entity, recalculate, retry N times
+- Stock-back reward model: fractional shares as loyalty reward, zero cost-basis, dollarValue for tax/reporting, vesting delay for return protection
+- Proxy commit-time exceptions: try-catch inside @Transactional method doesn't catch flush/commit failures — those propagate from the proxy layer after method returns
+
+- [x] Step 6: PortfolioController + DTOs + Facade — COMPLETE (2026-05-12)
+  - 4 DTOs as Java records: HoldingRequest (with validation), HoldingResponse, PortfolioResponse, StockBackRewardResponse
+  - PortfolioFacade interface + PortfolioFacadeImpl: thin mapping layer between controller DTOs and service entities
+  - PortfolioController: 3 endpoints — GET /api/portfolio, POST /api/portfolio/holdings (201), GET /api/portfolio/rewards
+  - userId extracted from Authentication principal (no path variable — scoped to authenticated user)
+  - Facade pattern (GoF): simplified interface over service subsystem, keeps controller thin, service entity-focused
+  - Service stays primitive/entity level — same methods callable from facade, VestingHelper, and future Kafka consumers
+  - Added getRewards(userId) to PortfolioService + findByUserId to StockBackRewardRepository
+  - Fixed: initial impl had facade calling repository directly — restructured to route through service layer
+  - BUILD SUCCESSFUL
+
+### Phase 5 Remaining
+- [ ] Step 7: BUY/SELL Trade APIs
+- [ ] Step 8: "Sell to Spend" flow + atomic transaction
+- [ ] Step 9: Portfolio Analytics
+- [ ] Step 10: End-to-end testing + re-audit
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 3: Order Service & Cart (Weeks 6-7) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 4: Market Data - Reactive (Weeks 8-9) — FUNCTIONAL COMPLETE (tests deferred)
-- [ ] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12)
+- [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — IN PROGRESS
 - [ ] Phase 6: Event-Driven Architecture (Weeks 13-15)
 - [ ] Phase 7: Microservices Decomposition (Weeks 16-18)
 - [ ] Phase 8: Security Hardening (Weeks 19-20)
@@ -485,3 +579,4 @@
 - **2026-05-09**: Phase 4 Step 5 complete — PriceHistory MongoDB entity with TTL index (90d auto-expiry), PriceHistoryRepository with time-range and paginated queries. Fire-and-forget CompletableFuture.runAsync() persists snapshots on cache miss. getHistory() queries MongoDB for last N days. Next: health score endpoint.
 - **2026-05-10**: Phase 4 Steps 6-7 complete — HealthScoreResponse DTO, getHealthScore() with 4-signal composite (priceChange ±15, changePercent ±10, weeklyTrend ±15, volume +10), base 50, clamped [0,100]. MarketDataController with 6 endpoints. SSE streaming: Flux.interval(5s) + concatMap (ordered) + distinctUntilChanged(price). ServerSentEvent wrapper for standard SSE fields. Fixed: flatMap→concatMap for ordering, Math.max(0,...) lower bound. Javadoc + Log4j logger added to all uncommitted files. Next: test all endpoints end-to-end.
 - **2026-05-10**: Phase 4 Step 8 complete — All 6 endpoints tested (price, prices, history, health, cache evict, SSE stream). MongoDB via Docker (`docker run -d --name mongodb -p 27017:27017 mongo`). Zscaler SSL resolved (imported root CA into Java truststore). Health score verified: 85 = 50+15+10+0+10. Re-audit: all 10 files have Javadoc + Log4j. Debug-mode walkthrough written (startup bean wiring, 6 request flow traces, 3 resilience scenarios). Fixed: @Value on final field (UnsatisfiedDependencyException). Phase 4 FUNCTIONAL COMPLETE.
+- **2026-05-12**: Phase 5 started — Portfolio module: entities (Portfolio, Holding, StockBackReward, VestingStatus), repositories (3), PortfolioService + VestingHelper. Learned: @Transactional propagation (7 types), proxy self-invocation problem, REQUIRES_NEW for batch isolation, optimistic lock retry, stock-back reward business model (fractional shares, vesting delay, zero cost-basis). Next: PortfolioController + DTOs.

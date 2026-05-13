@@ -2750,3 +2750,212 @@ After 60s window resets → 5 new permits available
 ```
 
 ---
+
+## Phase 5: Portfolio & Stock-Back Engine ⏳
+
+### Date: 2026-05-12
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. Spring proxy self-invocation and REQUIRES_NEW**
+
+- Problem: `vestPendingRewards()` needs each reward vested in its own independent transaction (so one failure doesn't roll back the batch). But putting `@Transactional(REQUIRES_NEW)` on a private helper method called via `this.helper()` does nothing — the call bypasses the proxy.
+- Fix: Extracted `VestingHelperImpl` as a separate `@Service` bean. When `PortfolioServiceImpl` calls `vestingHelper.vestSingleReward(reward)`, the call goes through the proxy, and REQUIRES_NEW is honoured.
+- Lesson: Any `@Transactional` annotation only works when the call passes through the Spring AOP proxy. Self-invocation (`this.method()`) is a direct Java call — the proxy never sees it. Same problem affects `@Cacheable`, `@Async`, `@Retryable`.
+
+**2. Optimistic locking retry — double-increment bug**
+
+- Problem: Wrote `for (int i = 0; i < 3; i++) { try { ... } catch { i++; } }`. The for-loop already increments `i` at end of each iteration, so `i++` inside the catch made it increment twice — only 2 attempts instead of 3.
+- Fix: Removed the `i++` from the catch block. The for-loop's own increment handles iteration.
+- Lesson: When writing retry loops, the loop construct's own increment is sufficient. Don't manually increment inside the body.
+
+**3. @EnableScheduling placement**
+
+- Problem: Initially placed `@EnableScheduling` on the service class (`PortfolioServiceImpl`). While functional, this mixes infrastructure configuration with business logic.
+- Fix: Moved to `EquityCartApplication` (the `@SpringBootApplication` main class). Since this is a monolith with one application context, the main class is the natural home for enablement annotations that affect the whole app.
+- Lesson: `@Enable*` annotations are infrastructure configuration — they belong on `@Configuration` or `@SpringBootApplication` classes, not on `@Service` classes.
+
+**4. Proxy commit-time exceptions escaping try-catch**
+
+- Problem: `vestSingleReward()` has an internal try-catch(Exception) to keep rewards in PENDING on failure. Assumed this meant the method could never throw. Wrong.
+- Root cause: `@Transactional(REQUIRES_NEW)` is implemented by the AOP proxy wrapping the method. Flow: (1) proxy begins transaction → (2) calls method body → (3) method returns normally (exception was caught) → (4) proxy commits → (5) Hibernate flushes dirty entities → (6) if flush/commit fails → proxy throws `DataAccessException` → propagates to caller.
+- The internal try-catch only covers step (2). Steps (4-6) happen in the proxy layer, outside the method body.
+- Fix: Added try-catch in `vestPendingRewards()` around the `vestingHelper` call to catch commit-time failures.
+- Lesson: A try-catch inside a `@Transactional` method does NOT protect against commit-time failures. Hibernate can defer SQL flush to commit time (AUTO flush mode), so exceptions may surface only when the proxy commits.
+
+**5. BigDecimal.ZERO as price for stock-back rewards**
+
+- Problem: Questioned why `addOrUpdateHolding` is called with `BigDecimal.ZERO` as price for vested rewards.
+- Resolution: Stock-back rewards are FREE shares — the user paid nothing. Zero price is correct because it reflects the actual cost basis. The weighted-average formula naturally handles this: `newAvg = (oldQty × oldAvg + newQty × 0) / (oldQty + newQty)` — the average drops (dilution). The `dollarValue` field on `StockBackReward` separately tracks the fair-market value at grant time for tax/reporting, but that's not a purchase price.
+- Lesson: Distinguish between "what the user paid" (cost basis → Holding.averageBuyPrice) and "what the shares are worth" (fair market value → StockBackReward.dollarValue). They serve different purposes (brokerage vs IRS).
+
+---
+
+### Concepts Learned
+
+**68. @Transactional — Class-Level vs Method-Level (2026-05-12)**
+
+History: Before annotations (pre-Spring 2.0, ~2006), transaction boundaries were declared in XML (`<tx:advice>` blocks mapping method name patterns to attributes). Spring 2.0 introduced `@Transactional` annotations — same AOP proxy mechanism, more readable metadata.
+
+Class-level `@Transactional` sets a default for ALL public methods in that class. Method-level overrides the class default for that specific method. Common patterns:
+- Class-level `@Transactional` (REQUIRED) — most methods do read-write work
+- Override with `@Transactional(readOnly = true)` on query-only methods
+- Override with `@Transactional(propagation = REQUIRES_NEW)` for independent commits
+
+Key: the annotation only works when the call comes through the Spring AOP proxy. Direct `this.method()` calls bypass it entirely.
+
+**69. Transaction Propagation — All 7 Types (2026-05-12)**
+
+| Propagation | Existing Tx? | No Tx? | Use case |
+|---|---|---|---|
+| REQUIRED (default) | Join it | Create new | 90% of cases |
+| REQUIRES_NEW | Suspend it, create new | Create new | Independent commit (audit logs, per-item processing) |
+| SUPPORTS | Join it | Run without | Optional participation (reads that benefit from repeatable-read if tx exists) |
+| NOT_SUPPORTED | Suspend it | Run without | Long HTTP calls that shouldn't hold a DB connection |
+| MANDATORY | Join it | THROW | Safety guard — "never call me without a transaction" |
+| NEVER | THROW | Run without | Anti-transaction guard — "I must never be in a transaction" |
+| NESTED | Savepoint | Create new | Partial rollback within outer tx — **JPA does not support this**, JDBC only |
+
+"Suspend" means the outer transaction is paused (not rolled back) while the inner one runs. When the inner completes, the outer resumes.
+
+REQUIRES_NEW use case in EquityCart: each reward in `vestPendingRewards` must vest in its own transaction. If reward #3 fails, rewards #1-2 are already committed and unaffected.
+
+NESTED limitation: only works with `DataSourceTransactionManager` (raw JDBC), not `JpaTransactionManager`. Since we use JPA/Hibernate, NESTED is effectively unavailable.
+
+**70. Spring Proxy Self-Invocation Problem (2026-05-12)**
+
+When Spring creates a bean with `@Transactional` (or `@Cacheable`, `@Async`, etc.), it wraps the bean in a CGLIB proxy. External callers get a reference to the proxy, not the real object. But inside the real object, `this` points to the actual instance — not the proxy.
+
+```
+External call:   caller → proxy.method() → advice → real.method()  ✓ (proxy intercepts)
+Self-invocation: real.method() → this.helper()                      ✗ (proxy bypassed)
+```
+
+Solutions:
+1. Extract into separate @Service bean (what we did — cleanest)
+2. Inject self: `@Lazy @Autowired private PortfolioService self;` then call `self.method()` (works but hacky)
+3. Use `TransactionTemplate` programmatically (no proxy needed)
+4. `AopContext.currentProxy()` — exposes the proxy but requires `@EnableAspectJAutoProxy(exposeProxy=true)` (fragile)
+
+**71. @Transactional(readOnly=true) — What It Actually Does (2026-05-12)**
+
+Two effects:
+1. **Hibernate level**: Sets FlushMode to MANUAL. Hibernate skips dirty-checking on all managed entities in that session. Fewer CPU cycles, no accidental writes.
+2. **JDBC/Driver level**: Passes a hint to the DB driver. PostgreSQL can use this to route queries to read-replicas (if configured), or optimize the transaction for read-only workload (no undo log entries needed).
+
+Does NOT enforce immutability — you can still call `entity.setField()` and Hibernate won't flush it (because MANUAL flush), but if you force a flush, it would write. It's a performance hint, not a constraint.
+
+**72. Optimistic Locking + Manual Retry Pattern (2026-05-12)**
+
+`@Version` on an entity field makes Hibernate include `WHERE version = ?` in UPDATE statements. If another transaction incremented the version between your read and write, 0 rows are updated → Hibernate throws `OptimisticLockingFailureException` (Spring wraps the JPA `OptimisticLockException`).
+
+Manual retry pattern:
+```
+for (int i = 0; i < maxRetries; i++) {
+    try {
+        // re-read entity (get fresh version), recalculate, save
+        return result;
+    } catch (OptimisticLockingFailureException e) {
+        // log and retry — the loop naturally iterates
+    }
+}
+throw new RuntimeException("Exhausted retries");
+```
+
+Critical: the re-read inside the loop ensures you get the latest version. Without it, you'd retry with stale data and fail every time.
+
+Alternative: `@Retryable(OptimisticLockingFailureException.class, maxAttempts=3)` from spring-retry. We used manual loop because spring-retry isn't in our dependencies.
+
+**73. Stock-Back Reward — Business Model (2026-05-12)**
+
+Real-world analogy: "cash-back" credit cards give back money; "stock-back" gives fractional shares of stock.
+
+Lifecycle:
+1. User completes order → order-service publishes event
+2. Portfolio-service grants reward: PENDING status, vesting date = now + 30 days
+3. 30 days pass → scheduled job finds eligible rewards → credits shares to holding → VESTED
+4. User now owns real shares — can sell for cash anytime
+
+Why the delay (vesting period):
+- If user returns the product within 30 days, reward is CANCELLED — no shares granted
+- Without delay, you'd need to "claw back" already-vested shares (legally complex, operationally messy)
+
+Two distinct dollar values:
+- `Holding.averageBuyPrice`: what the user PAID per share (zero for free shares — correct)
+- `StockBackReward.dollarValue`: what the shares were WORTH at grant time (for tax reporting — IRS treats stock compensation as income at fair market value)
+
+**74. Proxy Commit-Time Exception Propagation (2026-05-12)**
+
+With `@Transactional`, the AOP proxy wraps the method call:
+```
+proxy.vestSingleReward(reward):
+  1. Begin transaction
+  2. Call actual method body ← your try-catch lives here
+  3. Method returns normally
+  4. Proxy commits transaction
+  5. Hibernate flushes (AUTO mode) — executes deferred SQL
+  6. If flush fails → DataAccessException thrown BY THE PROXY
+  7. This exception propagates to the CALLER — your catch never sees it
+```
+
+Implication: `stockBackRewardRepository.save(reward)` in step 2 may NOT immediately execute SQL. Hibernate's AUTO flush mode defers the actual INSERT/UPDATE until commit time (step 5). So `save()` succeeds in the method body, but the DB write fails later at commit.
+
+This is why the caller (`vestPendingRewards`) also needs try-catch — the proxy can throw even when the method body doesn't.
+
+---
+
+### Interview Questions — Phase 5
+
+**Q61: "Explain @Transactional propagation types. When would you use REQUIRES_NEW?" (2026-05-12)**
+A: Propagation defines what happens when a transactional method is called while a transaction already exists. REQUIRED (default) joins existing or creates new. REQUIRES_NEW always creates independent — suspends any existing transaction. Use REQUIRES_NEW when you need independent commit/rollback: audit logs that must persist even if the main operation fails, batch processing where one item's failure shouldn't roll back others (vesting rewards), sending notifications. Key: "suspend" means paused, not rolled back.
+
+**Q62: "What is the Spring proxy self-invocation problem?" (2026-05-12)**
+A: When Spring wraps a bean with AOP (for @Transactional, @Cacheable, etc.), external callers go through the proxy. But inside the bean, `this.method()` calls the real object directly — the proxy is bypassed, so annotations on the called method have no effect. Solutions: extract to a separate @Service (cleanest), inject self with @Lazy, use programmatic TransactionTemplate, or expose the proxy via AopContext. This applies to all annotation-based AOP: @Transactional, @Cacheable, @Async, @Retryable.
+
+**Q63: "How does optimistic locking work with @Version? How do you handle failures?" (2026-05-12)**
+A: @Version makes Hibernate add `WHERE version = N` to UPDATEs. If another transaction incremented the version, 0 rows match → OptimisticLockingFailureException. Handle via retry: catch the exception, re-read the entity (fresh version), recalculate derived values (like weighted-average price), save again. Typically 3 retries with backoff. Optimistic locking is preferred over pessimistic when conflicts are rare — it doesn't hold DB locks, so throughput is higher under low contention.
+
+**Q64: "What's the difference between @Transactional(readOnly=true) and no annotation?" (2026-05-12)**
+A: readOnly=true gives two optimizations: (1) Hibernate sets FlushMode.MANUAL — skips dirty-checking on all managed entities (less CPU), (2) JDBC driver gets a hint — PostgreSQL can route to read-replicas or skip undo-log entries. It does NOT enforce immutability — if you force a flush, writes can still happen. Use on query-only methods to signal intent and gain performance. No annotation means no transaction at all (or inherits class-level default).
+
+**Q65: "Your scheduled job processes 1000 items. How do you ensure one failure doesn't kill the batch?" (2026-05-12)**
+A: Process each item in its own REQUIRES_NEW transaction. This way, each commit/rollback is independent. Implementation: extract per-item logic into a separate @Service with @Transactional(REQUIRES_NEW) — solves the self-invocation problem since the call goes through the proxy. The outer method (with @Scheduled) iterates and calls the helper, catching exceptions per item so the loop continues. Alternative: use TransactionTemplate with PROPAGATION_REQUIRES_NEW programmatically inside the loop.
+
+**75. Facade Design Pattern — DTO Mapping Layer (2026-05-12)**
+
+History: The Facade pattern comes from the Gang of Four book (1994). The name is borrowed from architecture — a building facade is the front-facing exterior that hides structural complexity behind it. In Java enterprise, it became especially popular with EJB Session Facades (early 2000s), where a session bean facade simplified access to multiple entity beans and reduced network round-trips from remote clients.
+
+What it is: a simplified interface over a complex subsystem. The client (controller) calls one method and gets back a ready-to-use result without knowing the internal structure.
+
+In EquityCart:
+```
+Without facade:  Controller must know about PortfolioService + entity-to-DTO mapping logic
+With facade:     Controller calls one method, gets back a ready-to-use DTO
+```
+
+Why not put the mapping in the service? The service works at the entity/primitive level — it's also called by internal callers (VestingHelper, future Kafka consumers) that don't want DTOs. The facade sits between controller and service, handling only DTO ↔ entity translation.
+
+Why not put the mapping in the controller? Controllers should be thin — accepting requests and delegating. If a facade coordinates multiple services or maps complex entity graphs, that logic shouldn't live in the controller.
+
+Where facades really shine: coordinating multiple services in one call. For example, a future `getPortfolioSummary()` could call PortfolioService for holdings, MarketDataService for current prices, and LedgerService for transaction history — returning one combined DTO. The controller still makes one call.
+
+**76. Service Layer Boundary: Entities vs DTOs (2026-05-12)**
+
+Design decision: service methods accept primitives/entities and return entities. DTOs are a controller-boundary concern handled by the facade.
+
+This matters because the same service method can be called from multiple entry points:
+- `addOrUpdateHolding(userId, ticker, qty, price)` is called by:
+  1. The facade (from a controller POST request)
+  2. VestingHelperImpl (internal vesting — no DTO involved)
+
+If the service accepted `HoldingRequest` DTO, VestingHelper would have to construct a DTO just to call an internal method — coupling an internal caller to a REST-layer concern.
+
+Rule of thumb: DTOs belong at system boundaries (REST, Kafka events). Internal service-to-service calls use entities and primitives.
+
+**Q66: "What is the Facade pattern and when would you use it?" (2026-05-12)**
+A: The Facade pattern (GoF) provides a simplified interface over a complex subsystem. In Spring, a common use is a DTO-mapping facade between controllers and services — the controller calls one facade method, gets back a response DTO, without knowing about entity mapping or multi-service coordination. It keeps controllers thin, services entity-focused, and centralizes mapping logic. Real value appears when one facade method orchestrates multiple services (e.g., portfolio + market data + ledger) into a single response.
+
+**Q67: "Should your service layer accept and return DTOs or entities?" (2026-05-12)**
+A: Services should work with entities and primitives — DTOs are a controller-boundary concern. Reason: the same service method may be called from multiple entry points (REST controller via facade, Kafka consumer, scheduler, other services). If the service requires DTOs, internal callers must construct REST-layer objects for internal calls — that's unnecessary coupling. Use a facade or mapper at the boundary to translate DTOs ↔ entities.
