@@ -2959,3 +2959,56 @@ A: The Facade pattern (GoF) provides a simplified interface over a complex subsy
 
 **Q67: "Should your service layer accept and return DTOs or entities?" (2026-05-12)**
 A: Services should work with entities and primitives — DTOs are a controller-boundary concern. Reason: the same service method may be called from multiple entry points (REST controller via facade, Kafka consumer, scheduler, other services). If the service requires DTOs, internal callers must construct REST-layer objects for internal calls — that's unnecessary coupling. Use a facade or mapper at the boundary to translate DTOs ↔ entities.
+
+**77. Circular Dependency — @Lazy with Lombok's @RequiredArgsConstructor (2026-05-13)**
+
+History: Circular dependencies have plagued DI containers since early Spring (2004). Spring originally resolved them silently via early reference exposure — bean A is partially created (constructor done, fields not yet set), its reference is exposed, then bean B is created and receives the partial A, then A finishes initialization. Spring Boot 2.6 (Nov 2021) changed the default to **prohibit** circular references (`spring.main.allow-circular-references=false`), forcing developers to design them out or use explicit `@Lazy`.
+
+The problem in EquityCart:
+```
+PortfolioServiceImpl → injects VestingHelper
+VestingHelperImpl    → injects PortfolioService
+```
+Spring can't construct either bean first — each needs the other to be ready.
+
+The fix attempt that **didn't work**: putting `@Lazy` on the field while using `@RequiredArgsConstructor`:
+```java
+@RequiredArgsConstructor
+public class VestingHelperImpl {
+    @Lazy private final PortfolioService portfolioService;  // ← IGNORED
+}
+```
+
+Why it fails: `@RequiredArgsConstructor` generates a constructor with all `final` fields as parameters. Spring Boot uses **constructor injection** when a constructor exists. `@Lazy` on the **field** is a field-level hint — but Spring never does field injection here because it sees a constructor. The annotation needs to be on the **constructor parameter** for Spring to inject a lazy proxy instead of the real bean. Lombok doesn't copy field annotations to constructor parameters by default.
+
+Three valid fixes:
+1. **Manual constructor** — write the constructor yourself, put `@Lazy` on the parameter:
+   ```java
+   public VestingHelperImpl(@Lazy PortfolioService portfolioService, ...) { }
+   ```
+2. **`lombok.config`** — add `lombok.copyableAnnotations += org.springframework.context.annotation.Lazy` so Lombok copies `@Lazy` to the generated constructor parameter.
+3. **Field injection with `@Autowired`** — remove `@RequiredArgsConstructor`, use `@Lazy @Autowired` on the field. Spring does field injection directly (no constructor involved), so `@Lazy` is respected.
+
+Chosen approach: Option 3. `@Lazy @Autowired` field injection on `portfolioService` in VestingHelperImpl.
+
+Field injection vs constructor injection tradeoff:
+- Constructor injection: explicit dependencies, immutable (`final`), fails fast, recommended by Spring team as default.
+- Field injection: allows `@Lazy` without manual constructors, but dependencies are hidden, fields can't be `final`, harder to unit test (need reflection or `@InjectMocks`).
+- Field injection with `@Lazy` is a legitimate escape hatch for circular dependencies — pragmatic fix when the alternative is restructuring the class graph.
+
+How `@Lazy` proxy works at runtime:
+```
+1. Spring creates VestingHelperImpl
+2. For the @Lazy field, Spring injects a CGLIB proxy (not the real PortfolioServiceImpl)
+3. Proxy is a lightweight shell — no dependency resolution yet
+4. First time vestSingleReward() calls portfolioService.addOrUpdateHolding()...
+5. ...the proxy resolves the real PortfolioServiceImpl bean from the context
+6. From that point on, the proxy delegates all calls to the real bean
+```
+The cycle is broken because VestingHelperImpl can finish construction without PortfolioServiceImpl being ready — it only needs the real bean at method-call time.
+
+**Q68: "Your Spring Boot app fails to start with a circular dependency. How do you fix it?" (2026-05-13)**
+A: First choice: redesign to remove the cycle (extract shared logic into a third bean). If the cycle is architecturally justified (like PortfolioService ↔ VestingHelper where each legitimately needs the other), use `@Lazy` to break the initialization deadlock. `@Lazy` injects a CGLIB proxy instead of the real bean — the real bean is resolved on first method call, by which time both beans are fully initialized. Important: with Lombok's `@RequiredArgsConstructor`, `@Lazy` on the field is silently ignored — it must be on the constructor parameter (write manually or configure `lombok.copyableAnnotations`). Alternative: use `@Autowired` field injection where `@Lazy` works directly on the field. Never set `spring.main.allow-circular-references=true` — it re-enables the old silent behavior that masks design problems.
+
+**Q69: "What's the difference between field injection and constructor injection in Spring?" (2026-05-13)**
+A: Constructor injection: dependencies are explicit (visible in constructor signature), can be `final` (immutable), fails fast at startup if a dependency is missing, easy to unit test (just pass mocks to constructor). Field injection (`@Autowired` on fields): dependencies are hidden, can't be `final`, requires reflection or `@InjectMocks` for testing. Spring team recommends constructor injection as default. Field injection is acceptable as an escape hatch — particularly with `@Lazy` to break circular dependencies, where writing a manual constructor just for one `@Lazy` parameter adds boilerplate.

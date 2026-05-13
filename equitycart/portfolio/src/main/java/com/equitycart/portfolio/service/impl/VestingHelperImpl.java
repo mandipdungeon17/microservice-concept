@@ -7,9 +7,10 @@ import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.VestingHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,16 +21,15 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Separated from {@link PortfolioServiceImpl} to solve the Spring proxy self-invocation problem:
  * {@code vestPendingRewards()} needs each reward processed in its own transaction (REQUIRES_NEW),
  * but calling a {@code this.method()} bypasses the proxy. By extracting into a separate bean, the
- * call goes through the proxy and REQUIRES_NEW is honoured.
+ * call goes through the proxy and REQUIRES_NEW is honored.
  */
 @Service
-@RequiredArgsConstructor
 public class VestingHelperImpl implements VestingHelper {
 
   private static final Logger logger = LogManager.getLogger(VestingHelperImpl.class);
 
-  private final PortfolioService portfolioService;
-  private final StockBackRewardRepository stockBackRewardRepository;
+  @Lazy @Autowired private PortfolioService portfolioService;
+  @Autowired private StockBackRewardRepository stockBackRewardRepository;
 
   /**
    * {@inheritDoc}
