@@ -5,6 +5,7 @@ import com.equitycart.commons.dto.ValidationErrorResponse;
 import com.equitycart.commons.exception.AccountDisabledException;
 import com.equitycart.commons.exception.AuthenticationException;
 import com.equitycart.commons.exception.DuplicateResourceException;
+import com.equitycart.commons.exception.InsufficientSharesException;
 import com.equitycart.commons.exception.InsufficientStockException;
 import com.equitycart.commons.exception.InvalidStatusTransitionException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
@@ -25,7 +26,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-  public static final Logger logger = LogManager.getLogger(GlobalExceptionHandler.class);
+  private static final Logger logger = LogManager.getLogger(GlobalExceptionHandler.class);
 
   /** Handles resource not found (e.g., product, user, category not found by ID). */
   @ExceptionHandler(ResourceNotFoundException.class)
@@ -95,6 +96,18 @@ public class GlobalExceptionHandler {
     return new ErrorResponse(
         HttpStatus.FORBIDDEN.value(),
         HttpStatus.FORBIDDEN.getReasonPhrase(),
+        ex.getMessage(),
+        LocalDateTime.now());
+  }
+
+  /** Handles insufficient shares for sell operations (e.g., selling more than owned). */
+  @ExceptionHandler(InsufficientSharesException.class)
+  @ResponseStatus(HttpStatus.BAD_REQUEST)
+  public ErrorResponse handleInsufficientSharesException(InsufficientSharesException ex) {
+    logger.warn("Insufficient shares: {}", ex.getMessage());
+    return new ErrorResponse(
+        HttpStatus.BAD_REQUEST.value(),
+        HttpStatus.BAD_REQUEST.getReasonPhrase(),
         ex.getMessage(),
         LocalDateTime.now());
   }

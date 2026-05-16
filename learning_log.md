@@ -3012,3 +3012,200 @@ A: First choice: redesign to remove the cycle (extract shared logic into a third
 
 **Q69: "What's the difference between field injection and constructor injection in Spring?" (2026-05-13)**
 A: Constructor injection: dependencies are explicit (visible in constructor signature), can be `final` (immutable), fails fast at startup if a dependency is missing, easy to unit test (just pass mocks to constructor). Field injection (`@Autowired` on fields): dependencies are hidden, can't be `final`, requires reflection or `@InjectMocks` for testing. Spring team recommends constructor injection as default. Field injection is acceptable as an escape hatch — particularly with `@Lazy` to break circular dependencies, where writing a manual constructor just for one `@Lazy` parameter adds boilerplate.
+
+**78. Trade Service — Sell-side Design Decisions (2026-05-13)**
+
+Why `reduceHolding` doesn't take a sell price:
+
+The sell price doesn't affect the cost basis of remaining shares. `averageBuyPrice` tracks what you **paid** for the shares you still hold. If you bought 10 AAPL at $150 avg and sell 3 at $200, the remaining 7 shares still cost $150 each. The sell price is irrelevant to the holding.
+
+Where the sell price matters (outside reduceHolding):
+1. P&L calculation: `profit = (sellPrice - averageBuyPrice) × qtySold`
+2. Ledger entry: wallet credit = `sellPrice × qtySold`
+
+This is clean separation of concerns: `reduceHolding` owns inventory (how many shares you have), the caller owns the financial side (at what price).
+
+Zero-quantity holding handling: when a full sell reduces quantity to exactly zero, the holding is deleted from the database to avoid phantom positions showing up in portfolio views. The in-memory object is set to zero quantity before deletion so it can still be used for the response DTO mapping.
+
+**79. Common Bug Pattern: Logging After Mutation (2026-05-13)**
+
+Bug encountered: logging the "before" value of a field after calling the setter.
+
+```java
+holding.setQuantity(newQty);        // ← mutates the object
+logger.info("qty {} → {}",
+    holding.getQuantity(),           // ← now returns newQty (already mutated)
+    newQty);                         // ← same value
+```
+
+Fix: capture the old value before mutation, or log before the setter call. This is the same pattern used in `addOrUpdateHolding` where `oldQty` and `oldAvg` are captured before modification.
+
+General rule: any time you log a "before → after" transition, capture "before" on a separate line before performing the mutation.
+
+**Q70: "How do you handle a sell that reduces a holding to zero?" (2026-05-13)**
+A: Two approaches: (1) leave a zero-quantity row (simpler, but pollutes portfolio views and queries), or (2) delete the holding row when quantity hits zero. Option 2 is cleaner — avoids phantom holdings, keeps queries accurate, and the holding entity can still be returned (in-memory) for response mapping before deletion. For the delete, Hibernate's `remove()` marks the entity for deletion at flush time — you can still read its fields in the same transaction before the flush.
+
+**Q71: "Why use a separate TradeService instead of putting trade logic in PortfolioService?" (2026-05-13)**
+A: Single Responsibility. PortfolioService manages the portfolio domain — creating portfolios, managing holdings, granting rewards, scheduling vesting. TradeService handles the trade orchestration — parsing trade type, routing to the right portfolio operation, and coordinating with the ledger for financial recording. TradeService calls both PortfolioService and LedgerService within a single transaction — this coordination logic doesn't belong in PortfolioService.
+
+**80. Double-Entry Bookkeeping in Trade Execution (2026-05-14)**
+
+History: Double-entry bookkeeping dates to 1494 when Luca Pacioli published its rules — every financial event is recorded as two balanced entries (debit and credit). The system survived 500+ years because it's self-auditing: if debits don't equal credits, something is wrong.
+
+In EquityCart, every trade creates a balanced DEBIT+CREDIT pair via LedgerService.recordTransaction(). The entries share a UUID transactionId for correlation.
+
+Trade ledger entries (from the user's perspective):
+```
+BUY 10 AAPL @ $150:
+  DEBIT  HOLDING_ASSET  $1500  (asset increases — user now owns shares)
+  CREDIT CASH           $1500  (cash decreases — user spent money)
+
+SELL 5 AAPL @ $180:
+  DEBIT  CASH           $900   (cash increases — user received money)
+  CREDIT HOLDING_ASSET  $900   (asset decreases — user gave up shares)
+```
+
+"Debit" doesn't mean "bad" and "credit" doesn't mean "good." In accounting: DEBIT means "this account gets bigger." For asset accounts (CASH, HOLDING_ASSET), a debit is an increase. For liability/income accounts, a debit is a decrease. The terminology is counterintuitive because most people encounter it from the bank's perspective (where your deposit is THEIR liability, so they "credit" your account).
+
+Why record ledger entries alongside trades? The holding table tracks current state (how many shares you hold right now). The ledger tracks history (every financial event that happened). If someone asks "show me all the transactions for Order #42," the ledger has the answer. The holding can't — it's been updated many times and only shows the latest snapshot.
+
+**81. Sell to Spend — Cross-Domain Atomic Transaction (2026-05-14)**
+
+What is it: A payment method where the user sells stock from their portfolio to fund a pending order. Real-world examples: Robinhood's "Stock Round-Up," Revolut's auto-sell at checkout.
+
+User journey:
+```
+1. User browses products → adds to cart
+2. User places order → Order status: CREATED (placed, awaiting payment)
+3. User calls POST /api/portfolio/sell-to-spend
+4. System: sell shares + record ledger + confirm order → all atomic
+5. Order status: CONFIRMED (paid)
+```
+
+Why CREATED state only: CREATED means "order placed, awaiting payment." CONFIRMED means already paid. SHIPPED/DELIVERED are post-payment. Accepting payment only makes sense before it's been paid.
+
+Why require full payment (proceeds ≥ order total): Partial payment would require tracking `amountRemaining` on the order, supporting multiple payment rounds, multi-source reconciliation — that's a payments-platform domain, not a portfolio feature. For EquityCart: sell enough stock to cover the full order, or the request fails. Excess proceeds stay as CASH in the ledger.
+
+Cross-module coordination:
+```
+SellToSpendServiceImpl orchestrates:
+  1. OrderService.getOrderById()       → validate ownership + status
+  2. PortfolioService.reduceHolding()  → sell the shares
+  3. LedgerService.recordTransaction() → record the sale
+  4. OrderService.updateOrderStatus()  → confirm the order
+```
+
+All four calls are wrapped in one `@Transactional`. If step 4 fails (e.g., invalid status transition), steps 2 and 3 roll back — the shares are restored, the ledger entry is not persisted. This is the monolith advantage: one database, one transaction manager, automatic atomicity.
+
+Preview of what breaks in microservices: When portfolio, ledger, and order are separate services with separate databases, `@Transactional` can't span them. You'd need a **Saga pattern** — a sequence of local transactions with compensating actions:
+```
+Saga: sell shares → if ledger fails, re-add shares
+      record ledger → if order fails, reverse ledger + re-add shares
+      confirm order → done
+```
+Each service commits independently and publishes an event. If a downstream step fails, upstream services execute compensating transactions to undo their work. This is Phase 6 territory (Event-Driven Architecture).
+
+Guard clause pattern: SellToSpendServiceImpl uses early-return validation (guard clauses) instead of nested if-else. Each validation failure throws immediately, so the happy path flows straight down without indentation. This is more readable than deeply nested conditionals.
+
+**82. Cross-Module Dependencies in a Monolith (2026-05-14)**
+
+portfolio/build.gradle now depends on both `:ledger-service` and `:order-service`. This creates cross-module coupling:
+```
+portfolio → ledger   (for recording financial events)
+portfolio → order    (for confirming orders via sell-to-spend)
+portfolio → commons  (shared exceptions, base entity)
+```
+
+In a monolith, this is fine — all modules compile and deploy together, share one database, and run in one JVM. The Gradle dependency graph is just an organizational boundary, not a deployment boundary.
+
+In microservices, these would become API calls over HTTP/gRPC or async messages over Kafka. The portfolio service would call the order service's REST API or publish a "StockSold" event. Each service owns its own database, and consistency becomes eventual rather than immediate.
+
+This is exactly the pain point that motivates microservices decomposition: as the dependency graph grows, coordinating transactions across modules gets harder. The monolith-first approach (build it coupled, then extract) lets you get the business logic right before tackling distributed systems complexity.
+
+**Q72: "What is double-entry bookkeeping and why use it in a software system?" (2026-05-14)**
+A: Every financial event creates two balanced entries — a debit and a credit — sharing a transaction ID. The system is self-auditing: sum of all debits must equal sum of all credits. In software, a ledger table with double-entry provides a complete, immutable audit trail of every financial event. The entity tables (holdings, orders) track current state; the ledger tracks the full history of how you got there. If there's a dispute ("did I really sell those shares?"), the ledger has the answer.
+
+**Q73: "How does @Transactional work across multiple service calls in a monolith?" (2026-05-14)**
+A: Spring's default transaction propagation is REQUIRED — if a transaction exists, join it; if not, create one. So when SellToSpendServiceImpl (annotated @Transactional) calls PortfolioService, LedgerService, and OrderService, all four participate in the same database transaction. If any service throws a RuntimeException, the entire transaction rolls back — the database never sees partial state. This works because all services share the same DataSource and TransactionManager within the Spring context.
+
+**Q74: "What happens to this atomic transaction when you decompose to microservices?" (2026-05-14)**
+A: It breaks. Each microservice has its own database, so @Transactional can't span them. You need the Saga pattern: a sequence of local transactions where each service commits independently and publishes an event. If a downstream step fails, upstream services execute compensating transactions (reverse their changes). Two variants: choreography (services react to events) and orchestration (a central coordinator directs the flow). Saga trades atomicity for availability and partition tolerance — eventual consistency instead of immediate consistency.
+
+**83. Portfolio Analytics — Facade as Compositor (2026-05-14)**
+
+The analytics endpoint demonstrates the facade pattern's most valuable use case: **composing data from multiple sources into a single rich response**.
+
+```
+Controller calls → facade.getAnalytics(userId)
+Facade internally:
+  1. portfolioService.getOrCreatePortfolio(userId) → holdings
+  2. portfolioService.getRewards(userId)            → rewards
+  3. Compute: cost basis per holding, total cost basis, portfolio weights
+  4. Aggregate: reward counts by status, total shares/dollars
+  5. Assemble: PortfolioAnalyticsResponse
+Controller receives ← one combined DTO
+```
+
+Why this belongs in the facade (not a new service):
+- No new domain logic — it's computation over existing data (sums, percentages, counts)
+- No new repository calls — uses existing service methods
+- No side effects — pure read + compute + assemble
+- This IS the facade's purpose: "compose and map multiple service results into one response"
+
+If this needed market-data integration (current price × quantity = live portfolio value), that would justify a new AnalyticsService because it introduces a new dependency and potentially network calls.
+
+**84. BigDecimal.divide() Scale Pitfall (2026-05-14)**
+
+Bug pattern: `costBasis.divide(totalCostBasis, RoundingMode.HALF_UP)` — this uses the dividend's scale (which could be 10+ from BigDecimal multiplication), producing results like `33.3333333300`.
+
+The 2-argument `divide(BigDecimal, RoundingMode)` inherits scale from `this`. For clean API responses, use the 3-argument form with explicit scale:
+```java
+costBasis.multiply(BigDecimal.valueOf(100))
+         .divide(totalCostBasis, 2, RoundingMode.HALF_UP)  // → 33.33
+```
+
+General rule: whenever you divide BigDecimals for display/response purposes, always specify explicit scale. The 2-arg form is fine for internal calculations where scale doesn't matter to the consumer.
+
+**Q75: "What's the difference between BigDecimal's 2-arg and 3-arg divide?" (2026-05-14)**
+A: `divide(divisor, roundingMode)` uses the dividend's scale — fine for internal math, but produces unpredictable decimal places in responses. `divide(divisor, scale, roundingMode)` lets you control output precision — use this whenever the result will be serialized (API responses, logs, reports). Without specifying scale OR roundingMode, divide throws ArithmeticException on non-terminating decimals (e.g., 1/3).
+
+**Q76: "When should analytics logic live in a service vs the facade?" (2026-05-14)**
+A: If it's pure computation over data from existing services (sums, percentages, counts) with no new dependencies or side effects — facade is appropriate. If it needs new repositories, external API calls, caching, or complex business rules — create a dedicated service. The litmus test: "does this introduce a new dependency that the facade shouldn't own?" If yes → service. If no → facade.
+
+---
+
+### Phase 5 Conclusion (2026-05-16)
+
+**85. The Missing Link — Reward Granting (2026-05-16)**
+
+Phase 5 built all the **infrastructure** for the stock-back reward loop, but left one critical step unimplemented: the **grant trigger**. Here's what exists vs what's missing:
+
+**Implemented (Phase 5):**
+- `StockBackReward` entity with PENDING/VESTED/CANCELLED lifecycle
+- `grantReward()` in PortfolioService — creates a PENDING reward (idempotent via orderId check)
+- `VestingHelper` + `@Scheduled` job — converts PENDING rewards to VESTED holdings
+- `getRewards()` endpoint — reads a user's reward history
+- Portfolio holdings, trades, analytics — all functional
+
+**Not implemented (deferred to Phase 6):**
+- The **trigger** that calls `grantReward()` when an order reaches DELIVERED status
+- This requires a cross-module event chain: Order (DELIVERED event) → Product (look up brand) → BrandTickerMapping (get ticker + stockBackPercentage) → MarketData (get current price) → Portfolio (calculate shares, create PENDING reward)
+
+**Why it was deferred:**
+This is fundamentally a cross-module integration touching 4 bounded contexts (order, product, market-data, portfolio). In a monolith, you could wire it synchronously inside the order status transition — but Phase 6 introduces Kafka, and the roadmap explicitly lists "Order-Placed event → triggers stock-back reward calculation" as a Phase 6 deliverable. Building the synchronous version now would create throwaway code that Phase 6 immediately replaces with event-driven architecture.
+
+The stock-back loop will be: `Order DELIVERED → OrderDeliveredEvent (Kafka) → RewardCalculationConsumer → grantReward(PENDING) → VestingJob runs → vestReward(VESTED) → addOrUpdateHolding`
+
+**Q77: "Why can't the vesting job run without the grant step?" (2026-05-16)**
+A: The `@Scheduled` vesting job queries `findByStatusAndVestingDateBefore(PENDING, now)`. Since no code ever creates a StockBackReward row with PENDING status, the query always returns empty. The job runs on schedule (every 60 seconds), finds nothing, and exits. It's correct but idle — waiting for the grant step to produce PENDING rewards for it to process.
+
+**Q78: "What does the reward grant calculation look like?" (2026-05-16)**
+A: When an order is delivered:
+1. Look up each order item's product → brand → `BrandTickerMapping` → `tickerSymbol` + `stockBackPercentage`
+2. Calculate reward dollar value: `orderItemTotal × stockBackPercentage / 100`
+3. Fetch current stock price from market-data service (or Redis cache)
+4. Calculate shares earned: `rewardDollarValue / currentStockPrice`
+5. Create `StockBackReward` with status=PENDING, vestingDate = now + 30 days
+6. After 30 days, the vesting job picks it up: status → VESTED, creates actual holding via `addOrUpdateHolding`
+
+The idempotency check (`findByOrderId`) ensures one reward per order, even if the event is processed multiple times (at-least-once Kafka delivery).

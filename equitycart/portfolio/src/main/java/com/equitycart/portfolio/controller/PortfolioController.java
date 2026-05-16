@@ -2,8 +2,13 @@ package com.equitycart.portfolio.controller;
 
 import com.equitycart.portfolio.dto.HoldingRequest;
 import com.equitycart.portfolio.dto.HoldingResponse;
+import com.equitycart.portfolio.dto.PortfolioAnalyticsResponse;
 import com.equitycart.portfolio.dto.PortfolioResponse;
+import com.equitycart.portfolio.dto.SellToSpendRequest;
+import com.equitycart.portfolio.dto.SellToSpendResponse;
 import com.equitycart.portfolio.dto.StockBackRewardResponse;
+import com.equitycart.portfolio.dto.TradeRequest;
+import com.equitycart.portfolio.dto.TradeResponse;
 import com.equitycart.portfolio.service.api.PortfolioFacade;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -75,5 +80,61 @@ public class PortfolioController {
     logger.info(
         "POST /api/portfolio/holdings — userId={}, ticker={}", userId, request.tickerSymbol());
     return portfolioFacade.addHolding(userId, request);
+  }
+
+  /**
+   * Executes a manual buy or sell trade for the authenticated user.
+   *
+   * @param authentication JWT authentication containing userId as principal
+   * @param request trade details (ticker, quantity, price, type)
+   * @return trade result with post-trade holding state
+   */
+  @PostMapping("/trade")
+  @ResponseStatus(HttpStatus.OK)
+  public TradeResponse executeTrade(
+      Authentication authentication, @Valid @RequestBody TradeRequest request) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info(
+        "POST /api/portfolio/trade — userId={}, ticker={}, quantity={}, tradeType={}",
+        userId,
+        request.tickerSymbol(),
+        request.quantity(),
+        request.tradeType());
+    return portfolioFacade.executeTrade(userId, request);
+  }
+
+  /**
+   * Sells stock from the authenticated user's portfolio to fund a pending order.
+   *
+   * @param authentication JWT authentication containing userId as principal
+   * @param request sell details (ticker, quantity, price) and the order to fund
+   * @return confirmation with sale proceeds and confirmed order status
+   */
+  @PostMapping("/sell-to-spend")
+  @ResponseStatus(HttpStatus.OK)
+  public SellToSpendResponse sellToSpend(
+      Authentication authentication, @Valid @RequestBody SellToSpendRequest request) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info(
+        "POST /api/portfolio/sell-to-spend — userId={}, ticker={}, quantity={}, orderId={}",
+        userId,
+        request.tickerSymbol(),
+        request.quantity(),
+        request.orderId());
+    return portfolioFacade.sellToSpend(userId, request);
+  }
+
+  /**
+   * Returns portfolio analytics — cost basis breakdown, holding weights, and reward summary.
+   *
+   * @param authentication JWT authentication containing userId as principal
+   * @return analytics dashboard view
+   */
+  @GetMapping("/analytics")
+  @ResponseStatus(HttpStatus.OK)
+  public PortfolioAnalyticsResponse getAnalytics(Authentication authentication) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info("GET /api/portfolio/analytics — userId={}", userId);
+    return portfolioFacade.getAnalytics(userId);
   }
 }

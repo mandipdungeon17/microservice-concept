@@ -67,4 +67,23 @@ public interface PortfolioService {
    * @return list of rewards ordered by the repository's default (insertion order)
    */
   List<StockBackReward> getRewards(Long userId);
+
+  /**
+   * Reduces the quantity of a holding for the given user and ticker. If the resulting quantity is
+   * zero, the holding is deleted from the database and the zeroed-out entity is returned.
+   *
+   * <p>Retries on {@link org.springframework.dao.OptimisticLockingFailureException} to handle
+   * concurrent sell operations on the same holding.
+   *
+   * @param userId the owning user's ID
+   * @param ticker exchange ticker symbol
+   * @param qty number of shares to remove
+   * @return the holding with updated quantity (zero if fully sold)
+   * @throws com.equitycart.commons.exception.ResourceNotFoundException if no holding exists for
+   *     this ticker
+   * @throws com.equitycart.commons.exception.InsufficientSharesException if qty exceeds current
+   *     holding
+   * @throws RuntimeException if optimistic lock retries are exhausted
+   */
+  Holding reduceHolding(Long userId, String ticker, BigDecimal qty);
 }

@@ -28,7 +28,12 @@ public class VestingHelperImpl implements VestingHelper {
 
   private static final Logger logger = LogManager.getLogger(VestingHelperImpl.class);
 
+  /**
+   * Used Autowired field injection over constructor Injection to resolve Circular Dependency. @Lazy
+   * is not recognized by @RequiredArgsConstructor lombok during constructor injection.
+   */
   @Lazy @Autowired private PortfolioService portfolioService;
+
   @Autowired private StockBackRewardRepository stockBackRewardRepository;
 
   /**

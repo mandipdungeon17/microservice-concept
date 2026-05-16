@@ -18,9 +18,9 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 | `user-service`        | `com.equitycart.user`       | Authentication, authorization, user profiles, KYC | Implemented |
 | `product-service`     | `com.equitycart.product`    | Product catalog, brands, categories, batch import | Implemented |
 | `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Implemented |
-| `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Planned     |
+| `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Implemented |
 | `market-data-service` | `com.equitycart.marketdata` | Real-time prices, health scores, SSE streaming  | Implemented |
-| `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Planned     |
+| `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Implemented |
 | `app`                 | `com.equitycart`            | Monolith aggregator (runs all modules as one JAR) | Implemented |
 
 ### Folder Structure
@@ -72,7 +72,14 @@ equitycart/
 │       ├── enums/            (OrderStatus — state machine with EnumSet transitions)
 │       ├── repository/       (OrderRepository, OrderItemRepository)
 │       └── service/          (OrderService + OrderServiceImpl)
-├── portfolio/                (portfolio-service module — planned)
+├── portfolio/                (portfolio-service module)
+│   └── src/main/java/com/equitycart/portfolio/
+│       ├── controller/       (PortfolioController — 6 endpoints)
+│       ├── dto/              (HoldingRequest/Response, TradeRequest/Response, SellToSpendRequest/Response, PortfolioAnalyticsResponse)
+│       ├── entity/           (Portfolio, Holding, StockBackReward)
+│       ├── enums/            (VestingStatus, TradeType)
+│       ├── repository/       (PortfolioRepository, HoldingRepository, StockBackRewardRepository)
+│       └── service/          (PortfolioService, PortfolioFacade, TradeService, SellToSpendService, VestingHelper + impls)
 ├── market-data/              (market-data-service module)
 │   └── src/main/java/com/equitycart/marketdata/
 │       ├── client/           (AlphaVantageClient — reactive WebClient + Resilience4j)
@@ -82,7 +89,12 @@ equitycart/
 │       ├── entity/           (PriceHistory — MongoDB document)
 │       ├── repository/       (PriceHistoryRepository — MongoRepository)
 │       └── service/          (MarketDataService + MarketDataServiceImpl)
-└── ledger/                   (ledger-service module — planned)
+└── ledger/                   (ledger-service module)
+    └── src/main/java/com/equitycart/ledger/
+        ├── entity/           (LedgerEntry)
+        ├── enums/            (AccountType, EntryType, ReferenceType)
+        ├── repository/       (LedgerEntryRepository)
+        └── service/          (LedgerService + LedgerServiceImpl)
 ```
 
 ## Tech Stack
@@ -156,6 +168,25 @@ equitycart/
 - **Batch Price Lookup** — multi-symbol price query in single request
 - **Cache Management** — ADMIN-only cache eviction endpoint
 - **Javadoc + Logging** — Log4j2 loggers + Javadoc across all market-data classes
+
+### Phase 5 — Portfolio & Stock-Back Engine
+
+- **Portfolio Management** — per-user portfolio with holdings (one-to-many, cascade + orphanRemoval)
+- **Holdings** — fractional share support (BigDecimal scale=6), weighted-average buy price recalculation on add, composite unique constraint (portfolio + ticker)
+- **Manual Trading (BUY/SELL)** — TradeService with double-entry ledger recording (DEBIT HOLDING_ASSET / CREDIT CASH on BUY, reverse on SELL)
+- **Optimistic Locking** — @Version on holdings with retry loop (3 attempts) for concurrent trade safety
+- **Stock-Back Rewards** — StockBackReward entity with PENDING/VESTED/CANCELLED lifecycle, 30-day vesting delay, idempotent granting (one reward per order)
+- **Vesting Scheduler** — @Scheduled job (60s interval) queries PENDING rewards past vesting date, delegates to VestingHelper (@Transactional(REQUIRES_NEW) for per-reward isolation)
+- **Sell to Spend** — cross-domain atomic transaction: sell shares → record ledger → confirm order, all in one @Transactional
+- **Portfolio Analytics** — cost basis breakdown, per-holding portfolio weight (%), aggregated reward statistics (pending/vested counts, total shares, total dollar value)
+- **Facade Pattern** — PortfolioFacade maps between controller DTOs and service entities, composes multi-service data for analytics
+- **Javadoc + Logging** — Log4j2 loggers + Javadoc across all portfolio and ledger classes
+
+### Phase 5 — Ledger Service
+
+- **Double-Entry Bookkeeping** — every financial event creates balanced DEBIT + CREDIT pairs with shared transactionId
+- **Account Types** — WALLET, STOCK, REWARD, PLATFORM for categorizing ledger entries
+- **Audit Trail** — immutable ledger entries provide complete financial history (sum of debits = sum of credits)
 
 ## API Endpoints
 
@@ -237,6 +268,17 @@ equitycart/
 | GET    | `/api/market-data/stream/{symbol}`     | Auth   | SSE live price stream (5s interval)  |
 | DELETE | `/api/market-data/price/{symbol}/cache`| ADMIN  | Evict price cache                    |
 
+### Portfolio
+
+| Method | Endpoint                      | Access | Description                                |
+| ------ | ----------------------------- | ------ | ------------------------------------------ |
+| GET    | `/api/portfolio`              | Auth   | Get user's portfolio with all holdings     |
+| POST   | `/api/portfolio/holdings`     | Auth   | Add or update a holding                    |
+| POST   | `/api/portfolio/trade`        | Auth   | Execute BUY or SELL trade                  |
+| POST   | `/api/portfolio/sell-to-spend` | Auth  | Sell stock to fund a pending order         |
+| GET    | `/api/portfolio/rewards`      | Auth   | Get stock-back reward history              |
+| GET    | `/api/portfolio/analytics`    | Auth   | Portfolio analytics (cost basis, weights)  |
+
 ## How to Build & Run
 
 ```bash
@@ -292,6 +334,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | `equitycart-roadmap.md`         | Full 10-phase, 20-26 week development roadmap     |
 | `progress.md`                   | Current phase status, steps completed, next steps |
 | `learning_log.md`               | Roadblocks, concepts learned, and interview Q&A   |
+| `test-commands.md`              | Consolidated curl test commands for all phases    |
 | `learning-instructor-agent.md`  | Agent system prompt and teaching methodology      |
 | `project-development-prompt.md` | Project vision, roles, and requirements           |
 
@@ -304,6 +347,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)               |
 | Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
 | Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)               |
+| Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE (reward grant deferred to Phase 6)  |
 
 ## Known Issues
 
@@ -311,8 +355,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 
 ## Roadmap Ahead
 
-- **Phase 5**: Portfolio Service & Stock-Back Engine (holdings, trading, vesting)
-- **Phase 6**: Event-Driven Architecture (Kafka, async order pipeline)
+- **Phase 6**: Event-Driven Architecture (Kafka, reward granting on order delivery, Saga pattern)
 - **Phase 7**: Microservices Decomposition (Eureka, Gateway, Config Server)
 - **Phase 8**: Security Hardening (OAuth2/Keycloak, rate limiting)
 - **Phase 9**: Observability (Prometheus, Grafana, distributed tracing)

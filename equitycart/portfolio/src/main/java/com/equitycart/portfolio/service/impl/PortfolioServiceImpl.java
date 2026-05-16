@@ -1,5 +1,7 @@
 package com.equitycart.portfolio.service.impl;
 
+import com.equitycart.commons.exception.InsufficientSharesException;
+import com.equitycart.commons.exception.ResourceNotFoundException;
 import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.entity.Portfolio;
 import com.equitycart.portfolio.entity.StockBackReward;
@@ -216,5 +218,76 @@ public class PortfolioServiceImpl implements PortfolioService {
   public List<StockBackReward> getRewards(Long userId) {
     logger.debug("Retrieving all rewards for userId={}", userId);
     return stockBackRewardRepository.findByUserId(userId);
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Validates that the holding exists and has sufficient quantity before reducing. If the
+   * resulting quantity is zero, the holding row is deleted to avoid phantom positions in portfolio
+   * views. Uses the same optimistic locking retry strategy as {@link #addOrUpdateHolding}.
+   */
+  @Override
+  public Holding reduceHolding(Long userId, String ticker, BigDecimal qty) {
+    for (int i = 0; i < retryOptimisticLocking; i++) {
+      try {
+        Portfolio portfolio = this.getOrCreatePortfolio(userId);
+        Optional<Holding> optionalHolding =
+            holdingRepository.findByPortfolioAndTickerSymbol(portfolio, ticker);
+        if (optionalHolding.isEmpty()) {
+          logger.error(
+              "Attempt to reduce non-existent holding for userId={}, ticker={}", userId, ticker);
+          throw new ResourceNotFoundException(
+              "No existing holding found for userId=" + userId + ", ticker=" + ticker);
+        } else {
+          Holding holding = optionalHolding.get();
+          if (holding.getQuantity().compareTo(qty) < 0) {
+            logger.error(
+                "Attempt to reduce holding by more than owned for userId={}, ticker={}, owned={}, attempted reduction={}",
+                userId,
+                ticker,
+                holding.getQuantity(),
+                qty);
+            throw new InsufficientSharesException(
+                "Cannot reduce holding by more than owned for userId="
+                    + userId
+                    + ", ticker="
+                    + ticker);
+          }
+          BigDecimal newQty = holding.getQuantity().subtract(qty);
+          logger.info(
+              "Reducing holding for userId={}, ticker={}: qty {} → {}",
+              userId,
+              ticker,
+              holding.getQuantity(),
+              newQty);
+
+          holding.setQuantity(newQty);
+
+          if (newQty.compareTo(BigDecimal.ZERO) == 0) {
+            holdingRepository.delete(holding);
+            return holding;
+          } else {
+            return holdingRepository.save(holding);
+          }
+        }
+      } catch (OptimisticLockingFailureException e) {
+        logger.warn(
+            "Optimistic lock conflict while reducing holding for userId={}, ticker={}, attempt {}/{}",
+            userId,
+            ticker,
+            i + 1,
+            retryOptimisticLocking);
+      }
+    }
+    logger.error(
+        "Exhausted {} retry attempts while reducing holding for userId={}, ticker={}",
+        retryOptimisticLocking,
+        userId,
+        ticker);
+    throw new RuntimeException(
+        "Failed to reduce holding after "
+            + retryOptimisticLocking
+            + " attempts due to concurrent updates.");
   }
 }

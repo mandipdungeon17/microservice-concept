@@ -2,8 +2,13 @@ package com.equitycart.portfolio.service.api;
 
 import com.equitycart.portfolio.dto.HoldingRequest;
 import com.equitycart.portfolio.dto.HoldingResponse;
+import com.equitycart.portfolio.dto.PortfolioAnalyticsResponse;
 import com.equitycart.portfolio.dto.PortfolioResponse;
+import com.equitycart.portfolio.dto.SellToSpendRequest;
+import com.equitycart.portfolio.dto.SellToSpendResponse;
 import com.equitycart.portfolio.dto.StockBackRewardResponse;
+import com.equitycart.portfolio.dto.TradeRequest;
+import com.equitycart.portfolio.dto.TradeResponse;
 import java.util.List;
 
 /**
@@ -37,4 +42,32 @@ public interface PortfolioFacade {
    * @return list of reward history items
    */
   List<StockBackRewardResponse> getRewards(Long userId);
+
+  /**
+   * Executes a manual buy or sell trade and returns the result as a response DTO.
+   *
+   * @param userId the authenticated user's ID
+   * @param request trade details (ticker, quantity, price, type)
+   * @return trade execution result with post-trade holding state
+   */
+  TradeResponse executeTrade(Long userId, TradeRequest request);
+
+  /**
+   * Executes the "Sell to Spend" flow — sells stock and funds a pending order with the proceeds.
+   *
+   * @param userId the authenticated user's ID
+   * @param request sell details (ticker, quantity, price) and the order to fund
+   * @return confirmation with sale proceeds and updated order status
+   */
+  SellToSpendResponse sellToSpend(Long userId, SellToSpendRequest request);
+
+  /**
+   * Computes portfolio analytics — cost basis breakdown per holding, portfolio weight distribution,
+   * and aggregated reward statistics. This is where the facade shines: composing data from multiple
+   * service calls into a single rich response.
+   *
+   * @param userId the authenticated user's ID
+   * @return analytics dashboard view with computed metrics
+   */
+  PortfolioAnalyticsResponse getAnalytics(Long userId);
 }

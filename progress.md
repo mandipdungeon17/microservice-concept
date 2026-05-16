@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 5 - Portfolio & Stock-Back Engine (IN PROGRESS)
+## Status: Phase 5 - Portfolio & Stock-Back Engine (FUNCTIONAL COMPLETE)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -450,9 +450,9 @@
 | 4 | Portfolio, Holding, StockBackReward entities + VestingStatus enum | COMPLETE |
 | 5 | Repositories + PortfolioService + VestingHelper (with REQUIRES_NEW) | COMPLETE |
 | 6 | PortfolioController (REST API) + DTOs + Facade | COMPLETE |
-| 7 | BUY/SELL Trade APIs (TradeService — manual trading) | PENDING |
-| 8 | "Sell to Spend" — liquidate stock to fund purchase + atomic transaction | PENDING |
-| 9 | Portfolio Analytics (total value, growth %, average buy price) | PENDING |
+| 7 | BUY/SELL Trade APIs (TradeService — manual trading) | COMPLETE |
+| 8 | Ledger Integration + "Sell to Spend" atomic transaction | COMPLETE |
+| 9 | Portfolio Analytics (cost basis, weights, reward summary) | COMPLETE |
 | 10 | End-to-end testing + end-of-phase re-audit | PENDING |
 
 Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phase 6 (Event-Driven Architecture) per roadmap alignment.
@@ -527,10 +527,53 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - BUILD SUCCESSFUL
 
 ### Phase 5 Remaining
-- [ ] Step 7: BUY/SELL Trade APIs
-- [ ] Step 8: "Sell to Spend" flow + atomic transaction
-- [ ] Step 9: Portfolio Analytics
-- [ ] Step 10: End-to-end testing + re-audit
+- [x] Step 7: BUY/SELL Trade APIs — COMPLETE (2026-05-13)
+  - TradeType enum (BUY, SELL), TradeRequest/TradeResponse DTOs (Java records, String tradeType for DTO-enum decoupling)
+  - TradeService interface (returns Holding entity) + TradeServiceImpl: delegates BUY to addOrUpdateHolding, SELL to reduceHolding
+  - PortfolioService.reduceHolding(): validates holding exists + sufficient shares, optimistic lock retry, deletes holding at zero quantity
+  - InsufficientSharesException (commons) + GlobalExceptionHandler mapping → 400 Bad Request
+  - PortfolioFacade.executeTrade(): maps Holding entity → TradeResponse DTO
+  - PortfolioController: POST /api/portfolio/trade (200 OK)
+  - Fixed: log bug (old qty logged after setQuantity), IllegalArgumentException→InsufficientSharesException/ResourceNotFoundException, zero-qty phantom holdings, missing optimistic lock retry, 201→200 status
+  - Fixed: NullPointerException on full sell — reduceHolding sets quantity to zero before delete, returns holding for response mapping
+  - Circular dependency (PortfolioServiceImpl ↔ VestingHelperImpl): @Lazy on field ignored by Lombok @RequiredArgsConstructor — fixed with @Autowired field injection
+  - BUILD SUCCESSFUL
+- [x] Step 8: Ledger Integration + Sell to Spend — COMPLETE (2026-05-14)
+  - **8A: Ledger wired into TradeService**
+    - Added `implementation project(':ledger-service')` to portfolio/build.gradle
+    - TradeServiceImpl injects LedgerService, records double-entry after each trade
+    - BUY: DEBIT HOLDING_ASSET, CREDIT CASH (user gains shares, loses cash)
+    - SELL: DEBIT CASH, CREDIT HOLDING_ASSET (user gains cash, loses shares)
+    - Ledger call inside same @Transactional — if ledger fails, holding change rolls back
+  - **8B: Sell to Spend (cross-domain atomic transaction)**
+    - Added `implementation project(':order-service')` to portfolio/build.gradle
+    - SellToSpendRequest/SellToSpendResponse DTOs
+    - SellToSpendService interface + SellToSpendServiceImpl: orchestrates portfolio + ledger + order in one @Transactional
+    - Flow: validate order (CREATED, belongs to user) → validate proceeds ≥ total → sell shares → record ledger → confirm order
+    - Guard clause pattern: early-return validations instead of nested if-else
+    - POST /api/portfolio/sell-to-spend (200 OK) via facade + controller
+    - Fixed: InsufficientSharesException → IllegalArgumentException for insufficient proceeds (different semantic)
+    - Key learning: monolith advantage (one @Transactional wraps all), preview of Saga pattern for microservices
+  - BUILD SUCCESSFUL
+- [x] Step 9: Portfolio Analytics — COMPLETE (2026-05-14)
+  - 3 new DTOs: HoldingAnalyticsResponse (per-holding cost basis + portfolio weight), RewardSummaryResponse (aggregate reward stats), PortfolioAnalyticsResponse (top-level dashboard view)
+  - Analytics logic lives in PortfolioFacadeImpl.getAnalytics() — composes data from getOrCreatePortfolio + getRewards, computes derived values
+  - Cost basis per holding: qty × avgBuyPrice
+  - Portfolio weight: (costBasis / totalCostBasis) × 100, with zero-division guard
+  - Reward summary: counts by status (pending/vested), totals (sharesEarned, dollarValue)
+  - Fixed: BigDecimal divide precision — multiply first then divide with explicit scale (2 decimal places)
+  - GET /api/portfolio/analytics (200 OK)
+  - BUILD SUCCESSFUL
+- [x] Step 10: End-to-end testing + re-audit — COMPLETE (2026-05-16)
+  - Re-audit: all 20 uncommitted Java files verified — Javadoc + Log4j logger present
+  - test-commands.md created: consolidated curl commands for all phases (1–5), Redis/MongoDB/PostgreSQL CLI verification, Docker infrastructure setup
+  - All 6 portfolio endpoints tested: GET /portfolio, POST /holdings, POST /trade, POST /sell-to-spend, GET /rewards, GET /analytics
+  - Error paths verified: InsufficientSharesException (400), ResourceNotFoundException (404), invalid trade type (400), insufficient proceeds (400), already-confirmed order (400)
+
+### Phase 5 Deferred to Phase 6
+- **Reward granting** (creating StockBackReward with PENDING status on order delivery): requires cross-module event flow (order → product → market-data → portfolio). This is the natural trigger for the Kafka event pipeline in Phase 6.
+- **Vesting job activation**: VestingHelper + @Scheduled job exist and are correct, but have no rewards to process since grant step is missing. Will activate naturally once reward granting is implemented in Phase 6.
+- These two items complete the stock-back loop: order delivered → reward granted (PENDING) → vesting job runs → reward vested → holding created.
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -538,7 +581,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 3: Order Service & Cart (Weeks 6-7) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 4: Market Data - Reactive (Weeks 8-9) — FUNCTIONAL COMPLETE (tests deferred)
-- [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — IN PROGRESS
+- [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — FUNCTIONAL COMPLETE (reward grant deferred to Phase 6)
 - [ ] Phase 6: Event-Driven Architecture (Weeks 13-15)
 - [ ] Phase 7: Microservices Decomposition (Weeks 16-18)
 - [ ] Phase 8: Security Hardening (Weeks 19-20)
@@ -580,3 +623,5 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-10**: Phase 4 Steps 6-7 complete — HealthScoreResponse DTO, getHealthScore() with 4-signal composite (priceChange ±15, changePercent ±10, weeklyTrend ±15, volume +10), base 50, clamped [0,100]. MarketDataController with 6 endpoints. SSE streaming: Flux.interval(5s) + concatMap (ordered) + distinctUntilChanged(price). ServerSentEvent wrapper for standard SSE fields. Fixed: flatMap→concatMap for ordering, Math.max(0,...) lower bound. Javadoc + Log4j logger added to all uncommitted files. Next: test all endpoints end-to-end.
 - **2026-05-10**: Phase 4 Step 8 complete — All 6 endpoints tested (price, prices, history, health, cache evict, SSE stream). MongoDB via Docker (`docker run -d --name mongodb -p 27017:27017 mongo`). Zscaler SSL resolved (imported root CA into Java truststore). Health score verified: 85 = 50+15+10+0+10. Re-audit: all 10 files have Javadoc + Log4j. Debug-mode walkthrough written (startup bean wiring, 6 request flow traces, 3 resilience scenarios). Fixed: @Value on final field (UnsatisfiedDependencyException). Phase 4 FUNCTIONAL COMPLETE.
 - **2026-05-12**: Phase 5 started — Portfolio module: entities (Portfolio, Holding, StockBackReward, VestingStatus), repositories (3), PortfolioService + VestingHelper. Learned: @Transactional propagation (7 types), proxy self-invocation problem, REQUIRES_NEW for batch isolation, optimistic lock retry, stock-back reward business model (fractional shares, vesting delay, zero cost-basis). Next: PortfolioController + DTOs.
+- **2026-05-14**: Steps 7-9 complete — TradeService (BUY/SELL with ledger double-entry), SellToSpendService (cross-domain atomic transaction: portfolio + ledger + order), Portfolio Analytics (cost basis, weights, reward summary). Fixed: circular dependency (@Lazy + @Autowired field injection), BigDecimal divide precision, NullPointerException on full sell, log-after-mutation bug. Learned: guard clause pattern, facade as compositor, monolith @Transactional advantage, Saga pattern preview.
+- **2026-05-16**: Phase 5 FUNCTIONAL COMPLETE — Step 10 re-audit done (20 files verified). test-commands.md created with all phases (1-5) + Docker/Redis/MongoDB/PostgreSQL CLI. Identified gap: reward granting (creating PENDING StockBackReward on order delivery) not implemented — requires cross-module event chain (order→product→market-data→portfolio). Deferred to Phase 6 as first Kafka event. Vesting job exists but idle until rewards are granted. Next: Phase 6 — Event-Driven Architecture.

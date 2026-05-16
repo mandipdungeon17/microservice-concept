@@ -253,8 +253,8 @@ microservice-concept/
 ### Deliverables
 
 - [ ] Kafka cluster setup (Docker Compose)
-- [ ] Order-Placed event → triggers stock-back reward calculation
-- [ ] Reward-Granted event → updates portfolio
+- [ ] Order-Delivered event → triggers stock-back reward grant (cross-module: order → product/brand-ticker → market-data price → portfolio grantReward with PENDING status + 30-day vesting date)
+- [ ] Reward-Granted event → confirms portfolio updated, activates vesting job (existing @Scheduled job processes PENDING → VESTED → addOrUpdateHolding)
 - [ ] Outbox table + Debezium CDC or polling publisher
 - [ ] Saga orchestrator for "Sell to Spend" flow
 - [ ] Dead Letter Queue (DLQ) for failed event processing
