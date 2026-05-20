@@ -29,17 +29,23 @@ docker run -d \
   -p 27017:27017 \
   mongo:7
 
+# Start Kafka (KRaft mode — no ZooKeeper)
+docker run -d \
+  --name kafka \
+  -p 9092:9092 \
+  apache/kafka:latest
+
 # Verify all containers are running
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 # Stop all
-docker stop postgres redis mongodb
+docker stop postgres redis mongodb kafka
 
 # Start again (after stop)
-docker start postgres redis mongodb
+docker start postgres redis mongodb kafka
 
 # Remove all (destroys data)
-docker rm -f postgres redis mongodb
+docker rm -f postgres redis mongodb kafka
 ```
 
 ---
@@ -446,6 +452,213 @@ curl -s http://localhost:8080/api/portfolio/rewards \
 # Get portfolio analytics (cost basis, per-holding weight, reward summary)
 curl -s http://localhost:8080/api/portfolio/analytics \
   -H "Authorization: Bearer <Token>"
+```
+
+---
+
+## Phase 6: Event-Driven Architecture (Kafka + Outbox + DLQ)
+
+> **Pre-requisites:** Kafka container running (see Docker section above).
+> Ensure Phase 1 data exists (categories, brands, brand-ticker mappings, products).
+> Use ADMIN token for order status transitions, CUSTOMER token for placing orders.
+
+### Setup: Ensure Brand-Ticker Mappings Exist
+
+```bash
+# Verify Apple → AAPL mapping exists (should return data if Phase 1 was run)
+curl -s http://localhost:8080/api/brand-ticker-mappings/brand/1 \
+  -H "Authorization: Bearer <Token>"
+
+# Verify Nike → NKE mapping exists
+curl -s http://localhost:8080/api/brand-ticker-mappings/brand/2 \
+  -H "Authorization: Bearer <Token>"
+```
+
+### Happy Path: Order Delivered → Stock-Back Reward Created
+
+```bash
+# 1. Add items to cart (as CUSTOMER)
+curl -s -X POST http://localhost:8080/api/cart/user1/items \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"productId": 1, "quantity": 1, "price": 899.99}'
+
+# 2. Place order
+curl -s -X POST http://localhost:8080/api/order \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idempotencyKey":"order-kafka-test-001","shippingAddress":"789 Kafka Lane","paymentMethod":"UPI"}'
+
+# 3. Transition order to DELIVERED (note the orderId from step 2)
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"CONFIRMED"}'
+
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"PROCESSING"}'
+
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"SHIPPED"}'
+
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"DELIVERED"}'
+
+# 4. Wait ~10 seconds (5s poller + consumer processing)
+
+# 5. Verify reward created (PENDING status)
+curl -s http://localhost:8080/api/portfolio/rewards \
+  -H "Authorization: Bearer <Token>"
+
+# 6. Wait 60+ seconds for vesting job, then check portfolio for new holding
+curl -s http://localhost:8080/api/portfolio \
+  -H "Authorization: Bearer <Token>"
+```
+
+### Multi-Ticker Reward: Apple + Nike in Same Order
+
+```bash
+# 1. Add Apple product and Nike product to cart
+curl -s -X POST http://localhost:8080/api/cart/user1/items \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"productId": 1, "quantity": 1, "price": 899.99}'
+
+curl -s -X POST http://localhost:8080/api/cart/user1/items \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"productId": 2, "quantity": 1, "price": 149.50}'
+
+# 2. Place order
+curl -s -X POST http://localhost:8080/api/order \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idempotencyKey":"order-multi-ticker-001","shippingAddress":"Multi Ticker Ave","paymentMethod":"UPI"}'
+
+# 3. Transition all the way to DELIVERED
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"CONFIRMED"}'
+
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"PROCESSING"}'
+
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"SHIPPED"}'
+
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"DELIVERED"}'
+
+# 4. Wait ~10 seconds, then verify TWO reward rows (AAPL + NKE)
+curl -s http://localhost:8080/api/portfolio/rewards \
+  -H "Authorization: Bearer <Token>"
+```
+
+### Idempotency: Duplicate Event Does Not Create Duplicate Reward
+
+```bash
+# The outbox poller guarantees at-least-once delivery.
+# To simulate: manually re-publish the same event from outbox.
+# Easiest verification: check that delivering the same order again
+# (already DELIVERED) returns an error — status machine prevents it.
+
+# Or: query stock_back_rewards and verify unique constraint holds:
+# SELECT * FROM stock_back_rewards WHERE order_id = <orderId>;
+# Should show exactly 1 row per ticker, never duplicates.
+```
+
+### Return Cancellation: PENDING Reward → CANCELLED
+
+```bash
+# 1. Place + deliver an order (reuse steps above with new idempotencyKey)
+curl -s -X POST http://localhost:8080/api/order \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idempotencyKey":"order-return-test-001","shippingAddress":"Return St","paymentMethod":"UPI"}'
+
+# ... transition to DELIVERED (same 4 PATCH calls as above) ...
+
+# 2. Wait for reward to be created (~10s), verify it's PENDING
+curl -s http://localhost:8080/api/portfolio/rewards \
+  -H "Authorization: Bearer <Token>"
+
+# 3. Initiate return
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/return \
+  -H "Authorization: Bearer <Token>"
+
+# 4. Transition to RETURNED
+curl -s -X PATCH http://localhost:8080/api/order/<orderId>/status \
+  -H "Authorization: Bearer <Token>" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"RETURNED"}'
+
+# 5. Wait ~10 seconds, verify reward is now CANCELLED
+curl -s http://localhost:8080/api/portfolio/rewards \
+  -H "Authorization: Bearer <Token>"
+```
+
+### No Ticker Mapping: Brand Without Stock-Back
+
+```bash
+# Create a brand without a BrandTickerMapping, create a product under it,
+# order that product → deliver → verify NO reward is created (no error either)
+# The consumer simply skips items whose brand has no ticker mapping.
+```
+
+### Kafka CLI Verification
+
+```bash
+# List all topics (should include order-delivered, order-returned, and .DLT variants)
+docker exec -it kafka /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+
+# Consume from order-delivered topic (see published events)
+docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --topic order-delivered \
+  --from-beginning \
+  --bootstrap-server localhost:9092
+
+# Consume from order-returned topic
+docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --topic order-returned \
+  --from-beginning \
+  --bootstrap-server localhost:9092
+
+# Check Dead Letter Topic (should be empty unless errors occurred)
+docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --topic order-delivered.DLT \
+  --from-beginning \
+  --bootstrap-server localhost:9092
+```
+
+### Data Verification — Outbox Table (PostgreSQL)
+
+```bash
+# Connect to PostgreSQL
+docker exec -it postgres psql -U postgres -d equitycart
+
+# Inside psql:
+SELECT id, aggregate_type, aggregate_id, event_type, status, published_at, created_at
+  FROM outbox_events ORDER BY created_at DESC;
+
+# Verify all rows have status = 'SENT' and published_at is populated
+SELECT * FROM outbox_events WHERE status = 'PENDING';  -- should be empty
+
+# Check stock_back_rewards
+SELECT id, order_id, user_id, ticker_symbol, shares_earned, dollar_value, status, vesting_date
+  FROM stock_back_rewards ORDER BY created_at DESC;
 ```
 
 ---

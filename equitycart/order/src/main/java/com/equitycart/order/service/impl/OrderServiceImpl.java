@@ -13,6 +13,7 @@ import com.equitycart.order.dto.UpdateOrderStatusRequest;
 import com.equitycart.order.entity.Order;
 import com.equitycart.order.entity.OrderItem;
 import com.equitycart.order.enums.OrderStatus;
+import com.equitycart.order.event.OrderOutboxWriter;
 import com.equitycart.order.repository.OrderRepository;
 import com.equitycart.order.service.api.OrderService;
 import com.equitycart.product.entity.Product;
@@ -38,6 +39,7 @@ public class OrderServiceImpl implements OrderService {
   private final CartService cartService;
   private final OrderRepository orderRepository;
   private final ProductRepository productRepository;
+  private final OrderOutboxWriter orderOutboxWriter;
 
   /** {@inheritDoc} */
   @Transactional
@@ -168,10 +170,17 @@ public class OrderServiceImpl implements OrderService {
           productRepository.save(product);
         }
       }
-      order.setStatus(status);
-      orderRepository.save(order);
-
       log.info("Order {} transitioned from {} to {}", orderId, order.getStatus(), status);
+
+      order.setStatus(status);
+      Order saveOrder = orderRepository.save(order);
+
+      if (OrderStatus.DELIVERED.equals(status)) {
+        orderOutboxWriter.writeOutboxOrderDeliveredEvent(saveOrder);
+      } else if (OrderStatus.RETURNED.equals(status)) {
+        orderOutboxWriter.writeOutboxOrderReturnedEvent(saveOrder);
+      }
+
     } else
       throw new InvalidStatusTransitionException(
           "Invalid status transition for order Id: " + orderId);

@@ -21,12 +21,13 @@ public interface StockBackRewardRepository extends JpaRepository<StockBackReward
   List<StockBackReward> findByStatusAndVestingDateBefore(VestingStatus status, LocalDateTime now);
 
   /**
-   * Finds a reward by its source order ID. Used for idempotency checks when granting rewards.
+   * Finds all rewards for a given order across all tickers. Used by the cancellation consumer to
+   * cancel PENDING rewards when an order is returned.
    *
    * @param orderId the source order's ID
-   * @return the reward, or empty if no reward was granted for this order
+   * @return all rewards for this order (may span multiple tickers)
    */
-  Optional<StockBackReward> findByOrderId(Long orderId);
+  List<StockBackReward> findByOrderId(Long orderId);
 
   /**
    * Finds all rewards belonging to a user regardless of status. Used by the facade to build the
@@ -36,4 +37,14 @@ public interface StockBackRewardRepository extends JpaRepository<StockBackReward
    * @return all rewards for the user
    */
   List<StockBackReward> findByUserId(Long userId);
+
+  /**
+   * Finds a specific reward by order ID and ticker symbol. Used for idempotency checks when
+   * granting rewards — prevents duplicate grants on Kafka message redelivery.
+   *
+   * @param orderId the source order's ID
+   * @param tickerSymbol the ticker being rewarded
+   * @return the existing reward, or empty if none exists for this (order, ticker) pair
+   */
+  Optional<StockBackReward> findByOrderIdAndTickerSymbol(Long orderId, String tickerSymbol);
 }

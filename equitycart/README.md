@@ -14,7 +14,7 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 
 | Module                | Package                     | Purpose                                           | Status      |
 | --------------------- | --------------------------- | ------------------------------------------------- | ----------- |
-| `commons`             | `com.equitycart.commons`    | Shared DTOs, exceptions, constants                | Implemented |
+| `commons`             | `com.equitycart.commons`    | Shared DTOs, exceptions, events, config       | Implemented |
 | `user-service`        | `com.equitycart.user`       | Authentication, authorization, user profiles, KYC | Implemented |
 | `product-service`     | `com.equitycart.product`    | Product catalog, brands, categories, batch import | Implemented |
 | `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Implemented |
@@ -111,7 +111,7 @@ equitycart/
 | SQL Database      | PostgreSQL                                    |
 | NoSQL Database    | MongoDB (price history, TTL indexes)      |
 | Cache             | Redis (@Cacheable + RedisTemplate + manual opsForValue) |
-| Message Broker    | Apache Kafka (planned)                        |
+| Message Broker    | Apache Kafka (KRaft mode, event-driven rewards) |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
 | API Gateway       | Spring Cloud Gateway (planned)                |
 | Service Discovery | Netflix Eureka (planned)                      |
@@ -187,6 +187,17 @@ equitycart/
 - **Double-Entry Bookkeeping** — every financial event creates balanced DEBIT + CREDIT pairs with shared transactionId
 - **Account Types** — WALLET, STOCK, REWARD, PLATFORM for categorizing ledger entries
 - **Audit Trail** — immutable ledger entries provide complete financial history (sum of debits = sum of credits)
+
+### Phase 6 — Event-Driven Architecture (Kafka)
+
+- **Transactional Outbox Pattern** — atomic DB write + async Kafka delivery, eliminates dual-write data loss
+- **Order Delivered → Stock-Back Reward** — Kafka event triggers fractional share reward calculation per brand/ticker
+- **Order Returned → Reward Cancellation** — cancels PENDING rewards, logs warning for already-VESTED
+- **Multi-Ticker Rewards** — composite unique constraint (orderId + tickerSymbol) allows multiple brand rewards per order
+- **Dead Letter Queue (DLQ)** — 3 retries with 1s backoff, then divert poison messages to .DLT topic
+- **Generic Outbox Poller** — re-hydrates JSON payload via Class.forName(FQCN), handles any event type without code changes
+- **Consumer Group Isolation** — separate group IDs for reward granting vs cancellation (independent offset tracking)
+- **Javadoc + Logging** — Log4j2 loggers + Javadoc across all Kafka classes
 
 ## API Endpoints
 
@@ -305,6 +316,7 @@ equitycart/
 - PostgreSQL (running on localhost:5432, database: equitycart)
 - Redis (running on localhost:6379 — via Docker: `docker run -d --name redis -p 6379:6379 redis`)
 - MongoDB (running on localhost:27017 — via Docker: `docker run -d --name mongodb -p 27017:27017 mongo`)
+- Apache Kafka (running on localhost:9092 — via Docker: `docker run -d --name kafka -p 9092:9092 apache/kafka:latest`)
 
 ## Configuration
 
@@ -327,6 +339,9 @@ Key application properties (`app/src/main/resources/application.yml`):
 | `alphavantage.base-url`               | Alpha Vantage API base URL                |
 | `alphaVantage.api-key`                | Alpha Vantage API key (env var)           |
 
+| `spring.kafka.bootstrap-servers`      | Kafka broker address (default: localhost:9092) |
+| `spring.kafka.consumer.group-id`      | Default consumer group ID                     |
+
 ## Project Documents
 
 | File                            | Purpose                                           |
@@ -334,6 +349,8 @@ Key application properties (`app/src/main/resources/application.yml`):
 | `equitycart-roadmap.md`         | Full 10-phase, 20-26 week development roadmap     |
 | `progress.md`                   | Current phase status, steps completed, next steps |
 | `learning_log.md`               | Roadblocks, concepts learned, and interview Q&A   |
+| `kafka-learning.md`             | Deep-dive Kafka concepts (topics, partitions, serialization, DLQ) |
+| `microservice-patterns.md`      | Microservice patterns (Outbox, Saga, Circuit Breaker) |
 | `test-commands.md`              | Consolidated curl test commands for all phases    |
 | `learning-instructor-agent.md`  | Agent system prompt and teaching methodology      |
 | `project-development-prompt.md` | Project vision, roles, and requirements           |
@@ -348,6 +365,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
 | Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)               |
 | Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE (reward grant deferred to Phase 6)  |
+| Phase 6 | Event-Driven Architecture     | FUNCTIONAL COMPLETE (e2e testing pending)    |
 
 ## Known Issues
 
@@ -355,7 +373,6 @@ Key application properties (`app/src/main/resources/application.yml`):
 
 ## Roadmap Ahead
 
-- **Phase 6**: Event-Driven Architecture (Kafka, reward granting on order delivery, Saga pattern)
 - **Phase 7**: Microservices Decomposition (Eureka, Gateway, Config Server)
 - **Phase 8**: Security Hardening (OAuth2/Keycloak, rate limiting)
 - **Phase 9**: Observability (Prometheus, Grafana, distributed tracing)

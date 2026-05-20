@@ -3209,3 +3209,144 @@ A: When an order is delivered:
 6. After 30 days, the vesting job picks it up: status → VESTED, creates actual holding via `addOrUpdateHolding`
 
 The idempotency check (`findByOrderId`) ensures one reward per order, even if the event is processed multiple times (at-least-once Kafka delivery).
+
+---
+
+## Phase 6: Event-Driven Architecture — Kafka
+
+### Step 1: Kafka Infrastructure + Dependencies (2026-05-17)
+
+**86. Apache Kafka — Core Concepts (2026-05-17)**
+
+Kafka is a distributed commit log (not a traditional message queue). Built by LinkedIn in 2010 to replace N×N service-to-service spaghetti with a single event backbone. Key differences from RabbitMQ: messages are durable (retained for days, not deleted on consumption), replayable (reset offset to re-read), and pull-based (consumer controls read rate).
+
+Core vocabulary:
+- **Topic** — named stream of messages (like a DB table, but append-only)
+- **Partition** — unit of parallelism within a topic. Messages with same key go to same partition (ordered). Across partitions, no ordering guarantee.
+- **Offset** — sequential ID per message within a partition. Consumer tracks "I've read up to offset N" (committed offset).
+- **Broker** — Kafka server. Stores partitions on disk, serves reads/writes.
+- **Consumer Group** — instances sharing work: same group-id = queue (work divided); different group-ids = pub-sub (each gets all messages).
+- **Serializer/Deserializer** — Kafka stores bytes. JsonSerializer converts Java→JSON bytes (producer); JsonDeserializer converts JSON bytes→Java (consumer). `__TypeId__` header carries class name.
+
+See `kafka-learning.md` for full details with visualizations and failure scenarios.
+
+**87. ZooKeeper → KRaft Mode (2026-05-17)**
+
+ZooKeeper (Yahoo, 2006) was Kafka's external coordination service — handled controller election, topic metadata, broker liveness, partition leadership. Problem: two distributed systems to manage, ~200K partition ceiling (ZK memory limit), minutes-long failover (new controller must reload all state from ZK).
+
+KRaft (Kafka 3.3+, 2022) = Kafka + Raft consensus. Metadata stored in internal `__cluster_metadata` topic. Controller elected via Raft protocol between Kafka nodes themselves. Result: one cluster instead of two, seconds-long failover (metadata already replicated locally), millions of partitions supported.
+
+Our dev setup: single Docker container with `PROCESS_ROLES=broker,controller` (combined mode). Production: separate controller nodes (lightweight, Raft only) and broker nodes (heavy, storage).
+
+**Q79: "What does auto-offset-reset=earliest actually do?" (2026-05-17)**
+A: ONLY applies when a consumer has NO committed offset for a partition (first run or offset expired). `earliest` = start from offset 0 (don't miss any messages). `latest` = start from current end (skip all existing). After first commit, this setting is irrelevant — consumer always resumes from committed offset. For reward granting, `earliest` is mandatory — missing a delivered-order event means a permanently lost reward.
+
+**Q80: "Why does JsonDeserializer need trusted.packages?" (2026-05-17)**
+A: Security. JsonDeserializer reads `__TypeId__` header to determine which class to instantiate. Without a trust allowlist, an attacker writing to your topic could set `__TypeId__` to a dangerous class, triggering arbitrary code during deserialization (same vulnerability class as the 2015 Apache Commons Collections exploit that hit Jenkins/WebLogic). Setting `trusted.packages=com.equitycart.commons.event` means only classes from that package are deserializable.
+
+**Q81: "Why do same-key messages go to the same partition?" (2026-05-17)**
+A: Partition = `hash(key) % numPartitions`. Since hash is deterministic, same key always maps to same partition. Within one partition, messages are strictly ordered by offset. So all events for order #42 (DELIVERED, then RETURNED) land in the same partition and are consumed in that exact order. Without key-based routing, these events could land in different partitions and be consumed out of order (RETURNED before DELIVERED → bug).
+
+### Step 2-3: Event DTOs + Kafka Producer (2026-05-17)
+
+**88. Event DTOs — Data Snapshot, Not Entity Reference (2026-05-17)**
+
+Kafka events carry a snapshot of data at the time the event occurred. `OrderDeliveredEvent` includes `orderId`, `userId`, `items` (with product/price snapshots), `totalAmount`, `deliveredAt`. The consumer doesn't query back to the producer for missing data — the event is self-contained. This decouples producer and consumer lifecycles (producer can change its entities without breaking consumers).
+
+Events were implemented as manual POJOs (not Java records) to learn Jackson's deserialization lifecycle: `no-arg constructor → setters called per field → object ready`. Records would eliminate ~60 lines per class but require Jackson 2.12+ record-aware support (uses canonical constructor directly, no no-arg needed).
+
+**89. KafkaTemplate + CompletableFuture — Async Fire-and-Forget (2026-05-17)**
+
+`KafkaTemplate.send(topic, key, value)` is non-blocking — returns `CompletableFuture<SendResult>` immediately. The actual network send happens asynchronously. `whenComplete((result, exception) -> ...)` lets you handle success/failure without blocking the calling thread. Important: `exception != null` means FAILURE, `exception == null` means SUCCESS (the result contains partition + offset metadata).
+
+This is fire-and-forget: if Kafka is down, the order status still updates but the event is lost. The Outbox pattern (Step 6) fixes this by making event creation atomic with the DB transaction.
+
+**Q82: "Why use Object as KafkaTemplate value type instead of a specific event class?" (2026-05-17)**
+A: `KafkaTemplate<String, Object>` allows sending different event types (OrderDeliveredEvent, OrderReturnedEvent) through the same template instance. The `JsonSerializer` handles the actual serialization and adds the `__TypeId__` header with the concrete class name. If you typed it as `KafkaTemplate<String, OrderDeliveredEvent>`, you'd need a separate template for each event type.
+
+**Q83: "Why publish AFTER orderRepository.save() and not before?" (2026-05-17)**
+A: If you publish first and the save fails (constraint violation, DB down), you've told consumers "order delivered" but it wasn't actually saved. The consumer grants a reward for a non-existent delivery. Publishing after save means: if save fails → exception propagates → publish never reached → no false event. The remaining gap: save succeeds but publish fails (app crash between the two lines) → event lost. Outbox pattern (Step 6) closes this gap.
+
+### Step 4-5: Stock-Back Reward Consumer + Cancellation Consumer (2026-05-19)
+
+**90. Kafka Consumer — @KafkaListener Deserialization Lifecycle (2026-05-19)**
+
+When a `@KafkaListener` method declares a typed parameter like `handleOrderDelivered(OrderDeliveredEvent event)`, Spring Kafka's `JsonDeserializer` reads the `__TypeId__` header from the Kafka message to determine the target class. It then deserializes the JSON bytes into that class using Jackson. The `trusted.packages` config restricts which classes can be instantiated (security against deserialization attacks). If `__TypeId__` says `java.lang.String` but your method expects `OrderDeliveredEvent`, you get ClassCastException.
+
+**91. Composite Unique Constraint — Multi-Ticker Rewards Per Order (2026-05-19)**
+
+`@UniqueConstraint(columnNames = {"order_id", "ticker_symbol"})` replaces the single-column `@Column(unique=true)` on `orderId`. Business logic: buying Apple + Nike products in one order should grant BOTH AAPL and NKE rewards. The idempotency key becomes (orderId + ticker), allowing multiple rewards per order while still preventing duplicates on Kafka redelivery. Repository method: `findByOrderIdAndTickerSymbol()`.
+
+**92. Consumer Group Isolation (2026-05-19)**
+
+`equitycart-reward-group` (order-delivered) and `equitycart-cancellation-group` (order-returned) have separate group IDs despite being in the same class. Each group maintains its own committed offsets. If a future notification consumer needs order-delivered events too, it uses `equitycart-notification-group` and receives ALL messages independently — pub-sub semantics via group isolation.
+
+### Step 6: Outbox Pattern (2026-05-19)
+
+**93. The Dual-Write Problem and Outbox Solution (2026-05-19)**
+
+The dual-write problem: writing to DB and Kafka in the same method without a shared transaction means either can fail independently, leaving permanent inconsistency. The Outbox Pattern solves this by writing the event payload into an `outbox_events` table within the SAME DB transaction as the business write. A background poller reads PENDING rows and publishes to Kafka. Guarantee: at-least-once delivery (consumer must be idempotent). Delivery: if transaction commits, both order and outbox row exist atomically; if it rolls back, neither exists.
+
+See `microservice-patterns.md` for full details with serialization flow diagrams and variant comparison.
+
+**Q84: "Why does the outbox poller use blocking .get() instead of async whenComplete()?" (2026-05-19)**
+A: The `whenComplete()` callback runs on Kafka's producer I/O thread — outside any Spring `@Transactional` context. Calling `outboxEventRepository.save()` there either throws `TransactionRequiredException` or auto-commits without isolation. Using `.get()` blocks within the `@Transactional` method boundary, ensuring the status update participates in the same transaction. Poller latency is irrelevant — it's a background job, not a user-facing request.
+
+**Q85: "Why re-hydrate the JSON string back to a DTO before sending via KafkaTemplate?" (2026-05-19)**
+A: Spring's `JsonSerializer` writes the `__TypeId__` header based on the Java object type it receives. If you send a raw `String`, it sets `__TypeId__: java.lang.String`. The consumer's `JsonDeserializer` reads that header and tries to instantiate a String — not your event DTO — causing ClassCastException. Re-hydrating (`objectMapper.readValue(payload, EventClass)`) lets the serializer see the real type and set the correct header. Consumer code stays unchanged.
+
+**94. The Outbox Is Infrastructure, Not Domain Logic (2026-05-19)**
+
+The outbox table doesn't care whether an event represents a delivery or a return. Its sole job: "relay this JSON blob to this Kafka topic." Therefore:
+- ONE status lifecycle: `PENDING → SENT` (no `RETURNED`, `CANCELLED`, etc.)
+- ONE generic poller method that handles ALL event types using `Class.forName(payloadType)`
+- The `payloadType` column (FQCN) enables dynamic deserialization without if-else chains
+- The `eventType` column (`ORDER_DELIVERED`, `ORDER_RETURNED`) is metadata for debugging/querying — the poller never reads it
+
+Domain-specific statuses (`RETURNED`, `CANCELLED`) belong in domain enums (`OrderStatus`, `VestingStatus`) — not in infrastructure enums like `OutboxStatus`.
+
+**95. Modular Monolith: Why spring-kafka in the app module? (2026-05-19)**
+
+Sub-modules (order-service, portfolio-service) declare `spring-kafka` so their code compiles (`KafkaTemplate`, `@KafkaListener` annotations resolve). But Spring Boot's auto-configuration (`KafkaAutoConfiguration`) only activates if the dependency is on the classpath of the Boot application — which is the `app` module. Auto-configuration reads `spring.kafka.*` YAML properties and creates: `KafkaTemplate` bean, `ConcurrentKafkaListenerContainerFactory` bean, and consumer/producer configurations. Without `spring-kafka` in `app/build.gradle`, these beans wouldn't exist at runtime → `NoSuchBeanDefinitionException` on startup.
+
+**Q86: "Why does Class.forName() need the FQCN and not just the class name?" (2026-05-19)**
+A: `Class.forName("OrderDeliveredEvent")` throws `ClassNotFoundException` because Java's classloader resolves classes by their fully-qualified name (package + class). `"OrderDeliveredEvent"` is ambiguous — there could be multiple classes with that name in different packages. `"com.equitycart.commons.event.OrderDeliveredEvent"` is unambiguous. Using `event.getClass().getName()` is the safest approach — it always returns the FQCN without hardcoding.
+
+### Step 7: Dead Letter Queue (2026-05-20)
+
+**96. Dead Letter Queue — Safety Net for Poison Messages (2026-05-20)**
+
+A poison message fails on every retry (malformed JSON, deleted entity, code bug). Without a DLQ, it blocks the consumer at that offset forever. Spring Kafka's `DefaultErrorHandler` + `DeadLetterPublishingRecoverer` provides the fix: retry N times with backoff, then divert to a `.DLT` topic (e.g., `order-delivered.DLT`). The original offset is committed, consumer moves on. Failed messages accumulate in the DLT for investigation/replay.
+
+Configuration is declarative — one `@Bean` in a `@Configuration` class. The `ConcurrentKafkaListenerContainerFactory` picks up the `DefaultErrorHandler` bean automatically. Zero changes to existing `@KafkaListener` methods.
+
+See `kafka-learning.md` Section 9 for full DLQ details with header descriptions and retry classification.
+
+**Q87: "Why separate retryable from non-retryable exceptions?" (2026-05-20)**
+A: Retrying a `DeserializationException` 3 times wastes 3 seconds — the JSON is malformed and will never parse correctly. `addNotRetryableExceptions()` tells the error handler to skip retries for permanent failures and send to DLT immediately. Retryable exceptions (DB timeout, network blip) genuinely benefit from retries because the underlying cause may resolve between attempts.
+
+### Phase 6 — Complete Architecture Diagram (2026-05-20)
+
+```
+ORDER-SERVICE                         PORTFOLIO-SERVICE
+┌───────────────────┐                 ┌─────────────────────────────┐
+│ OrderServiceImpl  │                 │ StockBackRewardConsumer     │
+│  @Transactional   │                 │                             │
+│  1. order.save()  │                 │ order-delivered listener:   │
+│  2. outbox.save() │ ← atomic       │  items→brand→ticker→reward  │
+└────────┬──────────┘                 │  grantReward() [idempotent] │
+         │                            │                             │
+         ▼                            │ order-returned listener:    │
+┌───────────────────┐                 │  PENDING → CANCELLED        │
+│ OutboxPoller      │                 └──────────────▲──────────────┘
+│ @Scheduled(5s)    │                                │
+│ re-hydrate + send │   Kafka Topics                 │
+│ mark SENT         │──▶ order-delivered ────────────┘
+└───────────────────┘──▶ order-returned ─────────────┘
+                        order-*.DLT (poison messages)
+
+Error: retry×3 (1s apart) → DLT. Non-retryable → DLT immediately.
+Idempotency: findByOrderIdAndTickerSymbol prevents duplicate rewards.
+```
+
+See `microservice-patterns.md` Section 1.11 for the full detailed diagram.

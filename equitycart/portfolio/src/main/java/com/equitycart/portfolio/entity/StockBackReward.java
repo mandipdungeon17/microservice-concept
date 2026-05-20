@@ -2,11 +2,7 @@ package com.equitycart.portfolio.entity;
 
 import com.equitycart.commons.entity.BaseEntity;
 import com.equitycart.portfolio.enums.VestingStatus;
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.EnumType;
-import jakarta.persistence.Enumerated;
-import jakarta.persistence.Table;
+import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import lombok.AllArgsConstructor;
@@ -26,14 +22,20 @@ import lombok.Setter;
  * <p>Design notes:
  *
  * <ul>
- *   <li>One reward per order (unique constraint on {@code orderId}) — idempotency guard against
- *       duplicate Kafka messages.
+ *   <li>One reward per (order + ticker) pair (composite unique constraint on {@code orderId} +
+ *       {@code tickerSymbol}) — idempotency guard against duplicate Kafka messages while allowing
+ *       multiple brand rewards per order.
  *   <li>{@code dollarValue} captures the grant-time valuation for accounting/reporting; actual
  *       share quantity is in {@code sharesEarned}.
  * </ul>
  */
 @Entity
-@Table(name = "stock_back_rewards")
+@Table(
+    name = "stock_back_rewards",
+    uniqueConstraints =
+        @UniqueConstraint(
+            name = "uk_order_ticker",
+            columnNames = {"order_id", "ticker_symbol"}))
 @AllArgsConstructor
 @NoArgsConstructor
 @Setter
@@ -42,7 +44,7 @@ import lombok.Setter;
 public class StockBackReward extends BaseEntity {
 
   /** Source order that triggered this reward; unique to ensure at-most-once granting. */
-  @Column(unique = true, nullable = false)
+  @Column(nullable = false)
   private Long orderId;
 
   /** Beneficiary user who will receive the vested shares. */

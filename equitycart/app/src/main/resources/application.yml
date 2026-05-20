@@ -35,7 +35,18 @@ spring:
     type: redis
     redis:
       time-to-live: 600000   # 10 minutes in milliseconds
-
+  kafka:
+    # Examples of multiple broker : bootstrap-servers: kafka-1:9092,kafka-2:9092,kafka-3:9092
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      group-id: equitycart-group
+      auto-offset-reset: earliest # Start from the beginning if no committed offset exists (don't miss events)
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties.spring.json.trusted.packages: com.equitycart.commons.event
 
 server:
   port: 8080

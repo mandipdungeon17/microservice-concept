@@ -161,7 +161,8 @@ public class PortfolioServiceImpl implements PortfolioService {
       BigDecimal shares,
       BigDecimal dollarVal,
       LocalDateTime vestingDate) {
-    Optional<StockBackReward> rewardOptional = stockBackRewardRepository.findByOrderId(orderId);
+    Optional<StockBackReward> rewardOptional =
+        stockBackRewardRepository.findByOrderIdAndTickerSymbol(orderId, ticker);
     if (rewardOptional.isPresent()) {
       logger.warn(
           "Duplicate reward grant attempt for orderId={}, returning existing record", orderId);

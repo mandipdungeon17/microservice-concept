@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 5 - Portfolio & Stock-Back Engine (FUNCTIONAL COMPLETE)
+## Status: Phase 6 - Event-Driven Architecture — Kafka (COMPLETE)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -575,6 +575,92 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **Vesting job activation**: VestingHelper + @Scheduled job exist and are correct, but have no rewards to process since grant step is missing. Will activate naturally once reward granting is implemented in Phase 6.
 - These two items complete the stock-back loop: order delivered → reward granted (PENDING) → vesting job runs → reward vested → holding created.
 
+## Phase 6: Event-Driven Architecture — Kafka (started 2026-05-16)
+
+### Step Plan
+
+| Step | Deliverable | Status |
+|------|-------------|--------|
+| 1 | Kafka Infrastructure + Dependencies (Docker KRaft, spring-kafka, application.yml config) | COMPLETE |
+| 2 | Event DTOs in commons (OrderDeliveredEvent, OrderItemEvent, OrderReturnedEvent) | COMPLETE |
+| 3 | Kafka Producer in order-service (OrderEventPublisher + wire into OrderServiceImpl) | COMPLETE |
+| 4 | Stock-Back Reward Consumer in portfolio-service (StockBackRewardConsumer — grant per ticker) | COMPLETE |
+| 5 | Reward Cancellation Consumer (handleOrderReturned — cancel PENDING rewards) | COMPLETE |
+| 6 | Outbox Pattern for reliable event publishing (OutboxEvent entity, OutboxPoller, generic relay) | COMPLETE |
+| 7 | Dead Letter Queue — DLQ (KafkaConsumerConfig with retry + DeadLetterPublishingRecoverer) | COMPLETE |
+| 8 | End-to-end testing + end-of-phase re-audit | COMPLETE |
+| 9 | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig) | PENDING |
+| 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | PENDING |
+| 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | PENDING |
+| 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | PENDING |
+| 13 | Notification Service (new module — email/webhook on trade, vesting) | PENDING |
+
+### Design Completed
+- [x] Plan approved: Kafka KRaft (no Zookeeper), event-driven reward granting, outbox pattern, DLQ
+- [x] Architecture: Kafka runs alongside monolith — producers/consumers are Spring beans in same JVM
+- [x] Event flow: Order DELIVERED → Kafka → StockBackRewardConsumer → grantReward(PENDING) → vesting job → VESTED → holding
+- [x] Outbox rationale: same-transaction write guarantees no lost events on crash between DB save and Kafka send
+- [x] DLQ: 3 retries with 1s backoff, then route to .DLT topic for manual inspection
+- [x] Composite unique constraint (orderId + tickerSymbol) — allows multi-ticker rewards per order
+
+### Implementation Completed
+- [x] Step 1: Kafka Infrastructure + Dependencies — COMPLETE (2026-05-17)
+  - Docker: apache/kafka:latest (KRaft mode, no ZooKeeper), port 9092 client, 9093 controller
+  - app/build.gradle: added spring-kafka dependency
+  - application.yml: spring.kafka config — bootstrap-servers, producer (StringSerializer/JsonSerializer), consumer (group-id, earliest offset reset, JsonDeserializer, trusted packages)
+  - kafka-learning.md created: comprehensive Kafka reference document (topics, partitions, offsets, brokers, consumer groups, serialization, ZooKeeper→KRaft history, Spring properties explained)
+
+- [x] Step 2: Event DTOs in commons — COMPLETE (2026-05-17)
+  - Package: com.equitycart.commons.event (new)
+  - OrderDeliveredEvent: mutable POJO (no-arg + all-args constructors, getters/setters, equals/hashCode on orderId)
+  - OrderItemEvent: product/pricing snapshot for reward calculation (productId, productName, quantity, priceAtPurchase, subtotal)
+  - OrderReturnedEvent: orderId + userId + returnedAt for reward cancellation
+  - All classes written as manual POJOs (not records) to learn Jackson deserialization lifecycle
+  - Javadoc on each class documents record equivalent
+
+- [x] Step 3: Kafka Producer in order-service — COMPLETE (2026-05-17)
+  - order/build.gradle: added spring-kafka dependency
+  - OrderEventPublisher: @Component with KafkaTemplate<String, Object>, publishes to "order-delivered" and "order-returned" topics
+  - Message key = orderId.toString() (guarantees same partition → ordered processing)
+  - CompletableFuture.whenComplete() callback for async success/failure handling
+  - OrderServiceImpl.updateOrderStatus(): fires publishOrderDelivered on DELIVERED, publishOrderReturned on RETURNED (after save)
+  - Fire-and-forget for now — Outbox pattern (Step 6) will replace with guaranteed delivery
+
+- [x] Step 4: Stock-Back Reward Consumer — COMPLETE (2026-05-19)
+  - StockBackRewardConsumer in portfolio-service/event package
+  - @KafkaListener(topics="order-delivered", groupId="equitycart-reward-group")
+  - Groups items by ticker, sums reward dollar values, calculates fractional shares
+  - Calls grantReward() per ticker (idempotent via findByOrderIdAndTickerSymbol)
+  - StockBackReward entity: @UniqueConstraint on (order_id, ticker_symbol) — multi-ticker rewards per order
+  - portfolio/build.gradle: added spring-kafka, product-service, market-data-service deps
+
+- [x] Step 5: Reward Cancellation Consumer — COMPLETE (2026-05-19)
+  - handleOrderReturned() in same StockBackRewardConsumer class (single class, two listeners)
+  - @KafkaListener(topics="order-returned", groupId="equitycart-cancellation-group")
+  - Finds rewards by orderId → cancels PENDING, warns on VESTED (manual review)
+  - VestingStatus enum: added CANCELLED value
+
+- [x] Step 6: Outbox Pattern — COMPLETE (2026-05-20)
+  - OutboxEvent entity: aggregateType, aggregateId, eventType, topic, payload(@Lob), payloadType(FQCN), status, publishedAt
+  - OutboxStatus enum: PENDING, SENT (infrastructure-only, no domain leakage)
+  - OrderOutboxWriter: serializes events to JSON + stores FQCN via event.getClass().getName()
+  - OutboxPoller: @Scheduled(5s) + @Transactional, Class.forName() re-hydration, .get() blocking send, marks SENT
+  - OrderServiceImpl: both DELIVERED and RETURNED route through outbox (atomic with order save)
+  - Removed fire-and-forget KafkaTemplate from writer — poller is sole Kafka publisher
+  - microservice-patterns.md created: comprehensive Outbox Pattern reference (dual-write problem, serialization flow, poller design, variants, history)
+
+- [x] Step 7: Dead Letter Queue — COMPLETE (2026-05-20)
+  - KafkaConsumerConfig in commons/config: DefaultErrorHandler + DeadLetterPublishingRecoverer
+  - FixedBackOff(1000L, 3): retry 3 times with 1s delay
+  - Non-retryable: DeserializationException, NullPointerException → DLT immediately
+  - Auto-creates .DLT topics (order-delivered.DLT, order-returned.DLT)
+  - Zero changes to existing listener code — declarative infrastructure
+
+- [x] Step 8: End-to-end testing + re-audit — COMPLETE (2026-05-20)
+  - All test scenarios passed: happy path (order→deliver→reward PENDING), return cancellation (PENDING→CANCELLED), multi-ticker rewards, idempotency (duplicate events don't create duplicate rewards), Kafka CLI verification (topics, events, DLT)
+  - Re-audit: all 14 uncommitted Java files verified — Javadoc present on all, Log4j loggers on all service/component classes
+  - Documentation complete: kafka-learning.md, microservice-patterns.md, test-commands.md (Phase 6 section), learning_log.md (Phase 6 section)
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -582,7 +668,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [~] Phase 3: Order Service & Cart (Weeks 6-7) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 4: Market Data - Reactive (Weeks 8-9) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — FUNCTIONAL COMPLETE (reward grant deferred to Phase 6)
-- [ ] Phase 6: Event-Driven Architecture (Weeks 13-15)
+- [x] Phase 6: Event-Driven Architecture (Weeks 13-15) — COMPLETE
 - [ ] Phase 7: Microservices Decomposition (Weeks 16-18)
 - [ ] Phase 8: Security Hardening (Weeks 19-20)
 - [ ] Phase 9: Observability (Weeks 21-22)
@@ -625,3 +711,4 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-12**: Phase 5 started — Portfolio module: entities (Portfolio, Holding, StockBackReward, VestingStatus), repositories (3), PortfolioService + VestingHelper. Learned: @Transactional propagation (7 types), proxy self-invocation problem, REQUIRES_NEW for batch isolation, optimistic lock retry, stock-back reward business model (fractional shares, vesting delay, zero cost-basis). Next: PortfolioController + DTOs.
 - **2026-05-14**: Steps 7-9 complete — TradeService (BUY/SELL with ledger double-entry), SellToSpendService (cross-domain atomic transaction: portfolio + ledger + order), Portfolio Analytics (cost basis, weights, reward summary). Fixed: circular dependency (@Lazy + @Autowired field injection), BigDecimal divide precision, NullPointerException on full sell, log-after-mutation bug. Learned: guard clause pattern, facade as compositor, monolith @Transactional advantage, Saga pattern preview.
 - **2026-05-16**: Phase 5 FUNCTIONAL COMPLETE — Step 10 re-audit done (20 files verified). test-commands.md created with all phases (1-5) + Docker/Redis/MongoDB/PostgreSQL CLI. Identified gap: reward granting (creating PENDING StockBackReward on order delivery) not implemented — requires cross-module event chain (order→product→market-data→portfolio). Deferred to Phase 6 as first Kafka event. Vesting job exists but idle until rewards are granted. Next: Phase 6 — Event-Driven Architecture.
+- **2026-05-20**: Phase 6 COMPLETE — All 8 steps done. Kafka KRaft (Docker), event DTOs, producer (outbox-based), StockBackRewardConsumer, cancellation consumer, Outbox Pattern (atomic dual-write), DLQ (DefaultErrorHandler + DeadLetterPublishingRecoverer). E2E tested: happy path, multi-ticker rewards, return cancellation, idempotency, Kafka CLI. Re-audit passed (14 files). Next: Phase 7 — Microservices Decomposition.
