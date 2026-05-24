@@ -635,6 +635,60 @@ curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
 #   - On failure: DB state NEVER changes (atomic rollback vs compensation)
 ```
 
+### Sell to Spend — Refund Flow (Stock Restoration)
+
+> **Pre-requisite:** A completed sell-to-spend saga exists (run happy path above first).
+
+```bash
+# ──────────────────────────────────────────────────────────────────────
+# REFUND FLOW: Order paid via STOCK gets refunded → shares restored
+# ──────────────────────────────────────────────────────────────────────
+
+# 1. Verify current holdings BEFORE refund
+curl -s http://localhost:8080/api/portfolio/holdings \
+  -H "Authorization: Bearer <Token>"
+# Note current AAPL share count (should be reduced from sell-to-spend)
+
+# 2. Verify saga exists in COMPLETED state
+# SELECT * FROM sell_to_spend_sagas WHERE order_id = <orderId> AND status = 'COMPLETED';
+# Note: is_refunded should be false
+
+# 3. Transition order to REFUNDED (as ADMIN)
+curl -s -X PUT http://localhost:8080/api/orders/<orderId>/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Admin-Token>" \
+  -d '{"status":"REFUNDED"}'
+# Expected: 200 OK
+
+# 4. Verify outbox event was written
+# SELECT * FROM outbox_events WHERE event_type = 'ORDER_REFUNDED' ORDER BY created_at DESC LIMIT 1;
+# Should show: topic=order-refunded, payload contains paymentMethod="STOCK"
+
+# 5. Wait for OutboxPoller to publish to Kafka (~5 seconds)
+# Then verify holdings are restored
+curl -s http://localhost:8080/api/portfolio/holdings \
+  -H "Authorization: Bearer <Token>"
+# Expected: AAPL shares restored to pre-sell quantity
+
+# 6. Verify saga marked as refunded
+# SELECT is_refunded FROM sell_to_spend_sagas WHERE order_id = <orderId>;
+# Expected: true
+
+# 7. Verify ledger reversal entry
+# SELECT * FROM ledger_entries WHERE reference_type = 'SELL_TO_SPEND_REVERSAL' ORDER BY created_at DESC LIMIT 1;
+# Expected: debit=HOLDING_ASSET, credit=CASH, amount = original saleProceeds
+
+# 8. Idempotency: refund again should be a no-op
+# Manually insert another outbox event or re-trigger — consumer logs "Refund already processed"
+
+# ──────────────────────────────────────────────────────────────────────
+# EDGE CASE: Non-STOCK payment refund (should be skipped)
+# ──────────────────────────────────────────────────────────────────────
+# Create an order with paymentMethod="CARD", complete it, then refund
+# Consumer should log "Non-STOCK payment method for orderId=X, skipping refund processing"
+# No holdings changes, no ledger entries
+```
+
 ### Rewards
 
 ```bash

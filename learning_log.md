@@ -3435,3 +3435,15 @@ A: The orchestrator must be able to resume or compensate without re-fetching the
 
 **Q96: "How does the saga compare to the @Transactional approach in terms of code complexity?" (2026-05-24)**
 A: Transactional: ~50 lines (validate + 3 service calls). Saga: ~300+ lines across 7 files (entity, enum, repository, orchestrator, service impl, outbox writer, event DTO). This 6x complexity is the cost of distribution. You pay it only when you MUST — when services have separate databases and cannot share a transaction. In a monolith, always prefer `@Transactional`.
+
+### Step 11 Extension: Refund Flow — Sell-to-Spend Reversal via Kafka (2026-05-24)
+
+**109. Event-Driven Refund Compensation — Restoring Sold Shares (2026-05-24)**
+
+When an order paid via sell-to-spend is refunded, the shares must be returned to the user's portfolio. This is the "reverse compensation" of the sell-to-spend flow. Unlike saga compensation (which happens synchronously during the saga execution), refund compensation happens asynchronously days/weeks later via Kafka event. The `OrderRefundedEvent` carries `paymentMethod` so the consumer can discriminate between STOCK refunds (requiring share restoration) and CARD refunds (handled by payment gateway). The completed saga entity serves as the source of truth for what was sold (ticker, quantity, price) — no need to re-query the order or market data.
+
+**Q97: "Why use the saga entity for refund data instead of carrying it in the event?" (2026-05-24)**
+A: The event only needs `orderId` + `paymentMethod` to route correctly. The saga entity already stores all sale parameters (ticker, quantity, pricePerShare, saleProceeds). Duplicating this data in the event creates a consistency risk — if the saga was compensated (shares already returned), the event wouldn't know. By looking up the saga, the consumer gets both the data AND the idempotency check (`isRefunded` flag) in one query.
+
+**Q98: "Why is `isRefunded` on the saga entity instead of a separate refund table?" (2026-05-24)**
+A: The refund is a 1:1 extension of the saga lifecycle, not an independent entity. Adding a boolean to the saga keeps the refund check atomic with the saga lookup (single query + single save). A separate table would require coordinating writes across two tables for idempotency, introducing the same distributed consistency problem the saga was designed to solve.

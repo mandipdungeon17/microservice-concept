@@ -2,6 +2,7 @@ package com.equitycart.order.event;
 
 import com.equitycart.commons.event.OrderDeliveredEvent;
 import com.equitycart.commons.event.OrderItemEvent;
+import com.equitycart.commons.event.OrderRefundedEvent;
 import com.equitycart.commons.event.OrderReturnedEvent;
 import com.equitycart.order.entity.Order;
 import com.equitycart.order.entity.OrderItem;
@@ -84,6 +85,30 @@ public class OrderOutboxWriter {
     outboxEventRepository.save(outboxEvent);
     log.info(
         "Outbox event written: eventType=ORDER_RETURNED, orderId={}, topic=order-returned",
+        order.getId());
+  }
+
+  /**
+   * Writes an outbox event for an order refund. Serializes {@link OrderRefundedEvent} to JSON and
+   * persists as a PENDING outbox row within the caller's transaction. Includes the payment method
+   * so downstream consumers (e.g., portfolio refund handler) can determine whether stock
+   * restoration is needed.
+   *
+   * @param order the order entity that was just refunded
+   */
+  public void writeOutboxOrderRefundedEvent(Order order) {
+    OrderRefundedEvent event =
+        new OrderRefundedEvent(
+            order.getId(), order.getUserId(), order.getPaymentMethod(), LocalDateTime.now());
+
+    String json = convertObjToJsonString(event);
+
+    OutboxEvent outboxEvent =
+        getOutboxEvent(order, json, event.getClass().getName(), "ORDER_REFUNDED", "order-refunded");
+
+    outboxEventRepository.save(outboxEvent);
+    log.info(
+        "Outbox event written: eventType=ORDER_REFUNDED, orderId={}, topic=order-refunded",
         order.getId());
   }
 

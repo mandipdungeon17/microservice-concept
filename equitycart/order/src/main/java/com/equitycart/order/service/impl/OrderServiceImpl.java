@@ -179,6 +179,8 @@ public class OrderServiceImpl implements OrderService {
         orderOutboxWriter.writeOutboxOrderDeliveredEvent(saveOrder);
       } else if (OrderStatus.RETURNED.equals(status)) {
         orderOutboxWriter.writeOutboxOrderReturnedEvent(saveOrder);
+      } else if (OrderStatus.REFUNDED.equals(status)) {
+        orderOutboxWriter.writeOutboxOrderRefundedEvent(saveOrder);
       }
 
     } else

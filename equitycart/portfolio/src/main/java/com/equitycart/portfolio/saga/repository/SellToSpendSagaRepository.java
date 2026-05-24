@@ -29,4 +29,6 @@ public interface SellToSpendSagaRepository extends JpaRepository<SellToSpendSaga
    */
   List<SellToSpendSaga> findByStatusNotInAndUpdatedAtBefore(
       List<SagaStatus> terminalStatuses, LocalDateTime cutoff);
+
+  Optional<SellToSpendSaga> findByOrderIdAndStatus(Long orderId, SagaStatus status);
 }

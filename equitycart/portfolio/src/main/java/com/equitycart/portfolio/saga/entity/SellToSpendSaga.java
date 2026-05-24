@@ -56,6 +56,8 @@ public class SellToSpendSaga extends BaseEntity {
   @Column(nullable = false)
   SagaStatus status;
 
+  @Builder.Default boolean isRefunded = false;
+
   @Version Long version;
 
   String failureReason;
