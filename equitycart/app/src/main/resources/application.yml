@@ -1,4 +1,6 @@
 spring:
+  profiles:
+    active: cdc
   batch:
     jdbc:
       initialize-schema: always

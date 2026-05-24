@@ -760,4 +760,465 @@ Spring Boot auto-configures `ConcurrentKafkaListenerContainerFactory`. When a `D
 
 ---
 
+## 10. Retry Strategies — Fixed vs Exponential vs Jitter
+
+### The Problem: Thundering Herd on Fixed Retries
+
+With `FixedBackOff(1000L, 3)`, every failed consumer retries at exactly T+1s, T+2s, T+3s. If a database blip causes 50 consumers to fail simultaneously, they ALL hit the recovering database with 50 concurrent queries at each tick — making recovery harder or impossible.
+
+```
+Fixed Backoff (50 consumers fail at T=0):
+T+1s: 50 retries hit DB simultaneously
+T+2s: 50 retries hit DB simultaneously
+T+3s: 50 retries hit DB simultaneously → all fail → 50 messages to DLT
+```
+
+### Exponential Backoff — Spread the Load
+
+Exponential backoff increases the delay between retries by a multiplier. With `initialInterval=1s, multiplier=2.0`:
+
+```
+Retry 1: wait 1 second
+Retry 2: wait 2 seconds (1 × 2)
+Retry 3: wait 4 seconds (2 × 2)
+Total elapsed: ~7 seconds before DLT
+```
+
+The increasing gaps give the recovering resource progressively more breathing room. `maxInterval` caps the delay so it doesn't grow unbounded on higher retry counts.
+
+### History
+
+Exponential backoff was formalized for Ethernet collision resolution in the 1970s (IEEE 802.3 "binary exponential backoff" algorithm). The insight: when a shared resource is contended, spreading retries over increasing intervals gives the resource time to recover. Adopted by TCP congestion control (1988, Van Jacobson), then became standard in cloud SDKs:
+- AWS SDK (2015+): exponential + full jitter by default
+- Google Cloud (2016+): truncated exponential backoff
+- Stripe API (2017+): exponential with idempotency keys
+
+### Jitter — Desynchronize Retries
+
+Even with exponential backoff, 50 consumers that fail at the same instant still retry at the same exponential intervals (1s, 2s, 4s) — synchronized peaks reduced in frequency but not eliminated.
+
+**Jitter** adds randomness to each interval: `delay = baseDelay × random(0.8, 1.2)`. This desynchronizes retries so they spread evenly rather than hitting in bursts.
+
+```
+Without jitter:  Consumer A: 1s, 2s, 4s    Consumer B: 1s, 2s, 4s  (identical)
+With jitter:     Consumer A: 0.9s, 2.3s, 3.7s    Consumer B: 1.1s, 1.8s, 4.4s  (spread)
+```
+
+Three jitter strategies (AWS research, 2015 blog by Marc Brooker):
+- **Full jitter**: `delay = random(0, baseDelay)` — most aggressive spread
+- **Equal jitter**: `delay = baseDelay/2 + random(0, baseDelay/2)` — guaranteed minimum wait
+- **Decorrelated jitter**: `delay = random(baseDelay, previousDelay × 3)` — self-adjusting
+
+Spring Kafka's `ExponentialBackOffWithMaxRetries` does NOT include jitter natively. For production systems with many consumers, you'd wrap it with a custom `BackOff` implementation that adds jitter.
+
+### Spring Kafka Implementation
+
+| Class | Behavior |
+|-------|----------|
+| `FixedBackOff(interval, maxAttempts)` | Constant delay. Simple. Thundering herd risk. |
+| `ExponentialBackOff` | Growing delay. No max-retries (uses `maxElapsedTime`). |
+| `ExponentialBackOffWithMaxRetries(maxRetries)` | Growing delay + explicit retry cap. Recommended. |
+
+```java
+// ExponentialBackOffWithMaxRetries extends ExponentialBackOff
+// and overrides stop logic to count retries instead of elapsed time
+ExponentialBackOff backOff = new ExponentialBackOffWithMaxRetries(3);
+backOff.setInitialInterval(1000L);  // 1s first retry
+backOff.setMultiplier(2.0);         // 1s → 2s → 4s
+backOff.setMaxInterval(10000L);     // never exceed 10s per retry
+```
+
+### When to Use Which
+
+| Scenario | Strategy |
+|----------|----------|
+| Low-volume, single consumer | FixedBackOff (simplicity wins) |
+| Multiple consumers, shared DB | ExponentialBackOff (spread retries) |
+| High-volume production, many instances | Exponential + Jitter (eliminate synchronized storms) |
+| Idempotent consumers, fast recovery | Aggressive retries OK (lower multiplier, more attempts) |
+| Non-idempotent consumers | Fewer retries, alert quickly, manual DLT review |
+
+---
+
+## 11. Debezium CDC — Change Data Capture for Outbox Relay
+
+### The Problem: Polling vs CDC
+
+The Outbox Poller (`OutboxPoller.java`) polls the database every 5 seconds for PENDING rows. This has trade-offs:
+
+| Aspect | Polling (OutboxPoller) | CDC (Debezium) |
+|--------|----------------------|----------------|
+| Latency | Up to poll interval (5s) | Near-real-time (ms) |
+| DB load | Repeated SELECT queries | Reads WAL stream (no queries) |
+| Complexity | Simple Java code | External infrastructure (Kafka Connect) |
+| Scaling | Multiple pollers need coordination | Single connector per table |
+| Recovery | Re-reads PENDING on restart | Resumes from WAL position (LSN) |
+
+### What Is Change Data Capture?
+
+CDC captures **row-level changes** (INSERT, UPDATE, DELETE) from a database's internal change log and streams them as events. No application code runs — the database itself is the event source.
+
+```
+Traditional (Application-Level):
+┌─────────────┐    INSERT     ┌──────────────┐
+│ Application │──────────────▶│ PostgreSQL   │
+│ (OutboxPoller)│             │              │
+│ polls every 5s│◀───SELECT───│ outbox_events│
+│ publishes to  │────────────▶│              │
+│ Kafka         │             └──────────────┘
+└─────────────┘
+
+CDC (Database-Level):
+┌─────────────┐    INSERT     ┌──────────────┐    WAL stream    ┌───────────┐
+│ Application │──────────────▶│ PostgreSQL   │─────────────────▶│ Debezium  │
+│ (writes only)│              │              │                  │ Connector │
+│ no polling   │              │ outbox_events│                  │           │
+└─────────────┘               └──────────────┘                  └─────┬─────┘
+                                                                      │ publish
+                                                                      ▼
+                                                               ┌──────────────┐
+                                                               │ Kafka Topic  │
+                                                               │ order-delivered│
+                                                               └──────────────┘
+```
+
+### PostgreSQL WAL (Write-Ahead Log)
+
+Every PostgreSQL write goes through the WAL **before** hitting the actual table files. This guarantees crash recovery (replay WAL after crash). Debezium reads this same WAL stream.
+
+```
+Client INSERT → WAL (append-only log on disk) → Background Writer → Table Data Files
+                     ▲
+                     │
+              Debezium reads here
+              (logical replication slot)
+```
+
+**WAL Levels:**
+
+| Level | What's Logged | Use Case |
+|-------|---------------|----------|
+| `minimal` | Crash recovery only | Standalone, no replication |
+| `replica` (default) | + physical replication data | Streaming replicas |
+| `logical` | + row-level changes decoded | CDC, logical replication |
+
+CDC requires `wal_level = logical` — this adds decoded row data to the WAL that tools like Debezium can interpret.
+
+```sql
+-- Check current level:
+SHOW wal_level;
+
+-- Change (requires restart):
+ALTER SYSTEM SET wal_level = 'logical';
+-- Then restart PostgreSQL service
+```
+
+### Debezium Architecture
+
+Debezium runs as a **Kafka Connect connector** — it's not a standalone application, but a plugin inside the Kafka Connect framework.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Kafka Connect (Debezium Container)                │
+│                                                                     │
+│  ┌────────────────────────────────────────────────────┐            │
+│  │  Source Connector: equitycart-outbox-connector       │            │
+│  │  Class: io.debezium.connector.postgresql.PostgresConnector │     │
+│  │                                                      │            │
+│  │  1. Connects to PostgreSQL (JDBC)                    │            │
+│  │  2. Creates logical replication slot                  │            │
+│  │  3. Reads WAL stream (INSERT/UPDATE/DELETE events)    │            │
+│  │  4. Applies SMTs (Single Message Transforms)         │            │
+│  │  5. Publishes to Kafka topic                         │            │
+│  └───────────────────┬────────────────────────────────┘            │
+│                      │                                              │
+│  ┌───────────────────▼────────────────────────────────┐            │
+│  │  Outbox Event Router (SMT)                          │            │
+│  │  - Extracts `payload` column → Kafka value          │            │
+│  │  - Extracts `aggregate_id` → Kafka key              │            │
+│  │  - Routes to topic from `topic` column              │            │
+│  │  - Removes Debezium envelope (no wrapper needed)    │            │
+│  └────────────────────────────────────────────────────┘            │
+└─────────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Kafka Broker   │
+│  Topics:        │
+│  - order-delivered│
+│  - order-returned │
+└─────────────────┘
+```
+
+### Outbox Event Router — The Key SMT
+
+Without the Outbox Event Router, Debezium publishes a raw change event for the `outbox_events` table — including all columns, Debezium metadata, schema information. The Outbox Event Router transforms this into a clean event routed to the correct topic:
+
+```
+WITHOUT Outbox Event Router (raw Debezium event):
+{
+  "schema": {...},
+  "payload": {
+    "before": null,
+    "after": {
+      "id": 6,
+      "aggregate_type": "Order",
+      "aggregate_id": 6,
+      "event_type": "ORDER_DELIVERED",
+      "topic": "order-delivered",
+      "payload": "{\"orderId\":6,...}",     ← buried inside
+      "status": "PENDING"
+    },
+    "source": {"version":"2.x", "connector":"postgresql", ...},
+    "op": "c",
+    "ts_ms": 1779578721050
+  }
+}
+Topic: equitycart-db.public.outbox_events  ← generic table-change topic
+
+WITH Outbox Event Router (clean extracted event):
+Kafka Key: "6"                              ← aggregate_id
+Kafka Value: {"orderId":6, "userId":1, ...} ← payload column content
+Topic: order-delivered                      ← routed by `topic` column
+```
+
+### Connector Configuration — Field Mappings
+
+The Outbox Event Router needs to know which column serves which purpose:
+
+```json
+{
+  "transforms": "outbox",
+  "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+  "transforms.outbox.table.field.event.id": "id",
+  "transforms.outbox.table.field.event.key": "aggregate_id",
+  "transforms.outbox.table.field.aggregate.type": "aggregate_type",
+  "transforms.outbox.table.field.aggregate.id": "aggregate_id",
+  "transforms.outbox.table.field.event.type": "event_type",
+  "transforms.outbox.table.field.event.payload": "payload",
+  "transforms.outbox.route.by.field": "topic",
+  "transforms.outbox.route.topic.replacement": "${routedByValue}"
+}
+```
+
+**Column naming gotcha:** Debezium defaults assume camelCase column names (`aggregateType`, `aggregateId`). Hibernate's default naming strategy generates snake_case (`aggregate_type`, `aggregate_id`). You MUST explicitly map every column name that differs from Debezium's default expectation.
+
+### Docker Networking — Dual-Listener Pattern
+
+Debezium runs inside Docker. Kafka also runs inside Docker. The Spring Boot app runs on the host. The challenge: Kafka's `ADVERTISED_LISTENERS` tells clients "connect to me at X" — but the correct address differs depending on WHERE the client is:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ HOST MACHINE (Windows)                                            │
+│                                                                  │
+│  ┌──────────────────┐                                            │
+│  │ Spring Boot App  │  connects to: localhost:9092               │
+│  │ (Kafka client)   │  (PLAINTEXT listener)                     │
+│  └────────┬─────────┘                                            │
+│           │                                                      │
+│  ─────────┼──────────── Docker Network ─────────────────────────│
+│           │                                                      │
+│  ┌────────▼─────────┐        ┌───────────────────────┐         │
+│  │ Kafka Container  │        │ Debezium Container    │         │
+│  │                  │◀───────│ connects to:          │         │
+│  │ Listener 1:      │        │ host.docker.internal  │         │
+│  │  PLAINTEXT:9092  │        │ :29092                │         │
+│  │  (for host apps) │        │ (DOCKER listener)     │         │
+│  │                  │        └───────────────────────┘         │
+│  │ Listener 2:      │                                           │
+│  │  DOCKER:29092    │                                           │
+│  │  (for containers)│                                           │
+│  └──────────────────┘                                           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Why `localhost:9092` fails from Debezium container:** Inside Debezium's container, `localhost` means the Debezium container itself — not the host or the Kafka container. Kafka needs to advertise a different address for container-to-container traffic.
+
+**Solution:** Two listeners with different advertised addresses:
+- `PLAINTEXT://localhost:9092` — advertised to host applications (Spring Boot)
+- `DOCKER://host.docker.internal:29092` — advertised to other containers (Debezium)
+
+### @Profile("!cdc") — Toggling Outbox Relay Modes
+
+The outbox table can be relayed by EITHER the poller OR Debezium — not both (that would duplicate events). Spring profiles control which is active:
+
+```
+application.yml:
+  spring.profiles.active: cdc     ← Debezium handles relay
+
+OutboxPoller.java:
+  @Profile("!cdc")                ← only activates when profile is NOT "cdc"
+  @Component
+  public class OutboxPoller { ... }
+```
+
+| Profile Active | OutboxPoller | Debezium | Who publishes to Kafka? |
+|----------------|-------------|----------|------------------------|
+| (none/default) | ENABLED | (not running) | OutboxPoller |
+| `cdc` | DISABLED | RUNNING | Debezium via WAL |
+
+**Outbox status in CDC mode:** With the poller, rows transition `PENDING → SENT`. With Debezium CDC, the status column stays `PENDING` forever — Debezium reads the WAL INSERT event and doesn't update the row. This is expected behavior. A separate cleanup job can mark old rows or delete them.
+
+### `__TypeId__` Header Problem — CDC vs Spring Kafka
+
+Spring Kafka's `JsonSerializer` adds a `__TypeId__` header to every message (e.g., `com.equitycart.commons.event.OrderDeliveredEvent`). The `JsonDeserializer` reads this header to know which class to instantiate.
+
+Debezium does NOT add this header — it publishes raw payload content without Spring-specific metadata. The consumer sees a message without `__TypeId__` and throws `SerializationException`.
+
+```
+Spring-published message:        Debezium-published message:
+├─ Headers:                      ├─ Headers:
+│  __TypeId__: c.e.c.event...   │  (no __TypeId__)
+├─ Value:                        ├─ Value:
+│  {"orderId":6,...}             │  {"orderId":6,...}
+                                 │
+Consumer: reads __TypeId__ →     Consumer: no __TypeId__ →
+  Class.forName() → deserialize    SerializationException!
+```
+
+**Fix:** Set a default type per `@KafkaListener` so Spring knows what to deserialize even without the header:
+
+```java
+@KafkaListener(
+    topics = "order-delivered",
+    groupId = "equitycart-reward-group",
+    properties = "spring.json.value.default.type=com.equitycart.commons.event.OrderDeliveredEvent"
+)
+void handleOrderDelivered(OrderDeliveredEvent event) { ... }
+```
+
+### `@Lob` vs `@Column(columnDefinition = "text")` — CDC Gotcha
+
+In PostgreSQL + Hibernate, `@Lob` on a String field stores content as a **Large Object (OID)**:
+- The actual JSON goes into `pg_largeobject` internal catalog
+- The column stores only an OID reference number (e.g., 18110)
+
+Debezium reads the WAL, sees the column value (18110), and publishes THAT — it cannot follow OID references to `pg_largeobject`.
+
+```
+@Lob (OID storage):
+┌────────────────────────┐       ┌────────────────────────┐
+│ outbox_events table    │       │ pg_largeobject         │
+│                        │       │ (internal catalog)     │
+│ payload: 18110 (OID)───┼──────▶│ OID 18110:             │
+│                        │       │ {"orderId":6,...}      │
+└────────────────────────┘       └────────────────────────┘
+                                         ▲
+Debezium reads: 18110                    │
+JPA/Hibernate reads: follows OID ────────┘ (transparent)
+Consumer receives: 18110 → MismatchedInputException!
+```
+
+**Fix:** Use `@Column(columnDefinition = "text")` — stores JSON inline in the row. Debezium reads the actual JSON content directly from the WAL.
+
+| | `@Lob` (OID) | `@Column(columnDefinition = "text")` |
+|---|---|---|
+| Storage | `pg_largeobject` catalog | Inline (TOAST if > 2KB) |
+| JPA reads | Transparent (follows OID) | Transparent |
+| Debezium/CDC reads | **Broken** (sees OID number) | Works (sees JSON) |
+| Max size | Unlimited | Unlimited |
+
+### `value.converter` — Kafka Connect Serialization Layer
+
+Kafka Connect wraps every message through a **value converter** before writing to Kafka. The default (`JsonConverter` with `schemas.enable=true`) adds schema metadata:
+
+```
+Default JsonConverter output:
+{"schema":null,"payload":"{\"orderId\":6,...}"}  ← wrapped!
+
+StringConverter output:
+{"orderId":6,...}                                 ← raw, as-is
+```
+
+For the Outbox Event Router (which already extracts the payload), `StringConverter` is correct — it publishes the payload column content without wrapping:
+
+```json
+"value.converter": "org.apache.kafka.connect.storage.StringConverter"
+```
+
+### `snapshot.mode` — Initial Table Scan
+
+When a Debezium connector starts for the first time, it performs an **initial snapshot** — reading all existing rows from the monitored table. For the outbox table, this means publishing ALL existing PENDING rows.
+
+| Mode | Behavior | When to Use |
+|------|----------|-------------|
+| `initial` (default) | Full table scan on first start, then WAL streaming | Need to capture existing data |
+| `never` | Skip snapshot, only stream new WAL changes | Outbox table (old rows already processed by poller) |
+| `always` | Snapshot on every connector restart | Recovery/debugging |
+
+For the outbox pattern: `"snapshot.mode": "never"` — existing rows were already published by the OutboxPoller before switching to CDC. Only new INSERTs need capturing.
+
+### Issues Faced and Resolutions
+
+| Issue | Root Cause | Resolution |
+|-------|-----------|------------|
+| Debezium can't connect to Kafka | `advertised.listeners=localhost:9092` — inside Debezium container, localhost = itself | Added dual-listener: DOCKER on port 29092 advertised as `host.docker.internal:29092` |
+| Connector FAILED: "aggregatetype is not a valid field name" | Hibernate snake_case columns vs Debezium's expected camelCase defaults | Added explicit `table.field.*` mappings for all snake_case columns |
+| Consumer infinite loop: "No type information in headers" | Debezium messages lack `__TypeId__` header that Spring's JsonDeserializer requires | Added `spring.json.value.default.type` property to each `@KafkaListener` |
+| InvalidTimestampException: "Timestamp out of range" | `created_at` column used as Kafka timestamp — host timezone (IST) vs Docker UTC | Removed `transforms.outbox.table.field.event.timestamp` from connector config |
+| Consumer receives number (18110) instead of JSON | `@Lob` stores OID reference — Debezium reads OID, not the referenced content | Replaced `@Lob` with `@Column(columnDefinition = "text")` for inline storage |
+| order-delivered-dlt auto-created immediately | Old poison messages on topic from failed snapshot attempts | Deleted topics, added `snapshot.mode=never`, re-registered connector |
+| Git Bash mangles docker exec paths | Git Bash converts `/opt/...` to Windows paths | Use PowerShell or Docker Desktop terminal instead |
+
+### CDC Drawbacks and Production Considerations
+
+While CDC eliminates polling overhead, it introduces its own failure modes:
+
+| Drawback | Why It Matters |
+|----------|---------------|
+| **WAL disk growth** | `wal_level=logical` generates more WAL data than `replica`. If consumers fall behind or replication slots stall, WAL accumulates and can fill disk. |
+| **Replication slot retention** | If Debezium goes down, PostgreSQL holds WAL segments indefinitely (won't recycle them). This can fill the disk in hours on write-heavy systems. |
+| **No delivery confirmation to source** | Unlike the poller (which marks rows SENT after Kafka ACK), CDC has no feedback mechanism to the outbox table. You can't query "was this row published?" |
+| **Operational complexity** | Kafka Connect is another distributed system to deploy, monitor, upgrade. Connector failures require manual restart via REST API. |
+| **Schema evolution** | Adding/renaming columns in the outbox table can break the Debezium connector if field mappings aren't updated simultaneously. |
+| **Snapshot poisoning** | Re-registering a connector triggers a full table scan (default `snapshot.mode=initial`), publishing stale rows that may have already been processed. |
+| **Timezone mismatches** | Docker containers default to UTC; host apps use local time. Any timestamp column used as Kafka message timestamp will mismatch. |
+| **Debugging difficulty** | Issues surface as Kafka Connect REST API errors or consumer failures — harder to trace than application-level exceptions in the poller. |
+
+**When polling wins over CDC:**
+- Low event volume (< 100/min) — polling overhead is negligible
+- No Docker/container infrastructure available
+- Team lacks Kafka Connect operational expertise
+- Rapid prototyping or learning environment (simpler debugging)
+
+**When CDC wins over polling:**
+- High event volume where 5s latency is unacceptable
+- Multiple databases need event capture
+- Operational team exists to manage Kafka Connect
+- Need to capture ALL table changes (not just outbox — e.g., audit logging)
+
+### Complete CDC Flow (End State)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  ① OrderServiceImpl.updateOrderStatus(orderId=6, DELIVERED)                │
+│     └─ @Transactional: order.save() + outboxEvent.save() ← ATOMIC         │
+│                                                                             │
+│  ② PostgreSQL WAL captures INSERT on outbox_events                         │
+│     └─ WAL entry: {table:outbox_events, op:INSERT, id:6, payload:"..."}    │
+│                                                                             │
+│  ③ Debezium (Kafka Connect) reads WAL via logical replication slot         │
+│     └─ Outbox Event Router extracts payload column → Kafka value           │
+│     └─ Routes to topic based on `topic` column value ("order-delivered")   │
+│     └─ Key = aggregate_id column value ("6")                               │
+│                                                                             │
+│  ④ Kafka Broker receives message on "order-delivered" topic                │
+│     └─ No __TypeId__ header (Debezium doesn't add it)                      │
+│                                                                             │
+│  ⑤ StockBackRewardConsumer polls topic                                     │
+│     └─ spring.json.value.default.type → deserializes as OrderDeliveredEvent│
+│     └─ Calculates reward, calls grantReward() (idempotent)                 │
+│                                                                             │
+│  ⑥ Vesting Job (60s) picks up PENDING reward after vestingDate passes      │
+│     └─ PENDING → VESTED, creates actual Holding in portfolio               │
+│                                                                             │
+│  Note: outbox_events.status stays PENDING in CDC mode (expected)           │
+│  Note: OutboxPoller is disabled via @Profile("!cdc")                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 _This document will be expanded as Phase 6 progresses with: Saga patterns, exactly-once semantics, and production tuning._

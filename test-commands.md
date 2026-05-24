@@ -30,22 +30,45 @@ docker run -d \
   mongo:7
 
 # Start Kafka (KRaft mode — no ZooKeeper)
+# Dual-listener: PLAINTEXT for host apps, DOCKER for containers (Debezium)
 docker run -d \
   --name kafka \
   -p 9092:9092 \
+  -p 29092:29092 \
+  -e KAFKA_NODE_ID=1 \
+  -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
+  -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,DOCKER://:29092 \
+  -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092,DOCKER://host.docker.internal:29092 \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,DOCKER:PLAINTEXT \
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+  -e CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk \
   apache/kafka:latest
+
+# Start Debezium (Kafka Connect with PostgreSQL connector)
+# Only needed when using CDC mode (spring.profiles.active=cdc)
+docker run -d \
+  --name debezium \
+  -p 8083:8083 \
+  -e GROUP_ID=equitycart-connect \
+  -e BOOTSTRAP_SERVERS=host.docker.internal:29092 \
+  -e CONFIG_STORAGE_TOPIC=equitycart-connect-configs \
+  -e OFFSET_STORAGE_TOPIC=equitycart-connect-offsets \
+  -e STATUS_STORAGE_TOPIC=equitycart-connect-status \
+  debezium/connect:latest
 
 # Verify all containers are running
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
 # Stop all
-docker stop postgres redis mongodb kafka
+docker stop postgres redis mongodb kafka debezium
 
 # Start again (after stop)
-docker start postgres redis mongodb kafka
+docker start postgres redis mongodb kafka debezium
 
 # Remove all (destroys data)
-docker rm -f postgres redis mongodb kafka
+docker rm -f postgres redis mongodb kafka debezium
 ```
 
 ---
@@ -620,27 +643,80 @@ curl -s http://localhost:8080/api/portfolio/rewards \
 
 ### Kafka CLI Verification
 
+> **NOTE:** If using Git Bash on Windows, paths like `/opt/kafka/bin/` get mangled.
+> Use **PowerShell** or **Docker Desktop terminal** for these commands.
+
 ```bash
 # List all topics (should include order-delivered, order-returned, and .DLT variants)
-docker exec -it kafka /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+# PowerShell (recommended on Windows):
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092
 
 # Consume from order-delivered topic (see published events)
-docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --topic order-delivered \
-  --from-beginning \
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --topic order-delivered `
+  --from-beginning `
   --bootstrap-server localhost:9092
 
 # Consume from order-returned topic
-docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --topic order-returned \
-  --from-beginning \
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --topic order-returned `
+  --from-beginning `
   --bootstrap-server localhost:9092
 
 # Check Dead Letter Topic (should be empty unless errors occurred)
-docker exec -it kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --topic order-delivered.DLT \
-  --from-beginning \
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh `
+  --topic order-delivered.DLT `
+  --from-beginning `
   --bootstrap-server localhost:9092
+
+# Delete a topic (useful for clearing poison messages)
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --delete --topic order-delivered --bootstrap-server localhost:9092
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --delete --topic order-returned --bootstrap-server localhost:9092
+
+# Describe a topic (partitions, replication, config)
+docker exec kafka /opt/kafka/bin/kafka-topics.sh --describe --topic order-delivered --bootstrap-server localhost:9092
+
+# List consumer groups
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --list --bootstrap-server localhost:9092
+
+# Check consumer group lag (how far behind the consumer is)
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh `
+  --describe --group equitycart-reward-group `
+  --bootstrap-server localhost:9092
+```
+
+### Debezium CDC Verification
+
+```bash
+# Check connector status (should show RUNNING for both connector and task)
+curl -s http://localhost:8083/connectors/equitycart-outbox-connector/status | python -m json.tool
+
+# List all registered connectors
+curl -s http://localhost:8083/connectors
+
+# Register the outbox connector (first time setup)
+curl -s -X POST http://localhost:8083/connectors \
+  -H "Content-Type: application/json" \
+  -d @equitycart/docker/debezium/register-connector.json
+
+# Delete connector (for re-registration after config changes)
+curl -s -X DELETE http://localhost:8083/connectors/equitycart-outbox-connector
+
+# Restart a failed connector task
+curl -s -X POST http://localhost:8083/connectors/equitycart-outbox-connector/tasks/0/restart
+
+# Check Debezium container logs
+docker logs debezium --tail 50
+
+# Check Kafka Connect worker status
+curl -s http://localhost:8083/ | python -m json.tool
+
+# Verify PostgreSQL WAL level (must be 'logical' for CDC)
+# In DBeaver or psql:
+SHOW wal_level;
+
+# Check active replication slots (Debezium creates one)
+SELECT slot_name, plugin, active FROM pg_replication_slots;
 ```
 
 ### Data Verification — Outbox Table (PostgreSQL)
@@ -653,8 +729,15 @@ docker exec -it postgres psql -U postgres -d equitycart
 SELECT id, aggregate_type, aggregate_id, event_type, status, published_at, created_at
   FROM outbox_events ORDER BY created_at DESC;
 
-# Verify all rows have status = 'SENT' and published_at is populated
+# POLLING MODE: Verify all rows have status = 'SENT' and published_at is populated
 SELECT * FROM outbox_events WHERE status = 'PENDING';  -- should be empty
+
+# CDC MODE: All rows stay PENDING (expected — Debezium reads WAL, doesn't update rows)
+# Verify events ARE being captured by checking Kafka topics (not the status column)
+SELECT count(*) FROM outbox_events WHERE status = 'PENDING';
+
+# CDC MODE: Cleanup old rows (optional — prevents table growth)
+DELETE FROM outbox_events WHERE created_at < NOW() - INTERVAL '7 days';
 
 # Check stock_back_rewards
 SELECT id, order_id, user_id, ticker_symbol, shares_earned, dollar_value, status, vesting_date

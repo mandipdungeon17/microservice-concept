@@ -302,6 +302,88 @@ Domain concepts (`RETURNED`, `CANCELLED`, `VESTED`) belong in domain enums. Mixi
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 1.12 Outbox Pattern — CDC Variant (Debezium)
+
+The polling variant has a fundamental trade-off: **latency vs DB load**. Polling every 5 seconds adds up to 5s delivery delay and generates constant SELECT queries regardless of whether events exist. The CDC variant eliminates both.
+
+**How it works:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     CDC (Debezium) Variant                                │
+│                                                                         │
+│  ┌──────────────┐    INSERT     ┌──────────────┐    WAL stream         │
+│  │ Application  │──────────────▶│ PostgreSQL   │──────────────┐        │
+│  │              │  (same tx as  │              │              │        │
+│  │  1. save()   │   business    │ outbox_events│              ▼        │
+│  │  2. outbox() │   write)      └──────────────┘   ┌──────────────┐   │
+│  └──────────────┘                                  │ Debezium     │   │
+│                                                    │ (Kafka Connect)│  │
+│  OutboxPoller: DISABLED (@Profile("!cdc"))         │              │   │
+│                                                    │ Outbox Event │   │
+│                                                    │ Router SMT:  │   │
+│                                                    │ - extract    │   │
+│                                                    │   payload    │   │
+│                                                    │ - route to   │   │
+│                                                    │   topic col  │   │
+│                                                    └───────┬──────┘   │
+│                                                            │          │
+│                                                            ▼          │
+│                                                    ┌──────────────┐   │
+│                                                    │ Kafka Topic  │   │
+│                                                    │ (order-      │   │
+│                                                    │  delivered)  │   │
+│                                                    └──────────────┘   │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key differences from Polling variant:**
+
+| Aspect | Polling Variant | CDC Variant |
+|--------|----------------|-------------|
+| Relay mechanism | Java @Scheduled job (SELECT → send → UPDATE) | Debezium reads PostgreSQL WAL |
+| Latency | Up to poll interval (5s) | Milliseconds (WAL is near-real-time) |
+| DB load | Repeated SELECT queries every 5s | Zero queries (reads WAL stream) |
+| Status column | Meaningful: PENDING → SENT | Vestigial: stays PENDING forever |
+| `__TypeId__` header | Present (KafkaTemplate adds it) | Absent (Debezium is not Spring-aware) |
+| Infrastructure | Just Java code (no external deps) | Kafka Connect + Debezium container |
+| Resume on restart | Re-reads PENDING rows | Resumes from WAL LSN position |
+| Delivery guarantee | Confirmed: `.get()` blocks until Kafka ACK | Confirmed: Kafka Connect offset tracking |
+
+**Why the status column is vestigial in CDC mode:**
+
+In polling mode, the status column has operational meaning — the poller reads PENDING rows and marks them SENT after Kafka confirms. In CDC mode, Debezium reads the INSERT directly from the WAL the moment it's committed. Nothing updates the row because:
+1. Debezium has no write-back mechanism to the source database
+2. The OutboxPoller is disabled via `@Profile("!cdc")`
+3. There's no feedback loop from "Kafka received it" back to the outbox table
+
+The outbox table in CDC mode is a **write-only append log**. Maintenance: periodic `DELETE WHERE created_at < NOW() - INTERVAL '7 days'` regardless of status.
+
+**CDC drawbacks and failure modes:**
+
+| Drawback | Impact | Mitigation |
+|----------|--------|------------|
+| WAL disk growth | `logical` WAL level produces more data than `replica` | Monitor `pg_wal` size, tune `wal_keep_size` |
+| Replication slot retention | If Debezium is down, PostgreSQL retains WAL segments until it reconnects — can fill disk | Alerting on `pg_replication_slots.active = false`, set `max_slot_wal_keep_size` |
+| No `__TypeId__` header | Spring consumers can't auto-detect type | `spring.json.value.default.type` per listener |
+| `@Lob` incompatibility | OID storage invisible to WAL | Use `@Column(columnDefinition = "text")` |
+| Snapshot on first start | Dumps all existing rows (duplicates) | `snapshot.mode=never` for outbox tables |
+| Timezone mismatch | Host timezone vs Docker UTC for timestamp fields | Don't use app timestamps as Kafka message timestamps |
+| Column naming | Hibernate snake_case vs Debezium default camelCase | Explicit `table.field.*` mappings in connector config |
+| Operational complexity | Kafka Connect cluster to manage, monitor, upgrade | Worth it only at scale; polling is simpler for low-volume |
+
+**When to use which:**
+
+| Scenario | Recommended Variant |
+|----------|-------------------|
+| Learning/prototyping | Polling (simpler, no infra) |
+| Low-volume monolith (< 100 events/min) | Polling (adequate, minimal ops) |
+| High-volume or latency-sensitive | CDC (sub-second delivery, no polling overhead) |
+| Multiple databases/services | CDC (one Debezium cluster serves all) |
+| No Docker/container infrastructure | Polling (pure Java, no external deps) |
+
+**Mode switching safety:** If switching from CDC to polling (removing `cdc` profile), the OutboxPoller will pick up ALL rows with `status=PENDING` — including ones already published by Debezium. This causes duplicate publishing. Mitigation: truncate the outbox table before switching modes, or add a `created_at` filter to the poller (only process rows newer than switch timestamp).
+
 ---
 
 ## 2. (Placeholder: Saga Pattern — coming in later phases)

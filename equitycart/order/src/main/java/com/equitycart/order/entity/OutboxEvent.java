@@ -9,10 +9,21 @@ import lombok.*;
 /**
  * Outbox event entity for the Transactional Outbox Pattern. Represents a message that needs to be
  * published to a Kafka topic. Written atomically with business data (same DB transaction), then
- * polled and published asynchronously by {@link com.equitycart.order.event.OutboxPoller}.
+ * relayed asynchronously by either:
  *
- * <p>Lifecycle: {@code PENDING → SENT}. Rows remain in the table after sending (audit trail). In
- * production, a cleanup job would archive or delete old SENT rows.
+ * <ul>
+ *   <li>{@link com.equitycart.order.event.OutboxPoller} — polls PENDING rows every 5s (active when
+ *       {@code !cdc} profile)
+ *   <li>Debezium CDC — reads PostgreSQL WAL INSERT events via Kafka Connect (active when {@code
+ *       cdc} profile)
+ * </ul>
+ *
+ * <p>Lifecycle: {@code PENDING → SENT} (poller mode). In CDC mode, status remains PENDING because
+ * Debezium captures the INSERT from the WAL without updating the row.
+ *
+ * <p>The {@code payload} column uses {@code columnDefinition = "text"} (not {@code @Lob}) to store
+ * JSON inline. {@code @Lob} creates an OID reference in PostgreSQL — Debezium cannot follow OID
+ * references when reading the WAL, it would publish the OID number instead of the JSON content.
  */
 @Entity
 @Table(name = "outbox_events")
@@ -31,7 +42,10 @@ public class OutboxEvent extends BaseEntity {
 
   String topic; // Kafka topic to publish to, e.g. "order-delivered"
 
-  @Lob String payload; // JSON-serialized event DTO
+  // @Lob creates OID reference in PostgreSQL — Debezium CDC reads OID number from WAL, not the
+  // referenced content. text column stores JSON inline, making it CDC-compatible.
+  @Column(columnDefinition = "text")
+  String payload; // JSON-serialized event DTO
 
   String payloadType; // Class name to serialize/deserialize payload into
 

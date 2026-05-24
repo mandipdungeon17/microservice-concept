@@ -589,8 +589,8 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 | 6 | Outbox Pattern for reliable event publishing (OutboxEvent entity, OutboxPoller, generic relay) | COMPLETE |
 | 7 | Dead Letter Queue — DLQ (KafkaConsumerConfig with retry + DeadLetterPublishingRecoverer) | COMPLETE |
 | 8 | End-to-end testing + end-of-phase re-audit | COMPLETE |
-| 9 | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig) | PENDING |
-| 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | PENDING |
+| 9 | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig) | COMPLETE |
+| 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | COMPLETE |
 | 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | PENDING |
 | 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | PENDING |
 | 13 | Notification Service (new module — email/webhook on trade, vesting) | PENDING |
@@ -661,6 +661,23 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - Re-audit: all 14 uncommitted Java files verified — Javadoc present on all, Log4j loggers on all service/component classes
   - Documentation complete: kafka-learning.md, microservice-patterns.md, test-commands.md (Phase 6 section), learning_log.md (Phase 6 section)
 
+- [x] Step 9: Retry logic with exponential backoff — COMPLETE (2026-05-20)
+  - Replaced FixedBackOff with ExponentialBackOffWithMaxRetries(3) in KafkaConsumerConfig
+  - Config: initialInterval=1s, multiplier=2.0, maxInterval=10s
+  - Retry pattern: 1s → 2s → 4s before routing to DLT
+  - Learned: thundering herd problem, jitter strategies (full/equal/decorrelated)
+
+- [x] Step 10: Debezium CDC — COMPLETE (2026-05-24)
+  - PostgreSQL WAL level changed to `logical` (ALTER SYSTEM SET + service restart)
+  - Docker infrastructure: Kafka dual-listener (PLAINTEXT:9092 for host, DOCKER:29092 for containers)
+  - Debezium connector: PostgresConnector with Outbox Event Router SMT
+  - Connector config: explicit snake_case column mappings, `snapshot.mode=never`, `value.converter=StringConverter`
+  - OutboxPoller disabled via `@Profile("!cdc")` when `spring.profiles.active=cdc`
+  - OutboxEvent entity: replaced `@Lob` with `@Column(columnDefinition = "text")` for CDC-compatible inline storage
+  - StockBackRewardConsumer: added `spring.json.value.default.type` per `@KafkaListener` for Debezium messages lacking `__TypeId__` header
+  - Issues resolved: Docker networking (dual-listener), Hibernate snake_case vs Debezium defaults, `@Lob` OID problem, timestamp timezone mismatch, `__TypeId__` header gap
+  - E2E tested: order → deliver → Debezium WAL capture → Kafka → consumer grants reward → vesting → holding
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -712,3 +729,4 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-14**: Steps 7-9 complete — TradeService (BUY/SELL with ledger double-entry), SellToSpendService (cross-domain atomic transaction: portfolio + ledger + order), Portfolio Analytics (cost basis, weights, reward summary). Fixed: circular dependency (@Lazy + @Autowired field injection), BigDecimal divide precision, NullPointerException on full sell, log-after-mutation bug. Learned: guard clause pattern, facade as compositor, monolith @Transactional advantage, Saga pattern preview.
 - **2026-05-16**: Phase 5 FUNCTIONAL COMPLETE — Step 10 re-audit done (20 files verified). test-commands.md created with all phases (1-5) + Docker/Redis/MongoDB/PostgreSQL CLI. Identified gap: reward granting (creating PENDING StockBackReward on order delivery) not implemented — requires cross-module event chain (order→product→market-data→portfolio). Deferred to Phase 6 as first Kafka event. Vesting job exists but idle until rewards are granted. Next: Phase 6 — Event-Driven Architecture.
 - **2026-05-20**: Phase 6 COMPLETE — All 8 steps done. Kafka KRaft (Docker), event DTOs, producer (outbox-based), StockBackRewardConsumer, cancellation consumer, Outbox Pattern (atomic dual-write), DLQ (DefaultErrorHandler + DeadLetterPublishingRecoverer). E2E tested: happy path, multi-ticker rewards, return cancellation, idempotency, Kafka CLI. Re-audit passed (14 files). Next: Phase 7 — Microservices Decomposition.
+- **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, __TypeId__ default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).

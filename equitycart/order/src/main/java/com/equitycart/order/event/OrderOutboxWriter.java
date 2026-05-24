@@ -59,6 +59,9 @@ public class OrderOutboxWriter {
             order, json, event.getClass().getName(), "ORDER_DELIVERED", "order-delivered");
 
     outboxEventRepository.save(outboxEvent);
+    log.info(
+        "Outbox event written: eventType=ORDER_DELIVERED, orderId={}, topic=order-delivered",
+        order.getId());
   }
 
   /**
@@ -79,6 +82,9 @@ public class OrderOutboxWriter {
         getOutboxEvent(order, json, event.getClass().getName(), "ORDER_RETURNED", "order-returned");
 
     outboxEventRepository.save(outboxEvent);
+    log.info(
+        "Outbox event written: eventType=ORDER_RETURNED, orderId={}, topic=order-returned",
+        order.getId());
   }
 
   /** Maps Order entity's line items to Kafka event DTOs (data snapshot for consumers). */
@@ -103,6 +109,10 @@ public class OrderOutboxWriter {
     try {
       json = objectMapper.writeValueAsString(event);
     } catch (JsonProcessingException e) {
+      log.error(
+          "Failed to serialize event to JSON: class={}, error={}",
+          event.getClass().getName(),
+          e.getMessage());
       throw new RuntimeException(e);
     }
     return json;

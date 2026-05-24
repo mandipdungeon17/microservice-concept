@@ -51,7 +51,11 @@ public class StockBackRewardConsumer {
   private final MarketDataService marketDataService;
   private final StockBackRewardRepository stockBackRewardRepository;
 
-  @KafkaListener(topics = "order-delivered", groupId = "equitycart-reward-group")
+  @KafkaListener(
+      topics = "order-delivered",
+      groupId = "equitycart-reward-group",
+      properties =
+          "spring.json.value.default.type=com.equitycart.commons.event.OrderDeliveredEvent")
   void handleOrderDelivered(OrderDeliveredEvent event) {
     log.info(
         "Received order-delivered event for orderId={}, userId={}, itemCount={}",
@@ -122,7 +126,10 @@ public class StockBackRewardConsumer {
         });
   }
 
-  @KafkaListener(topics = "order-returned", groupId = "equitycart-cancellation-group")
+  @KafkaListener(
+      topics = "order-returned",
+      groupId = "equitycart-cancellation-group",
+      properties = "spring.json.value.default.type=com.equitycart.commons.event.OrderReturnedEvent")
   void handleOrderReturned(OrderReturnedEvent event) {
     log.info(
         "Received order-returned event for orderId={}, userId={}",

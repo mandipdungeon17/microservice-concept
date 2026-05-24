@@ -3325,6 +3325,57 @@ See `kafka-learning.md` Section 9 for full DLQ details with header descriptions 
 **Q87: "Why separate retryable from non-retryable exceptions?" (2026-05-20)**
 A: Retrying a `DeserializationException` 3 times wastes 3 seconds — the JSON is malformed and will never parse correctly. `addNotRetryableExceptions()` tells the error handler to skip retries for permanent failures and send to DLT immediately. Retryable exceptions (DB timeout, network blip) genuinely benefit from retries because the underlying cause may resolve between attempts.
 
+### Step 9: Exponential Backoff (2026-05-20)
+
+**97. Exponential Backoff — Preventing Thundering Herd (2026-05-20)**
+
+Replaced `FixedBackOff(1000L, 3)` with `ExponentialBackOffWithMaxRetries(3)` — retry delays now grow: 1s → 2s → 4s (multiplier 2.0, capped at 10s). Fixed-interval retries cause synchronized storms when multiple consumers fail simultaneously on the same transient failure (e.g., DB connection pool exhaustion). Exponential backoff spreads retries over increasing windows, giving the recovering resource progressively more breathing room. Adding jitter (random ±20%) further desynchronizes — standard in AWS/Google/Stripe SDKs since ~2015.
+
+See `kafka-learning.md` Section 10 for full details on fixed vs exponential vs jitter strategies.
+
+**Q88: "Why use ExponentialBackOffWithMaxRetries instead of plain ExponentialBackOff?" (2026-05-20)**
+A: Plain `ExponentialBackOff` stops retrying based on `maxElapsedTime` (default `Long.MAX_VALUE` = infinite retries). This defeats the purpose of DLQ — messages would retry forever instead of routing to the DLT. `ExponentialBackOffWithMaxRetries` (Spring Kafka subclass) adds an explicit retry count cap, ensuring messages reach DLT after exactly N attempts regardless of elapsed time.
+
+### Step 10: Debezium CDC (2026-05-24)
+
+**98. Change Data Capture (CDC) — Database as Event Source (2026-05-24)**
+
+CDC captures row-level changes (INSERT/UPDATE/DELETE) from a database's Write-Ahead Log (WAL) and streams them as events — no polling, no application code. Debezium is the industry-standard open-source CDC platform (Red Hat, 2016), running as a Kafka Connect source connector. It creates a logical replication slot in PostgreSQL, reads the WAL stream in real-time, applies transformations (SMTs), and publishes to Kafka topics.
+
+Key advantage over polling: near-zero latency (ms vs seconds), zero DB query load (reads WAL, not tables), automatic resume from last WAL position (LSN — Log Sequence Number) on restart. Trade-off: external infrastructure (Kafka Connect container), WAL configuration requirement (`wal_level = logical`), and operational complexity.
+
+**99. PostgreSQL WAL Levels — Why `logical` Is Required (2026-05-24)**
+
+PostgreSQL's WAL has three levels: `minimal` (crash recovery only), `replica` (default, supports physical streaming replicas), `logical` (adds decoded row-level changes). CDC requires `logical` because Debezium needs the actual column values from the WAL — not just physical page diffs. Changing WAL level requires `ALTER SYSTEM SET wal_level = 'logical'` + PostgreSQL service restart (cannot be changed at runtime).
+
+**100. Outbox Event Router SMT — Clean Event Extraction (2026-05-24)**
+
+Without the Outbox Event Router, Debezium publishes a raw change event for the `outbox_events` table (with schema envelope, all columns, source metadata). The Outbox Event Router Single Message Transform (SMT) extracts just the `payload` column as the Kafka value, uses `aggregate_id` as the key, and routes to the topic specified in the `topic` column. This transforms a generic table-change event into a clean domain event — matching what the OutboxPoller would have published.
+
+**101. Docker Dual-Listener Pattern — Container Networking (2026-05-24)**
+
+When Kafka and Debezium run in separate Docker containers, Kafka must advertise different addresses for different clients. `localhost:9092` works for the host app (Spring Boot) but means "myself" inside Debezium's container. Solution: two Kafka listeners — `PLAINTEXT://localhost:9092` (advertised to host) and `DOCKER://host.docker.internal:29092` (advertised to containers). `host.docker.internal` is Docker's built-in DNS that resolves to the host machine from inside any container.
+
+**102. @Lob + CDC = Broken — Large Object vs Inline Storage (2026-05-24)**
+
+In PostgreSQL + Hibernate, `@Lob` on a String field creates an OID (Object Identifier) column. The actual text lives in `pg_largeobject` internal catalog; the column stores only a numeric reference (e.g., 18110). JPA transparently follows this reference, but Debezium reads the WAL which only contains the OID number — it cannot access `pg_largeobject`. Fix: `@Column(columnDefinition = "text")` stores content inline (uses TOAST for >2KB automatically). Same unlimited capacity, but CDC-compatible.
+
+**103. `__TypeId__` Header Gap — CDC Messages vs Spring Messages (2026-05-24)**
+
+Spring Kafka's `JsonSerializer` adds a `__TypeId__` header (FQCN of the Java class) to every message. The `JsonDeserializer` reads this to know which class to instantiate. Debezium doesn't add this header — it's not Spring-aware. Fix: `spring.json.value.default.type` property on each `@KafkaListener` tells the deserializer "if no `__TypeId__` header exists, assume this class." Each listener needs its own default since different topics carry different event types.
+
+**Q89: "Why does the outbox_events status stay PENDING in CDC mode?" (2026-05-24)**
+A: In polling mode, the OutboxPoller reads PENDING rows → publishes to Kafka → marks SENT. In CDC mode, Debezium reads the INSERT from the WAL (before the app could update anything) and publishes it. Nothing in the app ever updates the status because the OutboxPoller is disabled (`@Profile("!cdc")`). The status column becomes irrelevant in CDC mode — Debezium captures the event at the database level the moment it's committed. A cleanup job can archive old rows.
+
+**Q90: "Why use snapshot.mode=never for the outbox table?" (2026-05-24)**
+A: Default `snapshot.mode=initial` performs a full table scan on first start, publishing ALL existing rows. For the outbox table, these rows were already published by the OutboxPoller before switching to CDC. Re-publishing them creates duplicate events. `snapshot.mode=never` skips the snapshot entirely — only new WAL changes (INSERT events from this point forward) are captured. If you delete and re-register the connector without this setting, it snapshots again.
+
+**Q91: "Why did Kafka reject the message with InvalidTimestampException?" (2026-05-24)**
+A: The connector config had `transforms.outbox.table.field.event.timestamp=created_at`, which tells Debezium to use the `created_at` column value as the Kafka message timestamp. The app writes `LocalDateTime.now()` using the host timezone (IST, UTC+5:30), storing e.g., "17:50". Debezium interprets this as UTC and converts to epoch millis. The Kafka broker (Docker, running UTC at 13:22) sees a timestamp 4.5 hours in the future and rejects it. Fix: remove the timestamp field mapping — let Debezium use broker time.
+
+**Q92: "What is a Kafka Connect Single Message Transform (SMT)?" (2026-05-24)**
+A: An SMT is a lightweight, stateless transformation applied to each message as it passes through Kafka Connect (before producing or after consuming). No external storage, no aggregation — just per-message field extraction, renaming, routing, or filtering. The Outbox Event Router is a complex SMT that restructures a table-change event into a routed domain event. SMTs are configured declaratively in the connector JSON — no Java code needed.
+
 ### Phase 6 — Complete Architecture Diagram (2026-05-20)
 
 ```
@@ -3345,7 +3396,7 @@ ORDER-SERVICE                         PORTFOLIO-SERVICE
 └───────────────────┘──▶ order-returned ─────────────┘
                         order-*.DLT (poison messages)
 
-Error: retry×3 (1s apart) → DLT. Non-retryable → DLT immediately.
+Error: retry×3 exponential (1s→2s→4s) → DLT. Non-retryable → DLT immediately.
 Idempotency: findByOrderIdAndTickerSymbol prevents duplicate rewards.
 ```
 

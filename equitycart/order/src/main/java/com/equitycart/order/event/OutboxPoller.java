@@ -9,6 +9,7 @@ import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.context.annotation.Profile;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -19,6 +20,10 @@ import org.springframework.transaction.annotation.Transactional;
  * Outbox Pattern: the writer stores events atomically with business data, this poller relays them
  * to Kafka asynchronously.
  *
+ * <p>Only active when the {@code cdc} profile is NOT set ({@code @Profile("!cdc")}). When the
+ * {@code cdc} profile is active, Debezium CDC handles the relay by reading PostgreSQL's WAL
+ * directly — this poller is unnecessary and disabled to prevent duplicate event publishing.
+ *
  * <p>Polls every 5 seconds. For each PENDING row: re-hydrates the JSON payload into its original
  * DTO class (via {@code payloadType} FQCN), sends through {@link KafkaTemplate} (which adds the
  * correct {@code __TypeId__} header), blocks until Kafka ACKs, then marks the row as SENT.
@@ -26,6 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>On failure: logs the error and leaves the row as PENDING — it will be retried on the next poll
  * cycle. This provides at-least-once delivery; consumers must be idempotent.
  */
+@Profile("!cdc")
 @Component
 @RequiredArgsConstructor
 public class OutboxPoller {
