@@ -17,6 +17,7 @@ import java.math.BigDecimal;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -52,6 +53,10 @@ import org.springframework.transaction.annotation.Transactional;
  */
 @Service
 @RequiredArgsConstructor
+@ConditionalOnProperty(
+    name = "equitycart.sell-to-spend.strategy",
+    havingValue = "transactional",
+    matchIfMissing = true)
 public class SellToSpendServiceImpl implements SellToSpendService {
 
   private static final Logger logger = LogManager.getLogger(SellToSpendServiceImpl.class);

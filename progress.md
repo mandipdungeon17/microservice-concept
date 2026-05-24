@@ -591,7 +591,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 | 8 | End-to-end testing + end-of-phase re-audit | COMPLETE |
 | 9 | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig) | COMPLETE |
 | 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | COMPLETE |
-| 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | PENDING |
+| 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | COMPLETE |
 | 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | PENDING |
 | 13 | Notification Service (new module — email/webhook on trade, vesting) | PENDING |
 
@@ -678,6 +678,20 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - Issues resolved: Docker networking (dual-listener), Hibernate snake_case vs Debezium defaults, `@Lob` OID problem, timestamp timezone mismatch, `__TypeId__` header gap
   - E2E tested: order → deliver → Debezium WAL capture → Kafka → consumer grants reward → vesting → holding
 
+- [x] Step 11: Saga Orchestrator for Sell-to-Spend — COMPLETE (2026-05-24)
+  - Orchestration-based Saga pattern for the Sell-to-Spend flow (3 atomic steps + compensating transactions)
+  - SagaStatus enum: 10 states (STARTED through COMPLETED/COMPENSATED/FAILED) with isTerminal()
+  - SellToSpendSaga entity: persists saga progress, all input parameters, failureReason, @Version optimistic locking
+  - SellToSpendSagaOrchestrator: drives steps, catches failures, runs compensation in reverse order
+  - Compensation matrix: step 2 fails → undo step 1 (re-add shares); step 3 fails → undo steps 2+1 (reverse ledger + re-add shares)
+  - Timeout detection: @Scheduled(30s) finds stuck sagas and compensates
+  - SagaOutboxWriter: lifecycle events (STARTED, STEP_COMPLETED, COMPLETED, COMPENSATING, COMPENSATED, FAILED) published to `sell-to-spend-saga` Kafka topic via shared outbox
+  - SagaLifecycleEvent record in commons/event for observability
+  - @ConditionalOnProperty toggle: `equitycart.sell-to-spend.strategy=saga` vs `transactional` (matchIfMissing=true)
+  - ReferenceType.SELL_TO_SPEND_REVERSAL added for compensation ledger entries
+  - Key design: executeSaga() deliberately NOT @Transactional — each step commits independently (eventual consistency)
+  - BUILD SUCCESSFUL
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -730,3 +744,4 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-16**: Phase 5 FUNCTIONAL COMPLETE — Step 10 re-audit done (20 files verified). test-commands.md created with all phases (1-5) + Docker/Redis/MongoDB/PostgreSQL CLI. Identified gap: reward granting (creating PENDING StockBackReward on order delivery) not implemented — requires cross-module event chain (order→product→market-data→portfolio). Deferred to Phase 6 as first Kafka event. Vesting job exists but idle until rewards are granted. Next: Phase 6 — Event-Driven Architecture.
 - **2026-05-20**: Phase 6 COMPLETE — All 8 steps done. Kafka KRaft (Docker), event DTOs, producer (outbox-based), StockBackRewardConsumer, cancellation consumer, Outbox Pattern (atomic dual-write), DLQ (DefaultErrorHandler + DeadLetterPublishingRecoverer). E2E tested: happy path, multi-ticker rewards, return cancellation, idempotency, Kafka CLI. Re-audit passed (14 files). Next: Phase 7 — Microservices Decomposition.
 - **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, __TypeId__ default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).
+- **2026-05-24**: Step 11 done. Saga Orchestrator for Sell-to-Spend: orchestration-based saga with state machine entity, compensating transactions (reverse ledger + re-add shares), @Scheduled timeout detector, lifecycle events via outbox to Kafka. @ConditionalOnProperty toggle between transactional and saga strategies. 7 new files (entity, enum, repo, orchestrator, service, outbox writer, event DTO), 3 files modified. BUILD SUCCESSFUL. Next: test end-to-end.

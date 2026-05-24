@@ -461,6 +461,180 @@ curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
   -d '{"tickerSymbol":"AAPL","quantity":1,"pricePerShare":200.00,"orderId":2}'
 ```
 
+### Sell to Spend — Saga Mode Verification
+
+```bash
+# ═══════════════════════════════════════════════════════════════════════
+# SAGA TEST DATA SETUP (run in order — each step depends on the previous)
+# ═══════════════════════════════════════════════════════════════════════
+
+# Prerequisites:
+# 1. equitycart.sell-to-spend.strategy=saga in application.yml
+# 2. Docker: PostgreSQL, Redis, Kafka running
+# 3. App started fresh (tables auto-created by Hibernate)
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 1: Login as ADMIN (for product/brand setup)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@equitycart.com","password":"Test@1234"}'
+# → Save the accessToken as <AdminToken>
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 2: Create Category + Brand + Product (needed for cart/order)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/categories \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AdminToken>" \
+  -d '{"name":"Electronics","description":"Electronic devices"}'
+
+curl -s -X POST http://localhost:8080/api/brands \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AdminToken>" \
+  -d '{"name":"Apple","description":"Apple Inc."}'
+
+curl -s -X POST http://localhost:8080/api/brand-ticker-mappings \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AdminToken>" \
+  -d '{"brandId":1,"tickerSymbol":"AAPL","stockBackPercentage":5.0}'
+
+curl -s -X POST http://localhost:8080/api/products \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <AdminToken>" \
+  -d '{"name":"iPhone 15","description":"Latest iPhone","sku":"AAPL-IP15","price":999.00,"stockQuantity":100,"brandId":1,"categoryId":1}'
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 3: Login as CUSTOMER (for the saga flow)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"customer@equitycart.com","password":"Test@1234"}'
+# → Save the accessToken as <Token>
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 4: Buy AAPL shares (create holdings for sell-to-spend)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/portfolio/trade \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":10,"pricePerShare":200.00,"tradeType":"BUY"}'
+# → Verify: 200 OK, holding with 10 shares of AAPL at $200
+
+# Confirm holdings exist:
+curl -s http://localhost:8080/api/portfolio \
+  -H "Authorization: Bearer <Token>"
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 5: Add item to cart + Place order (creates CREATED order)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/cart/items \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"productId":1,"productName":"iPhone 15","quantity":1,"price":999.00}'
+
+curl -s -X POST http://localhost:8080/api/order \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"idempotencyKey":"saga-test-001","shippingAddress":"123 Saga Lane","paymentMethod":"STOCK"}'
+# → Note the orderId from response (e.g., orderId=1)
+# → Order is in CREATED status — ready for sell-to-spend
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 6: SAGA HAPPY PATH — Sell to Spend
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":5,"pricePerShare":200.00,"orderId":1}'
+# Expected: 200 OK
+# Response: {"orderId":1,"tickerSymbol":"AAPL","quantity":5,"saleProceeds":1000.00,"orderStatus":"CONFIRMED"}
+# → 5 shares × $200 = $1000 proceeds ≥ $999 order total ✅
+
+# ──────────────────────────────────────────────────────────────────────
+# STEP 7: VERIFY — Check saga table, holdings, ledger, order status
+# ──────────────────────────────────────────────────────────────────────
+
+# 7a. Check portfolio (should have 5 AAPL shares remaining)
+curl -s http://localhost:8080/api/portfolio \
+  -H "Authorization: Bearer <Token>"
+
+# 7b. Check order status (should be CONFIRMED)
+curl -s http://localhost:8080/api/order/1 \
+  -H "Authorization: Bearer <Token>"
+
+# 7c. PostgreSQL — Saga table
+# SELECT saga_id, order_id, status, failure_reason, ticker_symbol, quantity FROM sell_to_spend_sagas;
+# Expected: status = COMPLETED, failure_reason = NULL
+
+# 7d. PostgreSQL — Outbox events for saga lifecycle
+# SELECT event_type, aggregate_type, payload FROM outbox_events WHERE aggregate_type = 'SellToSpendSaga' ORDER BY created_at;
+# Expected: SAGA_STARTED, SAGA_STEP_COMPLETED, SAGA_STEP_COMPLETED, SAGA_STEP_COMPLETED, SAGA_COMPLETED
+
+# 7e. PostgreSQL — Ledger entries
+# SELECT debit_account, credit_account, amount, reference_type, description FROM ledger_entries WHERE reference_type = 'SELL_TO_SPEND';
+# Expected: CASH/HOLDING_ASSET, amount=1000.00
+
+# 7f. Kafka — Saga lifecycle events (if Kafka running)
+# docker exec kafka kafka-console-consumer.sh --topic sell-to-spend-saga --from-beginning --bootstrap-server localhost:9092
+
+# ═══════════════════════════════════════════════════════════════════════
+# SAGA ERROR SCENARIOS
+# ═══════════════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────────────
+# ERROR 1: Insufficient proceeds (validation fails before saga starts)
+# ──────────────────────────────────────────────────────────────────────
+# First, place another order
+curl -s -X POST http://localhost:8080/api/cart/items \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"productId":1,"productName":"iPhone 15","quantity":1,"price":999.00}'
+
+curl -s -X POST http://localhost:8080/api/order \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"idempotencyKey":"saga-test-002","shippingAddress":"456 Error Ave","paymentMethod":"STOCK"}'
+# → Note orderId (e.g., orderId=2)
+
+# Try with proceeds < order total (1 share × $200 = $200 < $999)
+curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":1,"pricePerShare":200.00,"orderId":2}'
+# Expected: 400 Bad Request — "Sale proceeds (200.00) do not cover order total (999.00)"
+# No saga created — validation fails BEFORE orchestrator is called
+
+# ──────────────────────────────────────────────────────────────────────
+# ERROR 2: Already confirmed order (validation fails)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":5,"pricePerShare":200.00,"orderId":1}'
+# Expected: 400 — "Order is not in a valid state for sell-to-spend: CONFIRMED"
+
+# ──────────────────────────────────────────────────────────────────────
+# ERROR 3: Insufficient shares (saga step 1 fails — no compensation needed)
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":100,"pricePerShare":200.00,"orderId":2}'
+# Expected: 500 — InsufficientSharesException (only 5 shares remain)
+# Saga created in FAILED state (step 1 failed, nothing to compensate)
+# SELECT * FROM sell_to_spend_sagas WHERE status = 'FAILED';
+
+# ──────────────────────────────────────────────────────────────────────
+# COMPARISON: Switch to transactional mode
+# ──────────────────────────────────────────────────────────────────────
+# Change application.yml: equitycart.sell-to-spend.strategy=transactional
+# Restart app, run same test — observe:
+#   - No saga table entries (doesn't use saga entity)
+#   - Same end result (order CONFIRMED, shares reduced)
+#   - On failure: DB state NEVER changes (atomic rollback vs compensation)
+```
+
 ### Rewards
 
 ```bash

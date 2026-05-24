@@ -8,5 +8,6 @@ public enum ReferenceType {
   ORDER,
   TRADE,
   REWARD_VESTING,
-  SELL_TO_SPEND
+  SELL_TO_SPEND,
+  SELL_TO_SPEND_REVERSAL
 }

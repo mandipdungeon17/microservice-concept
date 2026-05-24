@@ -3401,3 +3401,37 @@ Idempotency: findByOrderIdAndTickerSymbol prevents duplicate rewards.
 ```
 
 See `microservice-patterns.md` Section 1.11 for the full detailed diagram.
+
+### Step 11: Saga Orchestrator for Sell-to-Spend (2026-05-24)
+
+**104. Saga Pattern — Compensating Transactions for Distributed Consistency (2026-05-24)**
+
+When operations span multiple services with separate databases, a single `@Transactional` is impossible — each service commits independently. The Saga pattern coordinates a sequence of local transactions, each with a "compensating transaction" that semantically undoes it on failure. Unlike a DB rollback (which erases the change), compensation is a forward operation visible to other transactions. This is eventual consistency — intermediate states ARE visible. The term originates from Garcia-Molina & Salem's 1987 Princeton paper on long-lived transactions.
+
+**105. Orchestration vs. Choreography — Saga Coordination Strategies (2026-05-24)**
+
+Two approaches: Orchestration (central coordinator drives all steps and decides compensation) vs Choreography (each service reacts to events from the previous service). Orchestration is simpler for complex multi-step flows — the entire saga is readable in one class. Choreography scales better and reduces coupling but scatters logic across multiple consumers. EquityCart uses Orchestration: `SellToSpendSagaOrchestrator` knows the full 3-step sequence and handles all compensation in one place.
+
+**106. State Machine Persistence — Saga Recovery Log (2026-05-24)**
+
+The saga entity persists status at every step boundary (`STARTED → REDUCING_HOLDING → HOLDING_REDUCED → ...`). If the app crashes between steps, the row shows the last committed status. A timeout detector (@Scheduled) polls for sagas stuck in non-terminal states past a threshold and triggers compensation from the last known-good state. Without persistence, crashed sagas leave the system in an inconsistent state (shares removed but order never confirmed).
+
+**107. @ConditionalOnProperty — Strategy Pattern via Spring Configuration (2026-05-24)**
+
+When two implementations of the same interface exist, `@ConditionalOnProperty` activates exactly one bean based on application.yml. `matchIfMissing=true` on the transactional impl makes it the default — the saga impl only activates when explicitly requested (`strategy=saga`). The controller/facade layer calls the interface method unchanged — Spring DI wires the selected implementation at startup. This is the Strategy pattern without explicit factory classes.
+
+**108. Compensating Transaction Design — Forward Undo Operations (2026-05-24)**
+
+Compensations are NOT rollbacks — they create new records that reverse the business effect. Example: undoing a ledger debit requires a new CREDIT entry (with ReferenceType `SELL_TO_SPEND_REVERSAL`), not deleting the original row. This preserves full audit trail and is idempotent (check if reversal already exists before creating). Compensations run in reverse step order — last completed step compensated first. The last step in a saga never needs compensation (nothing runs after it to fail).
+
+**Q93: "Why is executeSaga() NOT @Transactional?" (2026-05-24)**
+A: The entire point of the Saga pattern is that each step commits independently — no umbrella transaction. If you wrap it in `@Transactional`, all saves and service calls share one DB transaction that either all-commits or all-rolls-back — which is just the `@Transactional` approach with extra steps. The saga entity saves BETWEEN steps precisely so that crashes don't lose state. Each save auto-commits via Spring Data's default transactional behavior on `repository.save()`.
+
+**Q94: "What if the compensation itself fails?" (2026-05-24)**
+A: The saga enters FAILED state — a terminal state requiring manual intervention. In production this triggers alerts (PagerDuty, Slack). An admin reviews the saga entity (which records failureReason, completedSteps, compensation start time) and manually resolves the inconsistency. Automatic retry of failed compensations is possible but risky — if the root cause is persistent (e.g., ledger service permanently down), retrying just generates noise.
+
+**Q95: "Why store all input parameters (ticker, qty, price) in the saga entity?" (2026-05-24)**
+A: The orchestrator must be able to resume or compensate without re-fetching the original request. If the app crashes and the timeout detector picks up a stuck saga, it needs all inputs to call `addOrUpdateHolding(userId, ticker, qty, price)` for compensation. Storing inputs in the entity makes the saga self-contained — it can be processed by any instance, not just the one that started it.
+
+**Q96: "How does the saga compare to the @Transactional approach in terms of code complexity?" (2026-05-24)**
+A: Transactional: ~50 lines (validate + 3 service calls). Saga: ~300+ lines across 7 files (entity, enum, repository, orchestrator, service impl, outbox writer, event DTO). This 6x complexity is the cost of distribution. You pay it only when you MUST — when services have separate databases and cannot share a transaction. In a monolith, always prefer `@Transactional`.

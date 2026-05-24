@@ -1,3 +1,8 @@
+equitycart:
+  sell-to-spend:
+    strategy: saga    # "transactional" (default) or "saga"
+  saga:
+    timeout-seconds: 30
 spring:
   profiles:
     active: cdc

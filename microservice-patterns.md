@@ -386,7 +386,156 @@ The outbox table in CDC mode is a **write-only append log**. Maintenance: period
 
 ---
 
-## 2. (Placeholder: Saga Pattern — coming in later phases)
+## 2. The Saga Pattern
+
+**Why "Saga"?** The term comes from a 1987 paper by Hector Garcia-Molina and Kenneth Salem at Princeton. They needed a way to handle "long-lived transactions" (LLTs) that spanned minutes or hours — too long to hold database locks. Their solution: break the LLT into a sequence of smaller transactions, each with a corresponding "compensating transaction" to undo it. They called this sequence a "saga" — like a narrative with chapters that can be undone in reverse order.
+
+### 2.1 The Problem: Distributed Transactions
+
+In a monolith, you wrap multiple operations in one `@Transactional`:
+
+```
+@Transactional
+sellToSpend():
+  1. portfolioService.reduceHolding()     ← same DB
+  2. ledgerService.recordTransaction()    ← same DB
+  3. orderService.updateOrderStatus()     ← same DB
+  → All succeed or ALL roll back (ACID)
+```
+
+In microservices (separate databases per service), this breaks:
+
+```
+sellToSpend():
+  1. POST portfolio-service/reduce        ← Portfolio DB
+  2. POST ledger-service/record           ← Ledger DB
+  3. POST order-service/confirm           ← Order DB
+  → Step 3 fails. Steps 1+2 already committed. No rollback possible!
+```
+
+**Why can't you use distributed transactions (2PC)?** Two-Phase Commit requires all participants to hold locks until the coordinator says "commit." This creates tight coupling, latency (synchronous round-trip), and single point of failure (coordinator). Google's Spanner does this with atomic clocks — most systems can't.
+
+### 2.2 The Solution: Saga with Compensating Transactions
+
+Instead of rolling back, you **undo** completed steps with new forward operations:
+
+```
+Saga: Sell-to-Spend
+┌─────────────────────────────────────────────────────────────────┐
+│  Step 1: reduceHolding()         Compensate: addOrUpdateHolding()  │
+│  Step 2: recordTransaction()     Compensate: recordReversal()      │
+│  Step 3: updateOrderStatus()     Compensate: (not needed — last)   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+If step 3 fails:
+1. Compensate step 2: record a REVERSAL ledger entry (HOLDING_ASSET ← CASH)
+2. Compensate step 1: re-add the shares to the portfolio
+3. Saga ends in COMPENSATED state
+
+**Key insight:** Compensation is NOT a rollback. It's a new business operation that semantically undoes the previous one. The intermediate states (shares removed, ledger entry created) WERE visible to other transactions — this is **eventual consistency**, not ACID atomicity.
+
+### 2.3 Orchestration vs. Choreography
+
+| | Orchestration | Choreography |
+|---|---|---|
+| **Coordination** | Central orchestrator drives each step | Each service reacts to events from previous step |
+| **Flow visibility** | Entire saga readable in one class | Logic scattered across multiple event listeners |
+| **Coupling** | Orchestrator knows all steps | Services know only their own step + next event |
+| **Error handling** | Orchestrator decides what to compensate | Each service must know its own compensation trigger |
+| **Best for** | Complex multi-step flows, clear sequences | Simple 2-3 step flows, loose coupling |
+| **Example** | EquityCart Sell-to-Spend Saga | Order-Delivered → Reward-Consumer (Phase 6 Steps 4-5) |
+
+**EquityCart uses Orchestration** — the `SellToSpendSagaOrchestrator` class knows the full 3-step sequence and handles all compensation logic in one place.
+
+### 2.4 Saga State Machine
+
+The orchestrator persists a **saga entity** (`SellToSpendSaga`) to the database at every step boundary:
+
+```
+┌─────────┐     ┌──────────────────┐     ┌─────────────────┐
+│ STARTED │────▶│ REDUCING_HOLDING │────▶│ HOLDING_REDUCED │
+└─────────┘     └──────────────────┘     └─────────────────┘
+                                                  │
+                                                  ▼
+┌───────────┐     ┌──────────────────┐     ┌──────────────────┐
+│ COMPLETED │◀────│ CONFIRMING_ORDER │◀────│ RECORDING_LEDGER │
+└───────────┘     └──────────────────┘     └──────────────────┘
+                                                  │
+                                           (on failure)
+                                                  ▼
+                  ┌──────────────┐          ┌──────────────┐
+                  │ COMPENSATED  │◀─────────│ COMPENSATING │
+                  └──────────────┘          └──────────────┘
+                         │                         │
+                    (success)                 (failure)
+                                                  ▼
+                                           ┌────────┐
+                                           │ FAILED │
+                                           └────────┘
+```
+
+**Why persist at every step?** If the app crashes between steps 1 and 2, the saga row shows `HOLDING_REDUCED`. On restart, the timeout detector finds it and either retries step 2 or compensates step 1. Without persistence, the saga state is lost on crash — shares removed but never compensated.
+
+### 2.5 Idempotency
+
+Sagas execute in an at-least-once environment (retries, timeout recovery). Every step must be safe to call twice:
+
+| Strategy | How it works | EquityCart example |
+|----------|-------------|-------------------|
+| Status gate | Check saga status before executing — skip if already past this step | If status already `HOLDING_REDUCED`, don't call `reduceHolding()` again |
+| Natural idempotency | The operation itself rejects duplicates | `updateOrderStatus(CONFIRMED)` on already-confirmed order throws `InvalidStatusTransitionException` |
+| Unique constraints | DB constraint prevents double-write | Saga entity with `orderId` lookup prevents duplicate saga creation |
+
+### 2.6 Timeout Detection
+
+A scheduled job polls for "stuck" sagas — those in non-terminal states beyond a configurable threshold:
+
+```
+@Scheduled(fixedRate = 30000)
+detectTimedOutSagas():
+  → Find sagas where updatedAt < (now - 30s) AND status NOT IN (COMPLETED, COMPENSATED, FAILED)
+  → Determine completedSteps from current status
+  → Run compensation from last known-good state
+```
+
+In production (distributed services with network latency), timeouts are minutes to hours. For the EquityCart monolith (same-JVM calls), 30 seconds demonstrates the concept without slowing tests.
+
+### 2.7 Saga vs. @Transactional — When to Use Which
+
+| Criteria | @Transactional | Saga |
+|----------|---------------|------|
+| Same database | ✅ Use this | Overkill |
+| Separate databases | Not possible | ✅ Required |
+| Code complexity | ~50 lines | ~300+ lines |
+| Consistency | Strong (ACID) | Eventual |
+| Intermediate visibility | None (isolated) | Visible (other transactions can see partial state) |
+| Failure recovery | Automatic rollback | Manual compensation |
+| Performance | Single commit | Multiple commits + saga saves |
+
+**Rule of thumb:** Use `@Transactional` when you can. Use Sagas when you must (separate databases, separate deployments, cross-network boundaries).
+
+### 2.8 EquityCart Implementation
+
+```
+equitycart/portfolio/src/main/java/com/equitycart/portfolio/saga/
+├── enums/SagaStatus.java                    ← State machine enum
+├── entity/SellToSpendSaga.java              ← JPA entity (recovery log)
+├── repository/SellToSpendSagaRepository.java ← Queries for idempotency + timeout
+├── orchestrator/SellToSpendSagaOrchestrator.java ← The brain
+├── service/SellToSpendSagaServiceImpl.java  ← SellToSpendService impl (saga mode)
+└── event/SagaOutboxWriter.java              ← Lifecycle events to Kafka
+```
+
+**Toggle:** `equitycart.sell-to-spend.strategy=saga` vs `transactional` in `application.yml`. Both implement the same `SellToSpendService` interface — controller/facade code unchanged.
+
+### 2.9 Compensating Transaction Design Rules
+
+1. **Compensations are forward operations** — never try to "undo" at the database level (DELETE the row). Instead, create a new operation that semantically reverses the effect.
+2. **Compensations must be idempotent** — they may be retried if the saga crashes during compensation.
+3. **Order matters** — compensate in REVERSE order of execution (last completed step first).
+4. **Not all steps need compensation** — the last step in a saga never needs compensation (nothing runs after it to fail).
+5. **Compensation can fail** — if it does, the saga is FAILED and requires manual intervention (alerts, admin dashboard).
 
 ---
 
