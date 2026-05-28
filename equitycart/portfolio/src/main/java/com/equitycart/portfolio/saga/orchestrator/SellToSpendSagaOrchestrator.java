@@ -7,6 +7,8 @@ import com.equitycart.order.dto.UpdateOrderStatusRequest;
 import com.equitycart.order.enums.OrderStatus;
 import com.equitycart.order.service.api.OrderService;
 import com.equitycart.portfolio.dto.SellToSpendRequest;
+import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
+import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.saga.entity.SellToSpendSaga;
 import com.equitycart.portfolio.saga.enums.SagaStatus;
 import com.equitycart.portfolio.saga.event.SagaOutboxWriter;
@@ -15,6 +17,7 @@ import com.equitycart.portfolio.service.api.PortfolioService;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
@@ -71,6 +74,7 @@ public class SellToSpendSagaOrchestrator {
   private final OrderService orderService;
   private final SellToSpendSagaRepository sellToSpendSagaRepository;
   private final SagaOutboxWriter sagaOutboxWriter;
+  private final PortfolioEventStore portfolioEventStore;
 
   @Value("${equitycart.saga.timeout-seconds:30}")
   private long timeoutSeconds;
@@ -182,6 +186,15 @@ public class SellToSpendSagaOrchestrator {
     saga.setStatus(SagaStatus.HOLDING_REDUCED);
     savedSaga = sellToSpendSagaRepository.save(saga);
 
+    portfolioEventStore.append(
+        saga.getUserId(),
+        PortfolioEventType.SELL_TO_SPEND,
+        saga.getTickerSymbol(),
+        saga.getQuantity(),
+        saga.getPricePerShare(),
+        saga.getSaleProceeds(),
+        Map.of("orderId", saga.getOrderId(), "sagaId", saga.getSagaId().toString()));
+
     sagaOutboxWriter.writeSagaLifecycleEvent(savedSaga, "SAGA_STEP_COMPLETED", "REDUCE_HOLDING");
 
     log.info(
@@ -261,6 +274,15 @@ public class SellToSpendSagaOrchestrator {
         // Undo step 1: re-add sold shares
         portfolioService.addOrUpdateHolding(
             saga.getUserId(), saga.getTickerSymbol(), saga.getQuantity(), saga.getPricePerShare());
+
+        portfolioEventStore.append(
+            saga.getUserId(),
+            PortfolioEventType.SELL_TO_SPEND_COMPENSATED,
+            saga.getTickerSymbol(),
+            saga.getQuantity(),
+            saga.getPricePerShare(),
+            saga.getSaleProceeds(),
+            Map.of("sagaId", saga.getSagaId().toString(), "reason", saga.getFailureReason()));
 
         log.info("Compensated step 1: shares re-added");
       }

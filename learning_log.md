@@ -3447,3 +3447,184 @@ A: The event only needs `orderId` + `paymentMethod` to route correctly. The saga
 
 **Q98: "Why is `isRefunded` on the saga entity instead of a separate refund table?" (2026-05-24)**
 A: The refund is a 1:1 extension of the saga lifecycle, not an independent entity. Adding a boolean to the saga keeps the refund check atomic with the saga lookup (single query + single save). A separate table would require coordinating writes across two tables for idempotency, introducing the same distributed consistency problem the saga was designed to solve.
+
+### Step 12: Event Sourcing for Portfolio Changes — MongoDB Append-Only Event Log (2026-05-27)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     FUNCTIONAL FLOW: Event Sourcing                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  User Action (BUY/SELL/SELL-TO-SPEND/VEST/REFUND)
+         │
+         ▼
+  ┌─────────────────────────────────────────────────┐
+  │           Service Layer (existing)               │
+  │  TradeServiceImpl / PortfolioServiceImpl /       │
+  │  VestingHelper / SagaOrchestrator / Consumer     │
+  └────────────┬────────────────────┬───────────────┘
+               │                    │
+        ① State Update       ② Event Append
+               │                    │
+               ▼                    ▼
+  ┌──────────────────┐   ┌──────────────────────────┐
+  │   PostgreSQL     │   │   PortfolioEventStoreImpl │
+  │   holdings       │   │   (try-catch, best-effort)│
+  │   [AUTHORITY]    │   └────────────┬─────────────┘
+  └──────────────────┘                │
+                                      │ save()
+                                      ▼
+                            ┌──────────────────────┐
+                            │      MongoDB         │
+                            │  portfolio_events    │
+                            │  [APPEND-ONLY LOG]   │
+                            │                      │
+                            │  { eventId, userId,  │
+                            │    eventType, ticker,│
+                            │    qty, price,       │
+                            │    metadata,         │
+                            │    timestamp,        │
+                            │    sequenceNumber }  │
+                            └──────────┬───────────┘
+                                       │
+              ┌────────────────────────┼────────────────────────┐
+              │                        │                        │
+              ▼                        ▼                        ▼
+  GET /events              GET /events/projection    GET /events/projection/validate
+  (timeline query)         (replay all events →      (compare projected vs
+   optional filters:        rebuild holdings map)     PostgreSQL holdings →
+   ?ticker=AAPL                                       MATCH/MISMATCH per ticker)
+   ?from=...&to=...)
+
+─────────────────────────────────────────────────────────────────────────────
+
+  Integration Points (9 append calls across 6 files):
+
+  TradeServiceImpl ─────────── BUY  → SHARES_PURCHASED
+                               SELL → SHARES_SOLD
+
+  PortfolioServiceImpl ─────── grantReward() → REWARD_GRANTED
+
+  VestingHelperImpl ────────── vestSingleReward() → REWARD_VESTED
+
+  StockBackRewardConsumer ──── order-returned → REWARD_CANCELLED
+                               order-refunded → REFUND_RESTORED
+
+  SellToSpendSagaOrchestrator ─ step1() → SELL_TO_SPEND
+                                compensate() → SELL_TO_SPEND_COMPENSATED
+
+  SellToSpendServiceImpl ───── sellToSpend() → SELL_TO_SPEND (transactional mode)
+
+─────────────────────────────────────────────────────────────────────────────
+
+  Projection Replay (left fold):
+
+  events = [PURCHASED(5@150), PURCHASED(3@200), SOLD(2@180), VESTED(1@0)]
+                │                    │                │              │
+  state:   {qty:5, avg:150}   {qty:8, avg:168.75}  {qty:6, avg:168.75}  {qty:7, avg:144.64}
+                                                    (avg unchanged       (0 price dilutes avg)
+                                                     on sells)
+```
+
+**110. Event Sourcing — Immutable Facts as the Source of History (2026-05-27)**
+
+Traditional CRUD overwrites state in place — when you update a holding's quantity, the old value is lost. Event Sourcing inverts this: every state change is recorded as an immutable event (fact) in an append-only store. The current state is always derivable by replaying all events from the beginning. The term comes from Martin Fowler (2005), building on the Domain Events pattern. Benefits: full audit trail, temporal queries ("portfolio at time T"), debugging (replay to reproduce bugs), and analytics (aggregate events without querying live state). Tradeoff: more storage, eventually-consistent read models, and increased complexity for simple CRUD operations.
+
+**111. Projections — Rebuilding State from Events (The "Left Fold") (2026-05-27)**
+
+A projection is a function that processes an event stream and produces a read-optimized view. Conceptually: `currentState = events.reduce(emptyState, applyEvent)` — a left fold in functional programming terms. Each event type has application rules: SHARES_PURCHASED adds to quantity and recalculates weighted average, SHARES_SOLD subtracts quantity (avg unchanged). The projection is deterministic — replaying the same events always produces the same state. This enables: rebuilding from scratch after bugs, creating new read models retroactively, and validating consistency between stores.
+
+**112. Dual-Write Pattern — Pragmatic Event Sourcing Without Full Migration (2026-05-27)**
+
+In pure Event Sourcing, the event store IS the only source of truth and all state is derived via projections. The Dual-Write approach is a pragmatic middle ground: write to both the state store (PostgreSQL holdings) and the event store (MongoDB) simultaneously. PostgreSQL remains authoritative for current state; MongoDB provides history and audit. Risk: if one write succeeds and the other fails, the stores drift. Mitigation: make the event store best-effort (catch exceptions, log warnings, don't break primary flow). Acceptable for audit/analytics use cases where occasional missed events are tolerable.
+
+**113. Sequence Numbers — Ordering Guarantees in Event Stores (2026-05-27)**
+
+Events need a total order per aggregate (user) for deterministic replay. Options: timestamps (risk: clock skew, same-millisecond events), auto-increment (requires centralized counter), or application-level sequence (query last + increment). EquityCart uses per-user sequence numbers: query `findTopByUserIdOrderBySequenceNumberDesc`, then `lastSeq + 1`. Gaps are acceptable (indicate a missed event) but duplicates are not (unique index on eventId prevents them). In distributed systems, vector clocks or Kafka offsets often replace sequence numbers.
+
+**Q99: "Why store eventType as String instead of @Enumerated in MongoDB?" (2026-05-27)**
+A: Schema flexibility. MongoDB documents don't enforce column types like PostgreSQL CHECK constraints. Storing as String means: new event types can be added without migration, old documents remain valid, and the projection's `default` case gracefully skips unknown types. If you used an enum directly and added a new value, deserializing old documents with Jackson would fail if the enum was later restructured.
+
+**Q100: "Why is the event store best-effort (try-catch) instead of transactional with PostgreSQL?" (2026-05-27)**
+A: PostgreSQL and MongoDB are separate databases — no single transaction can span both (without distributed transactions like XA/2PC, which add massive complexity and latency). Making the event store best-effort means a MongoDB outage doesn't break core portfolio operations. The tradeoff is potential drift (missed events), which is acceptable for an audit/analytics store. If you needed guaranteed consistency, you'd use the Outbox Pattern: write events to a PostgreSQL outbox table (same transaction as the state change), then relay to MongoDB asynchronously.
+
+**Q101: "What happens to the projection for trades done BEFORE event sourcing was enabled?" (2026-05-27)**
+A: The projection only replays events that exist in the event store. Pre-Step-12 trades have no events, so the projection shows fewer holdings than PostgreSQL. The `/validate` endpoint explicitly surfaces this as "MISMATCH: projected=NOT_FOUND, actual=qty:X". To backfill, you'd write a migration script that reads the PostgreSQL state and creates synthetic "initial state" events — but this wasn't needed for learning purposes.
+
+**Q102: "Is Event Sourcing the same as CQRS?" (2026-05-27)**
+A: No — they are separate patterns that complement each other well but are independent.
+
+- **Event Sourcing** = how you STORE state (as a sequence of immutable events, not current-state rows)
+- **CQRS (Command Query Responsibility Segregation)** = how you SEPARATE reads from writes (different models/paths for mutations vs queries)
+
+They are often used together because Event Sourcing naturally produces a write model (event store) that is optimized for appends but awkward for reads — so you build separate read-optimized projections (CQRS). But you can do CQRS without Event Sourcing (e.g., separate read replicas + write master in PostgreSQL), and you can do Event Sourcing without CQRS (single model that both writes events and queries the same store).
+
+**What EquityCart implements:**
+- Event Sourcing: Yes — MongoDB append-only event log captures all portfolio mutations as immutable facts
+- CQRS: Partially ("CQRS Lite") — the write path goes to PostgreSQL (current state), while the read/audit path queries MongoDB (event timeline + projections). Two different stores optimized for different access patterns, but not a full CQRS architecture (which would have completely separate command and query services with eventual consistency between them)
+
+**Full CQRS would look like:**
+```
+Command Side                              Query Side
+┌─────────────┐    publish    ┌─────────────────────────┐
+│ Write API   │──── events ──▶│ Event Handler           │
+│ (validates  │               │ (updates read model)    │
+│  + appends) │               └───────────┬─────────────┘
+└──────┬──────┘                           │
+       │                                  ▼
+       ▼                        ┌─────────────────────┐
+┌─────────────┐                 │   Read Database      │
+│ Event Store │                 │   (denormalized,     │
+│ (only truth)│                 │    query-optimized)  │
+└─────────────┘                 └─────────────────────┘
+                                          │
+                                          ▼
+                                ┌─────────────────────┐
+                                │   Read API           │
+                                │   (fast queries)     │
+                                └─────────────────────┘
+```
+
+---
+
+#### Advantages & Real-World Usage of Event Sourcing
+
+**Why Event Sourcing matters (what it solves):**
+
+| Problem with CRUD | How Event Sourcing Solves It |
+|-------------------|-----------------------------|
+| Overwritten state — no history of HOW you got here | Every mutation recorded as immutable fact; complete chronology |
+| "What was the portfolio on May 1st?" — impossible | Replay events up to that timestamp (temporal query) |
+| Debugging "why is my holding wrong?" — log archaeology | `/projection/validate` pinpoints exactly which event caused drift |
+| Bug in calculation logic — requires data fix | Fix projection code + replay from scratch — events are immutable facts |
+| Analytics require querying live DB | Query event store directly without touching production state |
+| New requirement needs historical data that wasn't tracked | Write new projection over existing events — data was always there |
+
+**Real-world domains that use Event Sourcing:**
+
+| Domain | Why | Example |
+|--------|-----|---------|
+| Banking/Finance | Regulatory: must explain every balance change | Each debit/credit is an event; account balance = sum of events |
+| E-commerce | Complex order lifecycle needs full audit | Order placed → paid → picked → shipped → delivered → returned |
+| Healthcare | Legally mandated audit trail | Every patient record change must be traceable to who/when/why |
+| Gaming | Replay & undo capability | Chess move history, real-time game state sync, replays |
+| IoT/Telemetry | High-volume append-only sensor data | Temperature readings, GPS pings — never overwritten |
+| Version Control | Git IS event sourcing | Commits are immutable events; working directory is the projection |
+
+**When NOT to use Event Sourcing:**
+- Simple CRUD with no audit requirements (blog posts, user settings)
+- When storage cost of retaining all events outweighs the audit value
+- When your team cannot maintain the added complexity (projections, eventual consistency, event versioning/upcasting)
+- When strict real-time read consistency is required and eventual consistency is not acceptable
+
+**How EquityCart's implementation demonstrates each principle:**
+
+| Principle | Implementation |
+|-----------|---------------|
+| Immutable facts | `PortfolioEvent` document — no update/delete methods exist anywhere |
+| Deterministic replay | `rebuildHoldings()` — same events always produce identical state |
+| Ordering guarantee | `sequenceNumber` — monotonically increasing per user |
+| Graceful degradation | `try-catch` in `PortfolioEventStoreImpl` — MongoDB down ≠ broken trades |
+| Consistency validation | `/projection/validate` — proves events and state store agree |
+| Temporal queries | `?from=...&to=...` filter — query events within any time range |
+| Metadata flexibility | `Map<String, Object>` — each event type carries its own context (orderId, sagaId, reason) |

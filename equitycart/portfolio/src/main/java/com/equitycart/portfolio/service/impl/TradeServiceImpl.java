@@ -6,9 +6,12 @@ import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
 import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.enums.TradeType;
+import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
+import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.TradeService;
 import java.math.BigDecimal;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -35,6 +38,7 @@ public class TradeServiceImpl implements TradeService {
 
   private final PortfolioService portfolioService;
   private final LedgerService ledgerService;
+  private final PortfolioEventStore portfolioEventStore;
 
   /** {@inheritDoc} */
   @Override
@@ -68,6 +72,15 @@ public class TradeServiceImpl implements TradeService {
           price,
           amount,
           holding.getId());
+
+      portfolioEventStore.append(
+          userId,
+          PortfolioEventType.SHARES_PURCHASED,
+          tickerSymbol,
+          qty,
+          price,
+          amount,
+          Map.of("tradeType", "BUY"));
     } else {
       holding = portfolioService.reduceHolding(userId, tickerSymbol, qty);
       ledgerService.recordTransaction(
@@ -85,7 +98,16 @@ public class TradeServiceImpl implements TradeService {
           price,
           amount,
           holding.getId());
+      portfolioEventStore.append(
+          userId,
+          PortfolioEventType.SHARES_SOLD,
+          tickerSymbol,
+          qty,
+          price,
+          amount,
+          Map.of("tradeType", "SELL"));
     }
+
     return holding;
   }
 }

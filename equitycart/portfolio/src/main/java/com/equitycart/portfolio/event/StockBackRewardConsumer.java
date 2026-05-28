@@ -10,6 +10,8 @@ import com.equitycart.ledger.service.api.LedgerService;
 import com.equitycart.marketdata.service.api.MarketDataService;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
+import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
+import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.repository.StockBackRewardRepository;
 import com.equitycart.portfolio.saga.enums.SagaStatus;
 import com.equitycart.portfolio.saga.repository.SellToSpendSagaRepository;
@@ -63,6 +65,7 @@ public class StockBackRewardConsumer {
   private final StockBackRewardRepository stockBackRewardRepository;
   private final LedgerService ledgerService;
   private final SellToSpendSagaRepository sellToSpendSagaRepository;
+  private final PortfolioEventStore portfolioEventStore;
 
   @KafkaListener(
       topics = "order-delivered",
@@ -160,7 +163,18 @@ public class StockBackRewardConsumer {
         stockBackReward -> {
           if (stockBackReward.getStatus().equals(VestingStatus.PENDING)) {
             stockBackReward.setStatus(VestingStatus.CANCELLED);
+
             stockBackRewardRepository.save(stockBackReward);
+
+            portfolioEventStore.append(
+                event.getUserId(),
+                PortfolioEventType.REWARD_CANCELLED,
+                stockBackReward.getTickerSymbol(),
+                stockBackReward.getSharesEarned(),
+                null,
+                null,
+                Map.of("orderId", event.getOrderId()));
+
             log.info(
                 "Cancelled PENDING reward for orderId={}, ticker={}",
                 event.getOrderId(),
@@ -243,6 +257,15 @@ public class StockBackRewardConsumer {
 
     saga.setRefunded(true);
     sellToSpendSagaRepository.save(saga);
+
+    portfolioEventStore.append(
+        saga.getUserId(),
+        PortfolioEventType.REFUND_RESTORED,
+        saga.getTickerSymbol(),
+        saga.getQuantity(),
+        saga.getPricePerShare(),
+        saga.getSaleProceeds(),
+        Map.of("orderId", event.orderId(), "sagaId", saga.getSagaId().toString()));
 
     log.info(
         "Stock refund completed: re-added {} shares of {} at {} for orderId={}",

@@ -2,11 +2,14 @@ package com.equitycart.portfolio.service.impl;
 
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
+import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
+import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.repository.StockBackRewardRepository;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.VestingHelper;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +38,7 @@ public class VestingHelperImpl implements VestingHelper {
   @Lazy @Autowired private PortfolioService portfolioService;
 
   @Autowired private StockBackRewardRepository stockBackRewardRepository;
+  @Autowired private PortfolioEventStore portfolioEventStore;
 
   /**
    * {@inheritDoc}
@@ -50,9 +54,21 @@ public class VestingHelperImpl implements VestingHelper {
     try {
       portfolioService.addOrUpdateHolding(
           reward.getUserId(), reward.getTickerSymbol(), reward.getSharesEarned(), BigDecimal.ZERO);
+
       reward.setStatus(VestingStatus.VESTED);
       reward.setVestedAt(LocalDateTime.now());
+
       stockBackRewardRepository.save(reward);
+
+      portfolioEventStore.append(
+          reward.getUserId(),
+          PortfolioEventType.REWARD_VESTED,
+          reward.getTickerSymbol(),
+          reward.getSharesEarned(),
+          BigDecimal.ZERO,
+          reward.getDollarValue(),
+          Map.of("rewardId", reward.getId()));
+
       logger.info(
           "Vested reward id={} for userId={}, ticker={}, shares={}",
           reward.getId(),

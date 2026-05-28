@@ -11,9 +11,12 @@ import com.equitycart.order.enums.OrderStatus;
 import com.equitycart.order.service.api.OrderService;
 import com.equitycart.portfolio.dto.SellToSpendRequest;
 import com.equitycart.portfolio.dto.SellToSpendResponse;
+import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
+import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.SellToSpendService;
 import java.math.BigDecimal;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -64,6 +67,7 @@ public class SellToSpendServiceImpl implements SellToSpendService {
   private final PortfolioService portfolioService;
   private final LedgerService ledgerService;
   private final OrderService orderService;
+  private final PortfolioEventStore portfolioEventStore;
 
   /** {@inheritDoc} */
   @Override
@@ -107,6 +111,15 @@ public class SellToSpendServiceImpl implements SellToSpendService {
         request.tickerSymbol(),
         userId,
         saleProceeds);
+
+    portfolioEventStore.append(
+        userId,
+        PortfolioEventType.SELL_TO_SPEND,
+        request.tickerSymbol(),
+        request.quantity(),
+        request.pricePerShare(),
+        saleProceeds,
+        Map.of("orderId", request.orderId()));
 
     ledgerService.recordTransaction(
         AccountType.CASH,

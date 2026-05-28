@@ -705,6 +705,83 @@ curl -s http://localhost:8080/api/portfolio/analytics \
   -H "Authorization: Bearer <Token>"
 ```
 
+### Event Sourcing — Portfolio Event Store (MongoDB)
+
+> **Pre-requisites:** MongoDB container running on port 27017.
+> Events are only captured for operations performed AFTER Step 12 was integrated.
+
+```bash
+# ──────────────────────────────────────────────────────────────────────
+# EVENT TIMELINE — all portfolio events for the authenticated user
+# ──────────────────────────────────────────────────────────────────────
+
+# 1. Get full event timeline (ordered by sequenceNumber)
+curl -s http://localhost:8080/api/portfolio/events \
+  -H "Authorization: Bearer <Token>"
+
+# 2. Filter by ticker
+curl -s "http://localhost:8080/api/portfolio/events?ticker=AAPL" \
+  -H "Authorization: Bearer <Token>"
+
+# 3. Filter by time range (ISO-8601 Instant format)
+curl -s "http://localhost:8080/api/portfolio/events?from=2026-05-27T00:00:00Z&to=2026-05-28T00:00:00Z" \
+  -H "Authorization: Bearer <Token>"
+
+# ──────────────────────────────────────────────────────────────────────
+# PROJECTION — rebuild holdings from events (demonstrates event replay)
+# ──────────────────────────────────────────────────────────────────────
+
+# 4. Rebuild portfolio state entirely from events
+curl -s http://localhost:8080/api/portfolio/events/projection \
+  -H "Authorization: Bearer <Token>"
+# Returns: {ticker → {tickerSymbol, quantity, averageBuyPrice}} computed from event replay
+
+# 5. Validate consistency (compare projected vs PostgreSQL state)
+curl -s http://localhost:8080/api/portfolio/events/projection/validate \
+  -H "Authorization: Bearer <Token>"
+# Returns: {ticker → "MATCH" or "MISMATCH: projected=..., actual=..."}
+# Note: pre-Step-12 holdings will show MISMATCH (no historical events)
+
+# ──────────────────────────────────────────────────────────────────────
+# VERIFICATION FLOW — fresh operations for accurate validation
+# ──────────────────────────────────────────────────────────────────────
+
+# 6. Execute a BUY trade (creates SHARES_PURCHASED event)
+curl -s -X POST http://localhost:8080/api/portfolio/trade \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"MSFT","quantity":5,"price":400.00,"tradeType":"BUY"}'
+
+# 7. Execute a SELL trade (creates SHARES_SOLD event)
+curl -s -X POST http://localhost:8080/api/portfolio/trade \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"MSFT","quantity":2,"price":410.00,"tradeType":"SELL"}'
+
+# 8. Check events — should show SHARES_PURCHASED then SHARES_SOLD for MSFT
+curl -s "http://localhost:8080/api/portfolio/events?ticker=MSFT" \
+  -H "Authorization: Bearer <Token>"
+
+# 9. Validate — MSFT should show MATCH (3 shares at weighted avg)
+curl -s http://localhost:8080/api/portfolio/events/projection/validate \
+  -H "Authorization: Bearer <Token>"
+```
+
+### Data Verification — MongoDB Event Store
+
+```bash
+# Connect to MongoDB
+docker exec -it mongodb mongosh
+
+# Inside mongosh:
+use equitycart
+db.portfolio_events.find()                                    # All events
+db.portfolio_events.find({userId: 1}).sort({sequenceNumber: 1})  # User 1 timeline
+db.portfolio_events.find({eventType: "SHARES_PURCHASED"})     # Filter by type
+db.portfolio_events.countDocuments()                           # Total event count
+db.portfolio_events.getIndexes()                              # Verify indexes created
+```
+
 ---
 
 ## Phase 6: Event-Driven Architecture (Kafka + Outbox + DLQ)

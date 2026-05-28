@@ -6,6 +6,8 @@ import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.entity.Portfolio;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
+import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
+import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.repository.HoldingRepository;
 import com.equitycart.portfolio.repository.PortfolioRepository;
 import com.equitycart.portfolio.repository.StockBackRewardRepository;
@@ -15,6 +17,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
@@ -49,6 +52,7 @@ public class PortfolioServiceImpl implements PortfolioService {
   private final HoldingRepository holdingRepository;
   private final StockBackRewardRepository stockBackRewardRepository;
   private final VestingHelper vestingHelper;
+  private final PortfolioEventStore portfolioEventStore;
 
   private static final int retryOptimisticLocking = 3;
 
@@ -184,7 +188,19 @@ public class PortfolioServiceImpl implements PortfolioService {
           userId,
           ticker,
           shares);
-      return stockBackRewardRepository.save(reward);
+
+      StockBackReward savedStockBackReward = stockBackRewardRepository.save(reward);
+
+      portfolioEventStore.append(
+          userId,
+          PortfolioEventType.REWARD_GRANTED,
+          ticker,
+          shares,
+          BigDecimal.ZERO,
+          dollarVal,
+          Map.of("orderId", orderId, "vestingDate", vestingDate.toString()));
+
+      return savedStockBackReward;
     }
   }
 

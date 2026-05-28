@@ -539,8 +539,189 @@ equitycart/portfolio/src/main/java/com/equitycart/portfolio/saga/
 
 ---
 
-## 3. (Placeholder: API Gateway Pattern — coming in later phases)
+## 3. Event Sourcing Pattern
+
+### 3.1 Core Concept
+
+Event Sourcing stores every state change as an immutable event in an append-only log. Instead of overwriting the current state (`UPDATE holdings SET quantity = 5`), you record the fact that caused the change (`SHARES_PURCHASED: qty=5, price=150`). The current state is always derivable by replaying all events from the beginning.
+
+**Traditional CRUD:** State → Overwrite → State (history lost)
+**Event Sourcing:** Event₁ → Event₂ → ... → Eventₙ → replay → Current State
+
+### 3.2 Key Components
+
+| Component | Purpose | EquityCart Implementation |
+|-----------|---------|--------------------------|
+| Event Store | Append-only persistence of events | MongoDB `portfolio_events` collection |
+| Event | Immutable fact with type, data, timestamp, sequence | `PortfolioEvent` @Document |
+| Projection | Function that replays events → read model | `PortfolioProjectionService.rebuildHoldings()` |
+| Sequence Number | Total ordering per aggregate | Per-user monotonic counter |
+
+### 3.3 Event Document Structure
+
+```
+{
+  eventId: UUID (idempotency key),
+  userId: Long (aggregate ID),
+  eventType: "SHARES_PURCHASED",
+  tickerSymbol: "AAPL",
+  quantity: 5.000000,
+  pricePerShare: 150.0000,
+  totalValue: 750.0000,
+  metadata: { tradeType: "BUY" },
+  timestamp: 2026-05-27T12:00:00Z,
+  sequenceNumber: 1
+}
+```
+
+### 3.4 Projection Replay Logic
+
+```
+state = {}
+for each event in order:
+  if event is ADD type (BUY, VEST, COMPENSATE, REFUND):
+    state[ticker].qty += event.qty
+    state[ticker].avg = weighted_average(old, new)
+  if event is REMOVE type (SELL, SELL_TO_SPEND):
+    state[ticker].qty -= event.qty
+    // avg price unchanged on sells
+return state
+```
+
+### 3.5 Dual-Write Architecture (EquityCart Approach)
+
+```
+Service Operation
+    │
+    ├──① PostgreSQL: UPDATE holding (authoritative state)
+    │
+    └──② MongoDB: INSERT event (best-effort audit trail)
+         │
+         └── try-catch: failure logged as WARN, doesn't break ①
+```
+
+**Why dual-write instead of pure event sourcing?**
+- No risky migration of existing PostgreSQL infrastructure
+- Portfolio read operations still hit fast indexed SQL (not replay)
+- Event store adds audit/history without changing core behavior
+- Can validate both stores agree via projection endpoint
+
+**Risk:** Store drift if MongoDB write fails. Mitigated by best-effort semantics — acceptable for audit/analytics, unacceptable for billing/compliance (where you'd use the Outbox Pattern to guarantee event persistence).
+
+### 3.6 Comparison: Event Sourcing vs CRUD vs Outbox
+
+| Aspect | CRUD | Outbox | Event Sourcing |
+|--------|------|--------|----------------|
+| State storage | Current only | Current + outbox events | Events only (state derived) |
+| History | Lost on update | Events have delivery purpose | Full append-only history |
+| Replay | Impossible | Not designed for replay | Core feature |
+| Complexity | Low | Medium | High |
+| Query performance | Direct SQL | Direct SQL | Requires projections |
+| Audit trail | Requires separate logging | Events are transient (deleted after publish) | Built-in and permanent |
+
+### 3.7 Sequence Numbers vs Timestamps
+
+| Strategy | Pros | Cons |
+|----------|------|------|
+| Timestamps | Simple, human-readable | Clock skew, same-millisecond collisions |
+| Auto-increment (DB) | Guaranteed unique | Requires centralized sequence generator |
+| Application sequence | Per-aggregate, gap-detectable | Query before write (slight overhead) |
+| Kafka offset | Natural ordering in streams | Only works within Kafka partitions |
+
+EquityCart uses application-level per-user sequence numbers: lightweight, gap-detectable, and works with any storage backend.
+
+### 3.8 When to Use Event Sourcing
+
+**Use when:**
+- You need a complete audit trail (finance, compliance, healthcare)
+- Temporal queries are required ("portfolio at time T")
+- You want to derive multiple read models from the same event stream
+- Debugging requires reproducing exact state sequences
+
+**Don't use when:**
+- Simple CRUD with no history requirements
+- Performance-critical reads that can't tolerate projection latency
+- The domain has few state changes (overhead isn't justified)
+- Team is unfamiliar with eventual consistency tradeoffs
+
+### 3.9 EquityCart Event Types
+
+| Event | Holding Impact | Triggered By |
+|-------|---------------|--------------|
+| SHARES_PURCHASED | +qty, recalc avg | Manual BUY trade |
+| SHARES_SOLD | -qty, avg unchanged | Manual SELL trade |
+| REWARD_GRANTED | None (informational) | Order delivered → stock-back |
+| REWARD_VESTED | +qty at price=0 | Scheduled vesting job |
+| REWARD_CANCELLED | None (informational) | Order returned |
+| SELL_TO_SPEND | -qty | Saga step 1 / transactional sell |
+| SELL_TO_SPEND_COMPENSATED | +qty (reversal) | Saga compensation |
+| REFUND_RESTORED | +qty (reversal) | Order refund (Kafka) |
+
+### 3.10 Event Sourcing vs CQRS — Relationship & Differences
+
+**They are separate patterns** that complement each other but are independently usable:
+
+| | Event Sourcing | CQRS |
+|--|---|---|
+| **Concern** | How you **store** state (as immutable events) | How you **separate** reads from writes (different models) |
+| **Core question** | "What happened?" (record facts) | "Who needs what shape of data?" (optimized paths) |
+| **Standalone?** | Yes — single store for reads + writes | Yes — read replicas + write master, no events |
+| **Origin** | Martin Fowler (2005), Greg Young (2006) | Greg Young / Bertrand Meyer's CQS (1988) evolved |
+
+**Why they're conflated:** Event Sourcing makes reads awkward (scanning N events per query). So you build separate read-optimized projections — which is CQRS. The two patterns naturally co-occur in production systems, but neither requires the other.
+
+**Spectrum of adoption:**
+
+```
+Simple CRUD ──────── CQRS Only ──────── ES + CQRS Lite ──────── Full ES + CQRS
+(one model,          (read replica       (dual-write:            (event store is
+ one DB)             + write master)      state DB + event log)   sole truth,
+                                                                  all reads from
+                                                                  projections)
+                                              ▲
+                                              │
+                                        EquityCart is HERE
+```
+
+**Full CQRS architecture (for comparison):**
+
+```
+Command Side                              Query Side
+┌─────────────┐    publish    ┌─────────────────────────┐
+│ Write API   │──── events ──▶│ Event Handler           │
+│ (validates  │               │ (updates read model)    │
+│  + appends) │               └───────────┬─────────────┘
+└──────┬──────┘                           │
+       │                                  ▼
+       ▼                        ┌─────────────────────┐
+┌─────────────┐                 │   Read Database      │
+│ Event Store │                 │   (denormalized,     │
+│ (only truth)│                 │    query-optimized)  │
+└─────────────┘                 └─────────────────────┘
+                                          │
+                                          ▼
+                                ┌─────────────────────┐
+                                │   Read API           │
+                                │   (fast queries)     │
+                                └─────────────────────┘
+```
+
+**EquityCart's position (CQRS Lite):**
+- Write path → PostgreSQL `holdings` (current state, fast UPDATE)
+- Read/audit path → MongoDB `portfolio_events` (timeline, replay, temporal queries)
+- Two stores optimized for different access patterns = CQRS principle applied lightly
+- Not full CQRS because PostgreSQL is still the authority (not derived from events)
+
+**When to upgrade from CQRS Lite to Full CQRS:**
+- When you have multiple consumers needing different read shapes (search index, analytics, mobile view)
+- When write throughput is bottlenecked by read queries on the same tables
+- When you need independent scaling of reads vs writes
+- When eventual consistency (100ms–few seconds lag) is acceptable for all read paths
 
 ---
 
-## 4. (Placeholder: Circuit Breaker Pattern — coming in later phases)
+## 4. (Placeholder: API Gateway Pattern — coming in later phases)
+
+---
+
+## 5. (Placeholder: Circuit Breaker Pattern — coming in later phases)

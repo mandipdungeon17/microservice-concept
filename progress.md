@@ -592,7 +592,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 | 9 | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig) | COMPLETE |
 | 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | COMPLETE |
 | 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | COMPLETE |
-| 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | PENDING |
+| 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | COMPLETE |
 | 13 | Notification Service (new module — email/webhook on trade, vesting) | PENDING |
 
 ### Design Completed
