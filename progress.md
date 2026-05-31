@@ -593,7 +593,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 | 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | COMPLETE |
 | 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | COMPLETE |
 | 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | COMPLETE |
-| 13 | Notification Service (new module — email/webhook on trade, vesting) | PENDING |
+| 13 | Notification Service (new module — email/webhook on trade, vesting) | COMPLETE |
 
 ### Design Completed
 - [x] Plan approved: Kafka KRaft (no Zookeeper), event-driven reward granting, outbox pattern, DLQ
@@ -692,6 +692,30 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - Key design: executeSaga() deliberately NOT @Transactional — each step commits independently (eventual consistency)
   - BUILD SUCCESSFUL
 
+- [x] Step 12: Event Sourcing for Portfolio changes — COMPLETE (2026-05-28)
+  - PortfolioEvent MongoDB document (portfolio_events collection) with sequenceNumber for ordering
+  - PortfolioEventType enum: SHARES_PURCHASED, SHARES_SOLD, SELL_TO_SPEND, SELL_TO_SPEND_COMPENSATED, REWARD_VESTED
+  - PortfolioEventStore interface + PortfolioEventStoreImpl: append-only writes with AtomicLong sequence
+  - PortfolioProjectionService: rebuilds holdings entirely from event replay (demonstrates event sourcing projection)
+  - PortfolioEventController: GET /events, GET /events/projection, GET /events/projection/validate
+  - Integrated into TradeServiceImpl, VestingHelperImpl, SellToSpendSagaOrchestrator
+  - E2E tested: event timeline, filtered by ticker/time-range, projection rebuild, consistency validation
+
+- [x] Step 13: Notification Service (Observer Pattern + Strategy Pattern) — COMPLETE (2026-05-31)
+  - New module: notification-service (14 Java files + build.gradle)
+  - commons/event/NotificationEvent record — shared Kafka DTO (userId, notificationType, ticker, qty, price, totalValue, metadata, timestamp)
+  - portfolio/event/NotificationPublisher — fire-and-forget KafkaTemplate.send() to `portfolio-notification` topic
+  - notification/consumer/NotificationConsumer — @KafkaListener (dedicated group: equitycart-notification-group)
+  - Strategy Pattern: NotificationChannelStrategy interface + 3 implementations (logChannel, emailChannel, webhookChannel)
+  - Spring Map<String, Bean> auto-injection for runtime strategy resolution
+  - NotificationDispatcherImpl: resolves channel from config, builds subject/body per event type, invokes strategy, persists audit log
+  - NotificationLog entity + NotificationLogRepository (PostgreSQL audit trail)
+  - NotificationController: GET /api/notifications with optional ?type= filter
+  - 3 enums: NotificationType, NotificationChannel, NotificationStatus
+  - Publishers integrated: TradeServiceImpl (TRADE_EXECUTED), VestingHelperImpl (REWARD_VESTED), SagaOrchestrator (COMPLETED/FAILED via finally block)
+  - application.yml: spring.mail (MailHog localhost:1025), equitycart.notification.channel=LOG, webhook-url, recipient-email
+  - E2E tested: BUY trade → TRADE_EXECUTED notification logged + persisted + queryable via REST API
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -745,3 +769,4 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-20**: Phase 6 COMPLETE — All 8 steps done. Kafka KRaft (Docker), event DTOs, producer (outbox-based), StockBackRewardConsumer, cancellation consumer, Outbox Pattern (atomic dual-write), DLQ (DefaultErrorHandler + DeadLetterPublishingRecoverer). E2E tested: happy path, multi-ticker rewards, return cancellation, idempotency, Kafka CLI. Re-audit passed (14 files). Next: Phase 7 — Microservices Decomposition.
 - **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, __TypeId__ default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).
 - **2026-05-24**: Step 11 done. Saga Orchestrator for Sell-to-Spend: orchestration-based saga with state machine entity, compensating transactions (reverse ledger + re-add shares), @Scheduled timeout detector, lifecycle events via outbox to Kafka. @ConditionalOnProperty toggle between transactional and saga strategies. 7 new files (entity, enum, repo, orchestrator, service, outbox writer, event DTO), 3 files modified. BUILD SUCCESSFUL. Next: test end-to-end.
+- **2026-05-31**: Step 13 done. Notification Service — Observer Pattern (distributed via Kafka Pub/Sub) + Strategy Pattern (pluggable channels). New module: notification-service (14 Java files). NotificationPublisher in portfolio (fire-and-forget KafkaTemplate). 3 channel strategies (Log, Email via MailHog, Webhook via WebClient). NotificationDispatcher resolves channel from config via Spring Map<String, Bean> injection. NotificationLog audit entity. REST API: GET /api/notifications. Integrated into TradeServiceImpl, VestingHelperImpl, SagaOrchestrator. E2E tested: TRADE_EXECUTED notification logged + persisted + queryable. Re-audit: all 16 files have Javadoc + Log4j logger.

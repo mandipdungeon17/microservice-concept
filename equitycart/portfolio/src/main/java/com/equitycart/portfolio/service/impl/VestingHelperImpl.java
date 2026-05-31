@@ -1,7 +1,9 @@
 package com.equitycart.portfolio.service.impl;
 
+import com.equitycart.commons.event.NotificationEvent;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
+import com.equitycart.portfolio.event.NotificationPublisher;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.repository.StockBackRewardRepository;
@@ -39,6 +41,7 @@ public class VestingHelperImpl implements VestingHelper {
 
   @Autowired private StockBackRewardRepository stockBackRewardRepository;
   @Autowired private PortfolioEventStore portfolioEventStore;
+  @Autowired private NotificationPublisher notificationPublisher;
 
   /**
    * {@inheritDoc}
@@ -68,6 +71,19 @@ public class VestingHelperImpl implements VestingHelper {
           BigDecimal.ZERO,
           reward.getDollarValue(),
           Map.of("rewardId", reward.getId()));
+
+      NotificationEvent notificationEvent =
+          new NotificationEvent(
+              reward.getUserId(),
+              "REWARD_VESTED",
+              reward.getTickerSymbol(),
+              reward.getSharesEarned(),
+              BigDecimal.ZERO,
+              reward.getDollarValue(),
+              Map.of("rewardId", reward.getId()),
+              LocalDateTime.now());
+
+      notificationPublisher.publish(notificationEvent);
 
       logger.info(
           "Vested reward id={} for userId={}, ticker={}, shares={}",

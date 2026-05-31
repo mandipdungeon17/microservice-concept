@@ -3,7 +3,15 @@ equitycart:
     strategy: saga    # "transactional" (default) or "saga"
   saga:
     timeout-seconds: 30
+  notification:
+    channel: LOG
+    webhook-url: http://localhost:9999/webhook
+    recipient-email: demo@equitycart.local
+
 spring:
+  mail:
+    host: localhost
+    port: 1025
   profiles:
     active: cdc
   batch:

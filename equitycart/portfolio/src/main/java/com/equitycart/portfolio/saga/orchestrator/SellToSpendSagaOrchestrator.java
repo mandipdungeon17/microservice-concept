@@ -1,5 +1,6 @@
 package com.equitycart.portfolio.saga.orchestrator;
 
+import com.equitycart.commons.event.NotificationEvent;
 import com.equitycart.ledger.enums.AccountType;
 import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
@@ -7,6 +8,7 @@ import com.equitycart.order.dto.UpdateOrderStatusRequest;
 import com.equitycart.order.enums.OrderStatus;
 import com.equitycart.order.service.api.OrderService;
 import com.equitycart.portfolio.dto.SellToSpendRequest;
+import com.equitycart.portfolio.event.NotificationPublisher;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.saga.entity.SellToSpendSaga;
@@ -75,6 +77,7 @@ public class SellToSpendSagaOrchestrator {
   private final SellToSpendSagaRepository sellToSpendSagaRepository;
   private final SagaOutboxWriter sagaOutboxWriter;
   private final PortfolioEventStore portfolioEventStore;
+  private final NotificationPublisher notificationPublisher;
 
   @Value("${equitycart.saga.timeout-seconds:30}")
   private long timeoutSeconds;
@@ -244,6 +247,19 @@ public class SellToSpendSagaOrchestrator {
     saga.setStatus(SagaStatus.COMPLETED);
     savedSaga = sellToSpendSagaRepository.save(saga);
 
+    NotificationEvent notificationEvent =
+        new NotificationEvent(
+            saga.getUserId(),
+            "SELL_TO_SPEND_COMPLETED",
+            saga.getTickerSymbol(),
+            saga.getQuantity(),
+            saga.getPricePerShare(),
+            saga.getSaleProceeds(),
+            Map.of("sagaId", saga.getSagaId().toString(), "orderId", saga.getOrderId().toString()),
+            LocalDateTime.now());
+
+    notificationPublisher.publish(notificationEvent);
+
     sagaOutboxWriter.writeSagaLifecycleEvent(savedSaga, "SAGA_STEP_COMPLETED", "CONFIRM_ORDER");
 
     log.info("Saga step 3 completed: order {} confirmed", saga.getOrderId());
@@ -304,6 +320,19 @@ public class SellToSpendSagaOrchestrator {
           "CRITICAL: compensation failed for sagaId={}, orderId={} — manual intervention required",
           saga.getSagaId(),
           saga.getOrderId());
+    } finally {
+      NotificationEvent notificationEvent =
+          new NotificationEvent(
+              saga.getUserId(),
+              "SELL_TO_SPEND_FAILED",
+              saga.getTickerSymbol(),
+              saga.getQuantity(),
+              saga.getPricePerShare(),
+              saga.getSaleProceeds(),
+              Map.of("sagaId", saga.getSagaId().toString(), "reason", saga.getFailureReason()),
+              LocalDateTime.now());
+
+      notificationPublisher.publish(notificationEvent);
     }
   }
 

@@ -15,24 +15,16 @@ import org.apache.logging.log4j.Logger;
 import org.springframework.stereotype.Service;
 
 /**
- * MongoDB-backed implementation of {@link PortfolioEventStore}. Appends
- * immutable portfolio events
- * to the {@code portfolio_events} collection with monotonically increasing
- * sequence numbers per
+ * MongoDB-backed implementation of {@link PortfolioEventStore}. Appends immutable portfolio events
+ * to the {@code portfolio_events} collection with monotonically increasing sequence numbers per
  * user.
  *
- * <p>
- * Best-effort semantics: all exceptions are caught and logged at WARN level. A
- * MongoDB failure
- * never propagates to the caller, ensuring core portfolio operations
- * (PostgreSQL state) are not
+ * <p>Best-effort semantics: all exceptions are caught and logged at WARN level. A MongoDB failure
+ * never propagates to the caller, ensuring core portfolio operations (PostgreSQL state) are not
  * affected by event store outages.
  *
- * <p>
- * Sequence numbers are derived by querying the latest event for the user and
- * incrementing. Under
- * high concurrency, the unique index on {@code eventId} prevents duplicates
- * while sequence gaps are
+ * <p>Sequence numbers are derived by querying the latest event for the user and incrementing. Under
+ * high concurrency, the unique index on {@code eventId} prevents duplicates while sequence gaps are
  * acceptable (detectable but not harmful for projection replay).
  */
 @Service
@@ -54,28 +46,30 @@ public class PortfolioEventStoreImpl implements PortfolioEventStore {
       Map<String, Object> metadata) {
     try {
       UUID eventId = UUID.randomUUID();
-      Optional<PortfolioEvent> topByUserIdOrderBySequenceNumberDesc = portfolioEventRepository
-          .findTopByUserIdOrderBySequenceNumberDesc(userId);
+      Optional<PortfolioEvent> topByUserIdOrderBySequenceNumberDesc =
+          portfolioEventRepository.findTopByUserIdOrderBySequenceNumberDesc(userId);
 
       if (topByUserIdOrderBySequenceNumberDesc.isEmpty()) {
         log.info("No existing events found for userId: {}. Starting sequence number at 1.", userId);
       }
-      Long sequenceNumber = topByUserIdOrderBySequenceNumberDesc
-          .map(event -> event.getSequenceNumber() + 1)
-          .orElse(1L);
+      Long sequenceNumber =
+          topByUserIdOrderBySequenceNumberDesc
+              .map(event -> event.getSequenceNumber() + 1)
+              .orElse(1L);
 
-      PortfolioEvent portfolioEvent = PortfolioEvent.builder()
-          .eventId(eventId)
-          .userId(userId)
-          .eventType(eventType.name())
-          .tickerSymbol(tickerSymbol)
-          .quantity(quantity)
-          .pricePerShare(pricePerShare)
-          .totalValue(totalValue)
-          .metadata(metadata)
-          .timestamp(Instant.now())
-          .sequenceNumber(sequenceNumber)
-          .build();
+      PortfolioEvent portfolioEvent =
+          PortfolioEvent.builder()
+              .eventId(eventId)
+              .userId(userId)
+              .eventType(eventType.name())
+              .tickerSymbol(tickerSymbol)
+              .quantity(quantity)
+              .pricePerShare(pricePerShare)
+              .totalValue(totalValue)
+              .metadata(metadata)
+              .timestamp(Instant.now())
+              .sequenceNumber(sequenceNumber)
+              .build();
 
       portfolioEventRepository.save(portfolioEvent);
     } catch (Exception e) {

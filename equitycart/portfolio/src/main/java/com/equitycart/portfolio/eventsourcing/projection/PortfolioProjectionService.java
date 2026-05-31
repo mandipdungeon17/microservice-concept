@@ -17,23 +17,15 @@ import org.apache.logging.log4j.Logger;
 import org.springframework.stereotype.Service;
 
 /**
- * Rebuilds portfolio holding state by replaying events from the MongoDB event
- * store. Demonstrates
+ * Rebuilds portfolio holding state by replaying events from the MongoDB event store. Demonstrates
  * the core Event Sourcing concept: current state = f(all past events).
  *
- * <p>
- * The projection applies each event in sequence-number order to an empty state
- * map, computing
- * weighted-average prices for additions and preserving avg price on sells. The
- * result is the
- * portfolio as it would look if derived entirely from the event log —
- * independent of PostgreSQL.
+ * <p>The projection applies each event in sequence-number order to an empty state map, computing
+ * weighted-average prices for additions and preserving avg price on sells. The result is the
+ * portfolio as it would look if derived entirely from the event log — independent of PostgreSQL.
  *
- * <p>
- * Also provides a consistency validation method that compares the projected
- * state against the
- * PostgreSQL holdings, detecting any drift between the two stores (expected for
- * operations that
+ * <p>Also provides a consistency validation method that compares the projected state against the
+ * PostgreSQL holdings, detecting any drift between the two stores (expected for operations that
  * occurred before event sourcing was enabled).
  */
 @Service
@@ -46,7 +38,8 @@ public class PortfolioProjectionService {
   private final HoldingRepository holdingRepository;
 
   public Map<String, ProjectedHoldingResponse> rebuildHoldings(Long userId) {
-    List<PortfolioEvent> events = portfolioEventRepository.findByUserIdOrderBySequenceNumberAsc(userId);
+    List<PortfolioEvent> events =
+        portfolioEventRepository.findByUserIdOrderBySequenceNumberAsc(userId);
     log.info("Rebuilding holdings for userId={} from {} events", userId, events.size());
     Map<String, ProjectedHoldingResponse> map = new HashMap<>();
 
@@ -69,10 +62,11 @@ public class PortfolioProjectionService {
           if (newQty.compareTo(BigDecimal.ZERO) == 0) {
             newAvg = BigDecimal.ZERO;
           } else {
-            newAvg = oldQty
-                .multiply(oldAvg)
-                .add(eventQty.multiply(eventPrice))
-                .divide(newQty, 6, RoundingMode.HALF_UP);
+            newAvg =
+                oldQty
+                    .multiply(oldAvg)
+                    .add(eventQty.multiply(eventPrice))
+                    .divide(newQty, 6, RoundingMode.HALF_UP);
           }
           map.put(ticker, new ProjectedHoldingResponse(ticker, newQty, newAvg));
         }
@@ -108,8 +102,8 @@ public class PortfolioProjectionService {
         userId,
         projected.size(),
         actualHoldings.size());
-    Map<String, Holding> actualByTicker = actualHoldings.stream()
-        .collect(Collectors.toMap(Holding::getTickerSymbol, h -> h));
+    Map<String, Holding> actualByTicker =
+        actualHoldings.stream().collect(Collectors.toMap(Holding::getTickerSymbol, h -> h));
 
     Map<String, String> results = new HashMap<>();
 

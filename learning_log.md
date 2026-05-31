@@ -3628,3 +3628,88 @@ Command Side                              Query Side
 | Consistency validation | `/projection/validate` — proves events and state store agree |
 | Temporal queries | `?from=...&to=...` filter — query events within any time range |
 | Metadata flexibility | `Map<String, Object>` — each event type carries its own context (orderId, sagaId, reason) |
+
+### Step 13: Notification Service — Observer Pattern via Kafka Pub/Sub (2026-05-31)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                  FUNCTIONAL FLOW: Notification Service                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  Portfolio Services (Subjects/Publishers)
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ TradeServiceImpl ─────────── publishes TRADE_EXECUTED            │
+  │ VestingHelperImpl ────────── publishes REWARD_VESTED             │
+  │ SellToSpendSagaOrchestrator ─ publishes SELL_TO_SPEND_COMPLETED  │
+  │                               publishes SELL_TO_SPEND_FAILED     │
+  └────────────────────────────────────┬────────────────────────────┘
+                                       │
+                              NotificationPublisher
+                              (fire-and-forget, try-catch)
+                              kafkaTemplate.send("portfolio-notification", ...)
+                                       │
+                                       ▼
+                          ┌──────────────────────────┐
+                          │  Kafka Topic:             │
+                          │  portfolio-notification   │
+                          └──────────────┬───────────┘
+                                         │
+                                @KafkaListener(groupId="equitycart-notification-group")
+                                         │
+                                         ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │              NotificationConsumer → NotificationDispatcher                 │
+  │                                                                           │
+  │  1. Resolve channel: activeChannel.toLowerCase() + "Channel"              │
+  │  2. Look up from Map<String, NotificationChannelStrategy>                 │
+  │  3. Build subject + body from event type (switch)                         │
+  │  4. strategy.send(userId, subject, body)                                  │
+  │  5. Save NotificationLog (SENT or FAILED)                                 │
+  │                                                                           │
+  │              Strategy Pattern (runtime channel selection):                 │
+  │              ┌───────────────┬───────────────┬───────────────┐            │
+  │              ▼               ▼               ▼               │            │
+  │       logChannel      emailChannel    webhookChannel          │            │
+  │       (Log4j INFO)    (JavaMailSender) (WebClient POST)       │            │
+  │                        ↓                ↓                     │            │
+  │                   MailHog SMTP      HTTP endpoint              │            │
+  │                   localhost:1025    configurable URL            │            │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  REST API:
+  GET /api/notifications            → all notifications for user (most recent first)
+  GET /api/notifications?type=X     → filtered by NotificationType
+
+─────────────────────────────────────────────────────────────────────────────
+
+  Pattern Evolution: Observer → Pub/Sub
+
+  GoF Observer (in-memory)              Kafka Pub/Sub (distributed)
+  ┌──────────────────────────┐          ┌──────────────────────────────┐
+  │ Subject.observers = [A,B]│          │ Producer knows NO consumers  │
+  │ Subject.notify() → A,B   │    →     │ Kafka topic retains events   │
+  │ Same JVM, synchronous    │          │ Consumer subscribes, async   │
+  │ Observer failure blocks   │          │ Failure doesn't affect sender│
+  └──────────────────────────┘          └──────────────────────────────┘
+```
+
+**114. Observer Pattern (Distributed) — Decoupled Event-Driven Notifications (2026-05-31)**
+
+The Observer Pattern (GoF, 1994) defines a one-to-many dependency: when one object (subject) changes state, all dependents (observers) are notified. In its original form, the subject maintains a `List<Observer>` and calls `observer.update()` directly — same JVM, synchronous, tightly coupled. Kafka Pub/Sub is this pattern evolved for distributed systems: the message broker decouples publishers from subscribers, adds persistence (events survive consumer downtime), enables replay (offset reset), and supports multiple independent consumer groups. The publisher (TradeServiceImpl) has zero knowledge of who or what consumes its events — adding a new observer (SMS service, analytics pipeline) requires zero changes to the publisher.
+
+**115. Strategy Pattern — Runtime Channel Selection via Spring Bean Map (2026-05-31)**
+
+The Strategy Pattern (GoF) encapsulates a family of algorithms behind a common interface, making them interchangeable at runtime. Here: `NotificationChannelStrategy` defines `send(userId, subject, body)`, with three implementations (LogChannel, EmailChannel, WebhookChannel). Spring's `Map<String, BeanType>` auto-injection collects all beans implementing the interface, keyed by `@Component("name")`. The dispatcher resolves the active strategy from config (`equitycart.notification.channel=LOG` → bean name `logChannel`) — no if-else chain, no factory class. Adding a new channel (e.g., SMS) means: write one new `@Component("smsChannel")` class, update config. Zero changes to dispatcher.
+
+**116. Fire-and-Forget vs Outbox — When Guaranteed Delivery Isn't Required (2026-05-31)**
+
+The Outbox Pattern (Step 6) guarantees event delivery via same-transaction persistence + async relay. Notifications use simpler fire-and-forget KafkaTemplate.send(): if Kafka is down, the notification is silently lost. Why this is acceptable: (1) notifications are not business-critical — no data is corrupted if missed; (2) user can check the API for status; (3) the NotificationLog provides audit even if delivery fails at the channel level. Reserve Outbox for events where loss means data inconsistency (order→reward flow). Use fire-and-forget for low-severity side-effects.
+
+**Q103: "How does Spring auto-inject all beans of an interface into a Map?" (2026-05-31)**
+A: When you declare `Map<String, SomeInterface>` as a constructor parameter, Spring scans for all beans implementing that interface and injects them keyed by their bean name. With `@Component("logChannel")`, the key is `"logChannel"`. This is the same mechanism used for `List<SomeInterface>` (injects all implementations as a list). It's the canonical Spring way to implement the Strategy Pattern without manual factory classes.
+
+**Q104: "Why is NotificationPublisher in the portfolio module, not the notification module?" (2026-05-31)**
+A: The publisher is the "subject" in the Observer Pattern — it lives where the events originate. Portfolio services (TradeServiceImpl, VestingHelper) need to call `publisher.publish()` directly. If the publisher were in the notification module, portfolio would need a dependency on notification-service, creating a circular dependency (notification already depends on commons, and portfolio is the event source). Keeping the publisher in portfolio maintains clean dependency direction: portfolio → Kafka → notification.
+
+**Q105: "What happens if the active channel bean name doesn't match any registered strategy?" (2026-05-31)**
+A: `notificationChannelStrategies.get(beanName)` returns `null`, and the subsequent `strategy.send()` throws `NullPointerException`. This is caught by the outer try-catch in the dispatcher, which logs the error and persists a FAILED NotificationLog entry. To guard against misconfiguration, you could add a null-check with a fallback to LogChannelStrategy — but in practice, the config value is validated at startup time.

@@ -1097,3 +1097,136 @@ SELECT * FROM stock_back_rewards WHERE user_id = 1;
 SELECT * FROM ledger_entries ORDER BY created_at DESC LIMIT 10;
 SELECT * FROM orders WHERE user_id = 1 ORDER BY created_at DESC;
 ```
+
+---
+
+## Phase 7: Notification Service (Observer Pattern via Kafka + Strategy Pattern)
+
+> **Pre-requisites:** Kafka container running, app started.
+> Notifications are published as a side-effect of trades, vesting, and saga flows.
+> Default channel: `LOG` (console output). Switch via `equitycart.notification.channel` property.
+
+### Docker — MailHog (required for EMAIL channel testing)
+
+```bash
+# Start MailHog (SMTP trap: catches all outgoing mail in a web UI)
+docker run -d \
+  --name mailhog \
+  -p 1025:1025 \
+  -p 8025:8025 \
+  mailhog/mailhog
+
+# SMTP on port 1025 (Spring Mail connects here)
+# Web UI on port 8025 (view caught emails in browser)
+# Open http://localhost:8025 to see trapped emails
+```
+
+### Trigger Notifications (via existing flows)
+
+```bash
+# ──────────────────────────────────────────────────────────────────────
+# 1. TRADE_EXECUTED notification — execute a BUY or SELL trade
+# ──────────────────────────────────────────────────────────────────────
+curl -s -X POST http://localhost:8080/api/portfolio/trade \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"MSFT","quantity":3,"price":420.00,"tradeType":"BUY"}'
+# → Check console for: [NOTIFICATION] userId=1, subject=Trade Executed: ...
+
+# ──────────────────────────────────────────────────────────────────────
+# 2. REWARD_VESTED notification — wait for vesting scheduler (60s cycle)
+# ──────────────────────────────────────────────────────────────────────
+# Pre-req: deliver an order so a PENDING reward exists, wait >30 days (or manually adjust vestingDate in DB)
+# UPDATE stock_back_rewards SET vesting_date = NOW() - INTERVAL '1 day' WHERE status = 'PENDING';
+# Wait 60s for scheduler → notification appears in console/email
+
+# ──────────────────────────────────────────────────────────────────────
+# 3. SELL_TO_SPEND_COMPLETED notification — run successful saga
+# ──────────────────────────────────────────────────────────────────────
+# (Requires saga mode: equitycart.sell-to-spend.strategy=saga)
+curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":5,"pricePerShare":200.00,"orderId":<orderId>}'
+# → SELL_TO_SPEND_COMPLETED notification dispatched
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. SELL_TO_SPEND_FAILED notification — trigger saga compensation
+# ──────────────────────────────────────────────────────────────────────
+# Sell more shares than owned (step 1 fails) — or use an already-used orderId for step 3 failure
+curl -s -X POST http://localhost:8080/api/portfolio/sell-to-spend \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <Token>" \
+  -d '{"tickerSymbol":"AAPL","quantity":9999,"pricePerShare":200.00,"orderId":<orderId>}'
+# → SELL_TO_SPEND_FAILED notification dispatched in compensate() finally block
+```
+
+### Query Notification History (REST API)
+
+```bash
+# Get all notifications for authenticated user (most recent first)
+curl -s http://localhost:8080/api/notifications \
+  -H "Authorization: Bearer <Token>"
+
+# Filter by type
+curl -s "http://localhost:8080/api/notifications?type=TRADE_EXECUTED" \
+  -H "Authorization: Bearer <Token>"
+
+curl -s "http://localhost:8080/api/notifications?type=REWARD_VESTED" \
+  -H "Authorization: Bearer <Token>"
+
+curl -s "http://localhost:8080/api/notifications?type=SELL_TO_SPEND_COMPLETED" \
+  -H "Authorization: Bearer <Token>"
+
+curl -s "http://localhost:8080/api/notifications?type=SELL_TO_SPEND_FAILED" \
+  -H "Authorization: Bearer <Token>"
+```
+
+### Kafka Topic Verification
+
+```bash
+# Consume from portfolio-notification topic (see published events)
+docker exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --topic portfolio-notification \
+  --from-beginning \
+  --bootstrap-server localhost:9092
+
+# Check consumer group lag
+docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --describe --group equitycart-notification-group \
+  --bootstrap-server localhost:9092
+```
+
+### Switch Notification Channel
+
+```yaml
+# In application.yml — change channel and restart:
+equitycart:
+  notification:
+    channel: EMAIL     # or WEBHOOK or LOG
+```
+
+```bash
+# After switching to EMAIL, execute a trade, then check MailHog:
+# Open http://localhost:8025 → email should appear
+
+# After switching to WEBHOOK, execute a trade, check webhook receiver logs
+# (Start a simple listener: python -m http.server 9999, or use webhook.site)
+```
+
+### Data Verification — PostgreSQL (notification_logs table)
+
+```bash
+# Connect to PostgreSQL
+docker exec -it postgres psql -U postgres -d equitycart
+
+# Inside psql:
+SELECT id, user_id, notification_type, notification_channel, notification_status, subject, created_at
+  FROM notification_logs ORDER BY created_at DESC;
+
+# Count by status
+SELECT notification_status, COUNT(*) FROM notification_logs GROUP BY notification_status;
+
+# Count by type
+SELECT notification_type, COUNT(*) FROM notification_logs GROUP BY notification_type;
+```

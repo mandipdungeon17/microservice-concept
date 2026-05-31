@@ -1,16 +1,19 @@
 package com.equitycart.portfolio.service.impl;
 
+import com.equitycart.commons.event.NotificationEvent;
 import com.equitycart.commons.exception.InvalidStatusTransitionException;
 import com.equitycart.ledger.enums.AccountType;
 import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
 import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.enums.TradeType;
+import com.equitycart.portfolio.event.NotificationPublisher;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.TradeService;
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
@@ -39,6 +42,7 @@ public class TradeServiceImpl implements TradeService {
   private final PortfolioService portfolioService;
   private final LedgerService ledgerService;
   private final PortfolioEventStore portfolioEventStore;
+  private final NotificationPublisher notificationPublisher;
 
   /** {@inheritDoc} */
   @Override
@@ -98,6 +102,7 @@ public class TradeServiceImpl implements TradeService {
           price,
           amount,
           holding.getId());
+
       portfolioEventStore.append(
           userId,
           PortfolioEventType.SHARES_SOLD,
@@ -107,6 +112,19 @@ public class TradeServiceImpl implements TradeService {
           amount,
           Map.of("tradeType", "SELL"));
     }
+
+    NotificationEvent notificationEvent =
+        new NotificationEvent(
+            userId,
+            "TRADE_EXECUTED",
+            tickerSymbol,
+            qty,
+            price,
+            amount,
+            Map.of("tradeType", type.name()),
+            LocalDateTime.now());
+
+    notificationPublisher.publish(notificationEvent);
 
     return holding;
   }
