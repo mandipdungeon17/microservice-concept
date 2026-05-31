@@ -3713,3 +3713,398 @@ A: The publisher is the "subject" in the Observer Pattern — it lives where the
 
 **Q105: "What happens if the active channel bean name doesn't match any registered strategy?" (2026-05-31)**
 A: `notificationChannelStrategies.get(beanName)` returns `null`, and the subsequent `strategy.send()` throws `NullPointerException`. This is caught by the outer try-catch in the dispatcher, which logs the error and persists a FAILED NotificationLog entry. To guard against misconfiguration, you could add a null-check with a fallback to LogChannelStrategy — but in practice, the config value is validated at startup time.
+
+---
+
+### Debug Mode: WebClient (Webhook) and Email (JavaMailSender) — Full Request Lifecycle (2026-05-31)
+
+These walkthroughs trace the complete path a notification takes from the moment a portfolio service publishes an event through to the final HTTP POST (webhook) or SMTP delivery (email). Every class and method boundary is annotated with what happens internally at the framework level.
+
+#### Scenario: User executes a BUY trade for 10 shares of AAPL at $150
+
+---
+
+#### Part A: Common Path (Both Channels Share This)
+
+```
+STEP 1: TradeServiceImpl.executeTrade() completes successfully
+─────────────────────────────────────────────────────────────────────────────
+  What just happened: holding updated, ledger entries written, event store appended.
+  Now the last line of executeTrade() calls:
+
+    notificationPublisher.publish(new NotificationEvent(
+        userId,                          // 42L
+        "TRADE_EXECUTED",                // String (not enum — avoids circular dep)
+        "AAPL",                          // tickerSymbol
+        BigDecimal.valueOf(10),          // quantity
+        BigDecimal.valueOf(150),         // pricePerShare
+        BigDecimal.valueOf(1500),        // totalValue (qty × price)
+        Map.of("tradeType", "BUY"),     // metadata
+        LocalDateTime.now()             // timestamp
+    ));
+
+  IMPORTANT: This call is INSIDE the @Transactional method but AFTER all DB work.
+  If the publish fails (catch block), the DB transaction still commits — by design.
+  Notifications are fire-and-forget side effects.
+
+STEP 2: NotificationPublisher.publish(event)
+─────────────────────────────────────────────────────────────────────────────
+  Location: portfolio module → com.equitycart.portfolio.event.NotificationPublisher
+
+  kafkaTemplate.send("portfolio-notification", event.userId().toString(), event)
+              │              │                        │                    │
+              │              │                        │                    └─ Value: the record (serialized to JSON)
+              │              │                        └─ Key: "42" (String)
+              │              └─ Topic name
+              └─ Spring's KafkaTemplate<String, Object>
+
+  What happens inside KafkaTemplate.send():
+  1. JsonSerializer converts the NotificationEvent record to JSON bytes:
+     {"userId":42,"notificationType":"TRADE_EXECUTED","tickerSymbol":"AAPL",
+      "quantity":10,"pricePerShare":150,"totalValue":1500,
+      "metadata":{"tradeType":"BUY"},"timestamp":"2026-05-31T14:30:00"}
+  2. StringSerializer converts key "42" to UTF-8 bytes
+  3. Partitioner uses murmur2(keyBytes) % numPartitions → consistent partition for userId 42
+     (all notifications for user 42 land on the same partition → ordered processing)
+  4. The message is buffered in the producer's accumulator (batch.size=16384 bytes by default)
+  5. Kafka producer's sender thread flushes the batch to the broker
+  6. Broker writes to partition log, sends ACK back (acks=1 by default in Spring Kafka)
+  7. KafkaTemplate returns a CompletableFuture<SendResult> — but we don't await it (fire-and-forget)
+
+  If ANY of steps 4-6 fail → catch block logs WARN, returns. Trade already succeeded.
+
+STEP 3: Kafka Broker — Message Persisted in Topic
+─────────────────────────────────────────────────────────────────────────────
+  The message now sits in the "portfolio-notification" topic's partition log.
+  It has an offset (incrementing integer), a timestamp, the key, and the JSON value.
+  The message stays until retention period expires (default 7 days).
+
+STEP 4: NotificationConsumer.handleNotificationEvent(event)
+─────────────────────────────────────────────────────────────────────────────
+  Location: notification module → com.equitycart.notification.consumer.NotificationConsumer
+
+  Spring Kafka's listener container (KafkaMessageListenerContainer) runs in a
+  background thread. On each poll cycle (max.poll.interval.ms=300s by default):
+  1. ConsumerNetworkClient sends FETCH request to broker for partition(s) assigned
+  2. Broker returns batch of ConsumerRecords
+  3. For each record, the container invokes our @KafkaListener method
+
+  Deserialization:
+  - The consumer is configured with JsonDeserializer<NotificationEvent>
+  - The @KafkaListener property: spring.json.value.default.type=com.equitycart.commons.event.NotificationEvent
+    tells the deserializer "assume this class" even without a __TypeId__ header
+  - Jackson ObjectMapper reads the JSON bytes → constructs NotificationEvent record
+  - If deserialization fails → record goes to DLT (Dead Letter Topic) after retries
+
+  After successful deserialization:
+    log.info("Received notification event: type=TRADE_EXECUTED, userId=42, ticker=AAPL")
+    notificationDispatcher.dispatch(event);
+
+STEP 5: NotificationDispatcherImpl.dispatch(event)
+─────────────────────────────────────────────────────────────────────────────
+  Location: notification module → com.equitycart.notification.service.impl.NotificationDispatcherImpl
+
+  5a. Resolve channel strategy:
+      activeChannel = "WEBHOOK"  (from application.yml: equitycart.notification.channel)
+      beanName = "WEBHOOK".toLowerCase() + "Channel" = "webhookChannel"
+      strategy = notificationChannelStrategies.get("webhookChannel")
+                 ↑ This Map was injected by Spring at startup — contains:
+                   {"logChannel" → LogChannelStrategy,
+                    "emailChannel" → EmailChannelStrategy,
+                    "webhookChannel" → WebhookChannelStrategy}
+
+  5b. Build subject and body (switch on event.notificationType()):
+      subject = "Trade Executed: Executed 10 shares of AAPL"
+      body    = "Your trade for 10 shares of AAPL at $150 has been executed."
+
+  5c. Invoke the strategy:
+      strategy.send(42L, subject, body);
+      ↓ ↓ ↓  (this is where the paths diverge — see Part B or Part C below)
+```
+
+---
+
+#### Part B: Webhook Channel — WebClient HTTP POST
+
+```
+STEP 6-WEBHOOK: WebhookChannelStrategy.send(42L, subject, body)
+─────────────────────────────────────────────────────────────────────────────
+  Location: com.equitycart.notification.service.channel.impl.WebhookChannelStrategy
+
+  Field values (injected at startup):
+    webClientBuilder → Spring's auto-configured WebClient.Builder bean
+    webhookUrl → "http://localhost:9999/webhook"  (from application.yml)
+
+  6a. Build the JSON payload:
+      payload = {
+        "userId": 42,
+        "subject": "Trade Executed: Executed 10 shares of AAPL",
+        "body": "Your trade for 10 shares of AAPL at $150 has been executed.",
+        "timestamp": 1748700600000   // System.currentTimeMillis()
+      }
+
+  6b. Create and execute the HTTP request:
+      webClientBuilder            // Spring WebClient.Builder (pre-configured with defaults)
+        .build()                  // Creates a WebClient instance (lightweight, can build many)
+        .post()                   // HTTP method = POST → returns WebClient.RequestBodyUriSpec
+        .uri(webhookUrl)          // "http://localhost:9999/webhook" → resolves to URI
+        .bodyValue(payload)       // Serializes Map<String,Object> → JSON via Jackson
+                                  // Sets Content-Type: application/json automatically
+        .retrieve()               // Initiates the exchange, returns ResponseSpec
+        .toBodilessEntity()       // We don't care about response body → Mono<ResponseEntity<Void>>
+        .block();                 // BLOCKS the calling thread until HTTP response arrives
+                                  // (synchronous from dispatcher's perspective)
+
+  WHAT HAPPENS INSIDE (Reactor Netty under the hood):
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │ 1. Netty Bootstrap creates an NioSocketChannel                       │
+  │ 2. TCP connect to localhost:9999 (timeout from HttpClient config)    │
+  │ 3. HTTP/1.1 request written to channel:                              │
+  │    POST /webhook HTTP/1.1                                            │
+  │    Host: localhost:9999                                               │
+  │    Content-Type: application/json                                     │
+  │    Content-Length: 187                                                │
+  │                                                                      │
+  │    {"userId":42,"subject":"Trade Executed: ...","body":"...","timestamp":...}
+  │                                                                      │
+  │ 4. Netty event loop reads response from socket buffer                │
+  │ 5. Response decoded → 200 OK (or 4xx/5xx)                           │
+  │ 6. .block() releases the waiting thread with the ResponseEntity      │
+  └──────────────────────────────────────────────────────────────────────┘
+
+  WHY WebClient INSTEAD OF RestTemplate?
+  ─────────────────────────────────────
+  RestTemplate (synchronous) → 1 thread per request, blocks on I/O
+  WebClient (reactive)       → event-loop model, non-blocking under the hood
+  Even with .block() at the boundary, WebClient uses Netty's efficient I/O model.
+  If we later need async (fire 10 webhooks in parallel), we drop .block() and
+  compose with Mono.zip() — no code rewrite needed.
+
+  WHY .block() HERE?
+  ──────────────────
+  The dispatcher needs to know whether the send succeeded BEFORE saving the
+  NotificationLog status (SENT vs FAILED). If we went fully reactive
+  (subscribe-and-forget), we'd lose the ability to catch exceptions and
+  mark the log entry as FAILED. The .block() gives us synchronous
+  error-handling semantics while keeping the non-blocking I/O underneath.
+
+  FAILURE SCENARIOS:
+  ─────────────────
+  a) Connection refused (nothing listening on port 9999):
+     → Netty throws io.netty.channel.ConnectTimeoutException or
+       java.net.ConnectException: Connection refused
+     → Caught by outer catch(Exception e)
+     → log.warn("Failed to send webhook notification for userId: 42, subject: ...")
+     → Control returns to dispatcher, which saves FAILED NotificationLog
+
+  b) Timeout (server accepts connection but never responds):
+     → Reactor signals TimeoutException after response-timeout (from HttpClient config)
+     → Same catch path → FAILED log
+
+  c) Server returns 4xx/5xx:
+     → WebClient.retrieve() throws WebClientResponseException
+     → Same catch path → FAILED log
+
+  d) JSON serialization fails (impossible for Map<String,Object> with primitives):
+     → Would be caught at .bodyValue() → same path
+```
+
+---
+
+#### Part C: Email Channel — JavaMailSender + SMTP (MailHog)
+
+```
+STEP 6-EMAIL: EmailChannelStrategy.send(42L, subject, body)
+─────────────────────────────────────────────────────────────────────────────
+  Location: com.equitycart.notification.service.channel.impl.EmailChannelStrategy
+
+  Field values (injected at startup):
+    javaMailSender → auto-configured by Spring Boot's spring-boot-starter-mail
+                     (backed by JavaMailSenderImpl which wraps javax.mail.Session)
+    recipientEmail → "demo@equitycart.local"  (from application.yml)
+    senderEmail → "noreply@equitycart.local"  (default value in @Value)
+
+  6a. Create the message object:
+      SimpleMailMessage message = new SimpleMailMessage();
+      message.setFrom("noreply@equitycart.local");
+      message.setTo("demo@equitycart.local");
+      message.setSubject("Trade Executed: Executed 10 shares of AAPL");
+      message.setText("Your trade for 10 shares of AAPL at $150 has been executed.");
+
+  6b. Send via JavaMailSender:
+      javaMailSender.send(message);
+
+  WHAT HAPPENS INSIDE JavaMailSender.send():
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ 1. JavaMailSenderImpl creates a MimeMessage from the SimpleMailMessage    │
+  │    (internally: MimeMessage wraps JavaMail's javax.mail.internet.*)      │
+  │                                                                          │
+  │ 2. Opens SMTP connection (Transport.connect()):                          │
+  │    - Creates TCP socket to localhost:1025 (spring.mail.host + port)      │
+  │    - SMTP handshake:                                                     │
+  │      Client: EHLO localhost                                              │
+  │      Server: 250-mailhog Hello localhost                                 │
+  │      Server: 250 PIPELINING                                              │
+  │                                                                          │
+  │ 3. SMTP MAIL FROM command:                                               │
+  │      Client: MAIL FROM:<noreply@equitycart.local>                        │
+  │      Server: 250 Ok                                                      │
+  │                                                                          │
+  │ 4. SMTP RCPT TO command:                                                 │
+  │      Client: RCPT TO:<demo@equitycart.local>                             │
+  │      Server: 250 Ok                                                      │
+  │                                                                          │
+  │ 5. SMTP DATA command:                                                    │
+  │      Client: DATA                                                        │
+  │      Server: 354 End data with <CR><LF>.<CR><LF>                         │
+  │      Client: From: noreply@equitycart.local                              │
+  │              To: demo@equitycart.local                                    │
+  │              Subject: Trade Executed: Executed 10 shares of AAPL          │
+  │              Date: Sat, 31 May 2026 14:30:00 +0000                       │
+  │              Content-Type: text/plain; charset=UTF-8                      │
+  │                                                                          │
+  │              Your trade for 10 shares of AAPL at $150 has been executed.  │
+  │              .                                                            │
+  │      Server: 250 Ok: queued                                              │
+  │                                                                          │
+  │ 6. SMTP QUIT:                                                            │
+  │      Client: QUIT                                                        │
+  │      Server: 221 Bye                                                     │
+  │                                                                          │
+  │ 7. TCP connection closed                                                 │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  MailHog (dev SMTP trap):
+  ───────────────────────
+  In production: SMTP server would relay the email to the recipient's mail server.
+  In dev: MailHog accepts ALL emails on port 1025 but never delivers them.
+  Instead, it stores them in memory and displays them in a web UI at http://localhost:8025.
+  This lets you verify email content without real delivery infrastructure.
+
+  AUTOCONFIGURATION TRACE:
+  ────────────────────────
+  Spring Boot's MailSenderAutoConfiguration triggers when spring-boot-starter-mail is
+  on the classpath. It reads spring.mail.* properties and creates:
+    1. JavaMailSenderImpl bean with host=localhost, port=1025
+    2. Internally creates javax.mail.Session with mail.smtp.host=localhost, mail.smtp.port=1025
+    3. No auth configured (MailHog doesn't require it)
+
+  WHY SimpleMailMessage (NOT MimeMessage)?
+  ────────────────────────────────────────
+  SimpleMailMessage = plain-text only, no attachments, no HTML.
+  MimeMessage = full MIME support (HTML body, inline images, attachments, multipart).
+  For notifications (short text alerts), SimpleMailMessage is sufficient and simpler.
+  If we needed rich HTML emails (templates, logos), we'd use MimeMessageHelper + Thymeleaf.
+
+  FAILURE SCENARIOS:
+  ─────────────────
+  a) MailHog not running (connection refused on port 1025):
+     → javax.mail.MessagingException: Could not connect to SMTP host: localhost, port: 1025
+     → Caught by catch(Exception e)
+     → log.warn("Failed to send email notification to userId 42: Could not connect...")
+     → Control returns to dispatcher → FAILED NotificationLog saved
+
+  b) MailHog rejects the message (unlikely in dev, possible in prod SMTP):
+     → javax.mail.SendFailedException: Invalid Addresses
+     → Same catch path → FAILED log
+
+  c) Network timeout (SMTP server hangs):
+     → Blocks until javax.mail default socket timeout (infinite by default!)
+     → In production, configure: spring.mail.properties.mail.smtp.timeout=5000
+     → For MailHog (local), not a practical concern
+```
+
+---
+
+#### Part D: Back in Dispatcher (After Channel Strategy Returns)
+
+```
+STEP 7: NotificationDispatcherImpl — Persist Audit Log
+─────────────────────────────────────────────────────────────────────────────
+  If strategy.send() returned normally (no exception):
+
+    NotificationLog entry = NotificationLog.builder()
+        .userId(42L)
+        .notificationType(NotificationType.TRADE_EXECUTED)    // enum for DB
+        .notificationChannel(NotificationChannel.WEBHOOK)     // or EMAIL
+        .notificationStatus(NotificationStatus.SENT)
+        .subject("Trade Executed: Executed 10 shares of AAPL")
+        .body("Your trade for 10 shares of AAPL at $150 has been executed.")
+        .metadata("{\"tradeType\":\"BUY\"}")                  // JSON string
+        .build();
+
+    notificationLogRepository.save(entry);
+    → Hibernate: INSERT INTO notification_log (user_id, notification_type, channel, status,
+                 subject, body, metadata, created_at, updated_at) VALUES (42, 'TRADE_EXECUTED',
+                 'WEBHOOK', 'SENT', '...', '...', '{"tradeType":"BUY"}', now(), now())
+
+  If strategy.send() threw an exception (caught in outer try-catch):
+    → Builds a FAILED NotificationLog with errorMessage = e.getMessage()
+    → notificationLogRepository.save(failedEntry);
+
+  RESULT: Every notification attempt (success or failure) is persisted.
+  Queryable via: GET /api/notifications → returns full history for the user.
+
+STEP 8: Consumer Offset Commit
+─────────────────────────────────────────────────────────────────────────────
+  After handleNotificationEvent() returns without throwing:
+  Spring Kafka's listener container commits the consumer offset for this record.
+  (AckMode.BATCH by default — offset committed after poll batch completes)
+  This means: if the app crashes BEFORE offset commit, the message is re-delivered
+  on restart (at-least-once semantics). The NotificationLog provides dedup capability
+  if needed (check for existing log with same userId + type + timestamp).
+```
+
+---
+
+#### Summary: Complete Lifecycle for WEBHOOK Channel
+
+```
+TradeServiceImpl.executeTrade()
+  └─→ NotificationPublisher.publish(event)
+       └─→ KafkaTemplate.send("portfolio-notification", "42", event)
+            └─→ [Kafka Broker: partition log]
+                 └─→ NotificationConsumer.handleNotificationEvent(event)
+                      └─→ NotificationDispatcherImpl.dispatch(event)
+                           ├─ resolve "webhookChannel" from Map
+                           ├─ build subject + body (switch)
+                           └─→ WebhookChannelStrategy.send(42, subject, body)
+                                └─→ WebClient.post().uri("http://localhost:9999/webhook")
+                                     .bodyValue({userId, subject, body, timestamp})
+                                     .retrieve().toBodilessEntity().block()
+                                     └─→ [Netty: TCP → HTTP POST → response]
+                           └─ notificationLogRepository.save(SENT)
+```
+
+#### Summary: Complete Lifecycle for EMAIL Channel
+
+```
+TradeServiceImpl.executeTrade()
+  └─→ NotificationPublisher.publish(event)
+       └─→ KafkaTemplate.send("portfolio-notification", "42", event)
+            └─→ [Kafka Broker: partition log]
+                 └─→ NotificationConsumer.handleNotificationEvent(event)
+                      └─→ NotificationDispatcherImpl.dispatch(event)
+                           ├─ resolve "emailChannel" from Map
+                           ├─ build subject + body (switch)
+                           └─→ EmailChannelStrategy.send(42, subject, body)
+                                └─→ SimpleMailMessage(from, to, subject, text)
+                                     └─→ javaMailSender.send(message)
+                                          └─→ [SMTP: EHLO → MAIL FROM → RCPT TO → DATA → QUIT]
+                                               └─→ [MailHog: stores email, visible at :8025]
+                           └─ notificationLogRepository.save(SENT)
+```
+
+**117. WebClient vs RestTemplate — When to Choose Which (2026-05-31)**
+
+WebClient (Spring WebFlux, since Spring 5.0) is the modern replacement for RestTemplate (Spring 3.0, now in maintenance mode). Key differences: (1) RestTemplate creates a new thread per request (thread-per-connection model) — under 100 concurrent HTTP calls, threads exhaust; (2) WebClient uses Netty's event loop — a small pool of threads handles thousands of connections via non-blocking I/O; (3) WebClient returns Mono/Flux (reactive types) — you can compose parallel calls with Mono.zip(), add timeouts with .timeout(), retry with .retryWhen(), all declaratively; (4) RestTemplate blocks the calling thread on every call — no composition possible without manual threading. Even when you call .block() on WebClient (as we do in WebhookChannelStrategy), the underlying I/O is non-blocking — the block happens at your boundary, not at the network layer. In EquityCart, WebClient is used for both the Alpha Vantage client (fully reactive with Mono) and webhooks (reactive I/O with .block() at boundary for synchronous dispatch semantics).
+
+**118. JavaMailSender and the SMTP Protocol — What Happens on the Wire (2026-05-31)**
+
+JavaMailSender is Spring's abstraction over the JavaMail API (javax.mail / jakarta.mail). When you call `javaMailSender.send(message)`, Spring converts the SimpleMailMessage to a MimeMessage, opens a TCP socket to the SMTP server (host:port from config), and performs the SMTP protocol handshake: EHLO → MAIL FROM → RCPT TO → DATA → content → QUIT. Each command gets a numeric response code (250=OK, 354=ready for data, 550=rejected). The entire exchange is synchronous and blocking — the thread waits until the SMTP server accepts or rejects. In production, you'd configure TLS (STARTTLS), authentication (spring.mail.username/password), and socket timeouts. In dev, MailHog skips all of that — it accepts everything, stores in memory, and shows a web UI. MailHog was created in 2014 as a Go-based SMTP trap specifically for development testing — the idea came from Ruby's MailCatcher gem (2010) but MailHog adds a REST API for programmatic assertion in integration tests.
+
+**Q106: "Why does WebhookChannelStrategy use WebClient.Builder instead of a pre-built WebClient?" (2026-05-31)**
+A: Spring auto-configures a `WebClient.Builder` bean (not a `WebClient` bean) because the builder carries default configuration (codecs, filters, base URL) that each user might customize differently. Calling `.build()` on each request is cheap — it just copies the builder's settings into a new immutable WebClient instance. If we injected a pre-built WebClient, we'd share mutable state (e.g., if another bean modifies the same instance). The builder pattern guarantees each call site gets an independent, correctly-configured client.
+
+**Q107: "Why not use @Async on the webhook call instead of .block()?" (2026-05-31)**
+A: @Async would move the HTTP call to a separate thread pool, but then exceptions are lost (CompletableFuture never checked). The dispatcher needs the exception to decide SENT vs FAILED in the NotificationLog. With .block(), we get synchronous exception propagation: if the webhook 500s, the catch block fires and we persist FAILED. @Async would give us "fire-and-forget" with no status tracking — defeating the purpose of the audit log.

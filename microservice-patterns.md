@@ -724,4 +724,326 @@ Command Side                              Query Side
 
 ---
 
-## 5. (Placeholder: Circuit Breaker Pattern — coming in later phases)
+## 5. Circuit Breaker Pattern (Resilience4j)
+
+### 5.1 The Problem: Cascading Failures
+
+When Service A calls Service B over the network, and Service B is slow or down, Service A's threads block waiting for responses. Under load, ALL of Service A's threads become stuck → Service A itself becomes unresponsive → Service C, which depends on A, also dies. This domino effect is a **cascading failure**.
+
+```
+Normal Operation:
+  Client → Service A → Service B (responds in 50ms) → ✓
+
+Service B goes down:
+  Client → Service A → Service B (10s timeout...)   → thread stuck
+  Client → Service A → Service B (10s timeout...)   → thread stuck
+  Client → Service A → Service B (10s timeout...)   → thread stuck
+  ... 200 threads stuck ...
+  Client → Service A → no threads available → Service A DOWN
+  Client → Service C → calls Service A → also stuck → Service C DOWN
+  ↑ CASCADING FAILURE — one downstream outage kills everything upstream
+```
+
+**Root cause:** Service A keeps attempting calls to a service it already knows is broken, consuming resources (threads, sockets, memory) on futile attempts.
+
+### 5.2 The Solution: Circuit Breaker (Michael Nygard, "Release It!", 2007)
+
+The Circuit Breaker pattern is borrowed from electrical engineering: a fuse that trips when current exceeds a threshold, protecting the circuit from damage. In software: the breaker monitors call failures, and when failures exceed a threshold, it **stops making calls entirely** for a configured period — failing fast instead of waiting for timeouts.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                 CIRCUIT BREAKER STATE MACHINE                         │
+│                                                                      │
+│  ┌────────┐   failure rate        ┌──────┐   wait duration    ┌──────────┐
+│  │ CLOSED │ ──── ≥ threshold ───▶ │ OPEN │ ──── expires ────▶ │HALF-OPEN │
+│  │        │                       │      │                    │          │
+│  │ (calls │                       │(fail │                    │(trial    │
+│  │  pass  │                       │ fast)│                    │ calls)   │
+│  │through)│                       │      │                    │          │
+│  └───┬────┘                       └──┬───┘                    └────┬─────┘
+│      │                               │                             │
+│      │ failures below threshold      │  any new call               │ if trial calls succeed
+│      └──── stays CLOSED ◀────────────┘ → immediate exception      └──── transition to CLOSED
+│                                                                     │
+│                                          if trial calls fail        │
+│                                          └──── back to OPEN ◀───────┘
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Three states:**
+
+| State | Behavior | Analogy |
+|-------|----------|---------|
+| CLOSED | All calls pass through normally. Failures are counted in a sliding window. | Normal wiring — electricity flows |
+| OPEN | All calls are rejected immediately (CallNotPermittedException). No network call made. Timer running. | Tripped fuse — electricity blocked |
+| HALF-OPEN | A limited number of trial calls are permitted. If they succeed → CLOSED. If they fail → OPEN again. | Electrician testing if the fault is fixed |
+
+### 5.3 Resilience4j — Lightweight Fault Tolerance Library
+
+Resilience4j (inspired by Netflix Hystrix, which was deprecated in 2018) provides:
+- **Circuit Breaker** — fail-fast when downstream is unhealthy
+- **Retry** — automatic retry with configurable delay
+- **Rate Limiter** — throttle outgoing calls to respect API quotas
+- **Bulkhead** — limit concurrent calls to prevent resource exhaustion
+- **Time Limiter** — enforce max execution duration
+
+Unlike Hystrix (which used thread-pool isolation and had a large footprint), Resilience4j is designed for Java 8+ with lightweight function decoration and no external dependencies beyond Vavr.
+
+### 5.4 EquityCart Implementation
+
+The `AlphaVantageClient` (market-data module) calls an external stock-price API that has rate limits, occasional timeouts, and downtime. Three Resilience4j mechanisms protect this integration:
+
+```
+AlphaVantageClient.getStockQuote("AAPL")
+       │
+       ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ANNOTATION STACK (applied as CGLIB proxy decorators)         │
+│                                                              │
+│  @Retry(name = "alphaVantage")                               │
+│    └─ wraps ↓                                                │
+│  @CircuitBreaker(name = "alphaVantage", fallback = "...")     │
+│    └─ wraps ↓                                                │
+│  @RateLimiter(name = "alphaVantage")                         │
+│    └─ wraps ↓                                                │
+│  actual WebClient HTTP call                                   │
+│                                                              │
+│  Execution order (outermost to innermost):                   │
+│  Retry → CircuitBreaker → RateLimiter → HTTP call            │
+│                                                              │
+│  This means:                                                 │
+│  • Rate Limiter checks FIRST: "am I within 5 calls/60s?"    │
+│  • Circuit Breaker checks NEXT: "am I OPEN?"                │
+│  • If both pass: the HTTP call executes                       │
+│  • If call fails: Circuit Breaker records the failure         │
+│  • Retry re-invokes the ENTIRE chain (including CB + RL)     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 5.5 Configuration (application.yml)
+
+```yaml
+resilience4j:
+  retry:
+    instances:
+      alphaVantage:
+        max-attempts: 3        # Try up to 3 times total (1 initial + 2 retries)
+        wait-duration: 2s      # Wait 2 seconds between retry attempts
+
+  circuitbreaker:
+    instances:
+      alphaVantage:
+        failure-rate-threshold: 50                        # Open when ≥50% of calls in window fail
+        wait-duration-in-open-state: 30s                  # Stay OPEN for 30s before trying HALF-OPEN
+        permitted-number-of-calls-in-half-open-state: 3   # Allow 3 trial calls in HALF-OPEN
+        sliding-window-size: 10                           # Track the last 10 calls for failure rate
+
+  rate-limiter:
+    instances:
+      alphaVantage:
+        limit-for-period: 5        # Max 5 calls per refresh period
+        limit-refresh-period: 60s  # Period resets every 60 seconds
+        timeout-duration: 0s       # Don't wait — reject immediately if limit exceeded
+```
+
+### 5.6 Detailed Behavior Walkthrough
+
+#### Retry
+
+```
+Call 1: HTTP request → timeout (10s response timeout from WebClientConfig)
+  └─ Retry counts this as attempt 1, waits 2s
+Call 2: HTTP request → timeout again
+  └─ Retry counts this as attempt 2, waits 2s
+Call 3: HTTP request → success!
+  └─ Returns the Mono<StockQuote> to caller
+
+OR
+
+Call 3: HTTP request → fails
+  └─ max-attempts (3) exhausted → propagates the exception up
+  └─ Circuit Breaker records this as a FAILURE in its sliding window
+```
+
+#### Circuit Breaker — Sliding Window
+
+The sliding window tracks the last N calls (N = `sliding-window-size` = 10):
+
+```
+Window: [✓, ✓, ✓, ✓, ✓, ✗, ✗, ✗, ✗, ✗]  → 5 failures / 10 calls = 50%
+                                                ≥ threshold (50%)
+                                                → TRANSITION TO OPEN
+
+In OPEN state (next 30 seconds):
+  Any call to getStockQuote() → immediate CallNotPermittedException
+  → No HTTP request made (fail-fast, no resource waste)
+  → Fallback method invoked: getStockQuoteFallback(symbol, throwable)
+    → Returns Mono.error("Unable to fetch stock quote for AAPL due to: ...")
+    → Caller gets error immediately instead of waiting 10s for timeout
+
+After 30 seconds → TRANSITION TO HALF-OPEN:
+  Allow 3 trial calls through:
+  [✓, ✓, ✓] → all succeed → TRANSITION TO CLOSED (recovered!)
+  [✓, ✗, _] → failure detected → TRANSITION BACK TO OPEN (still broken)
+```
+
+#### Rate Limiter — API Quota Protection
+
+```
+Alpha Vantage free tier: 5 calls/minute hard limit (HTTP 429 beyond that).
+
+Our config: limit-for-period=5, limit-refresh-period=60s, timeout-duration=0s
+
+Call timeline:
+  T+0s:  call 1 → permitted (1/5 used)
+  T+5s:  call 2 → permitted (2/5 used)
+  T+10s: call 3 → permitted (3/5 used)
+  T+20s: call 4 → permitted (4/5 used)
+  T+30s: call 5 → permitted (5/5 used)
+  T+35s: call 6 → REJECTED immediately (timeout-duration=0s, no waiting)
+         → throws RequestNotPermitted exception
+         → Circuit Breaker counts this as a failure? NO — it's configured not to
+            (rate limiter rejection is not a downstream failure)
+  T+60s: period refreshes → call 7 → permitted (1/5 used in new period)
+
+timeout-duration=0s means: "If the limit is reached, reject IMMEDIATELY."
+  vs timeout-duration=5s: "Wait up to 5s for a permit to become available."
+  We chose 0s because: waiting 55s for a rate limit permit is worse UX than
+  failing fast and telling the user to try again in a minute.
+```
+
+### 5.7 The CGLIB Proxy Mechanism — Why Annotations Work
+
+Resilience4j annotations (`@Retry`, `@CircuitBreaker`, `@RateLimiter`) are processed by Spring AOP (Aspect-Oriented Programming). At startup:
+
+```
+1. Spring finds @Component class AlphaVantageClient
+2. Spring detects Resilience4j annotations on getStockQuote()
+3. Spring creates a CGLIB PROXY (subclass) of AlphaVantageClient
+4. The proxy overrides getStockQuote() to wrap it in Resilience4j logic
+5. All beans that @Autowire AlphaVantageClient receive the PROXY, not the real object
+
+When MarketDataServiceImpl calls client.getStockQuote("AAPL"):
+  → Hits the PROXY's method
+  → Proxy: check Retry → check CircuitBreaker → check RateLimiter → call real method
+  → If real method fails → Proxy handles retry/fallback/rate-limit logic
+```
+
+**Critical constraint:** Self-calls bypass the proxy.
+
+```java
+// THIS WOULD NOT WORK:
+@Component
+public class AlphaVantageClient {
+    @CircuitBreaker(name = "alphaVantage")
+    public Mono<StockQuote> getStockQuote(String symbol) { ... }
+
+    public void someOtherMethod() {
+        this.getStockQuote("AAPL");  // ← calls the REAL method, NOT the proxy!
+                                      // Circuit breaker is BYPASSED
+    }
+}
+```
+
+This is the same limitation that affects `@Transactional` — both rely on Spring AOP proxies. The proxy only intercepts external calls (from other beans). Internal calls go directly to `this`.
+
+### 5.8 The Fallback Method — Design Decisions
+
+```java
+private Mono<StockQuote> getStockQuoteFallback(String symbol, Throwable t) {
+    return Mono.error(new RuntimeException(
+        "Unable to fetch stock quote for symbol: " + symbol + " due to: " + t.getMessage(), t));
+}
+```
+
+The fallback is invoked when:
+- Circuit Breaker is OPEN (CallNotPermittedException)
+- All retry attempts are exhausted
+- Rate Limiter rejects the call (RequestNotPermitted)
+
+**Design choice: error propagation, not fake data.**
+
+| Strategy | When appropriate |
+|----------|-----------------|
+| Return cached/stale data | When approximate data is better than no data (dashboards, analytics) |
+| Return default value | When a safe default exists (e.g., default config values) |
+| Return error (our choice) | When incorrect data is worse than no data (financial systems, trading) |
+
+For stock prices: showing an outdated price could lead to bad trade decisions. Better to tell the user "market data unavailable" than to show $150 when the price dropped to $120.
+
+### 5.9 Network Timeouts (WebClientConfig)
+
+```java
+WebClient.builder()
+    .baseUrl(alphaVantageBaseUrl)
+    .clientConnector(new ReactorClientHttpConnector(
+        HttpClient.create()
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)   // TCP handshake: 5 seconds
+            .responseTimeout(Duration.ofSeconds(10))))            // Full response: 10 seconds
+    .build();
+```
+
+| Timeout | What it bounds | Default without config |
+|---------|---------------|----------------------|
+| CONNECT_TIMEOUT_MILLIS (5s) | TCP SYN → SYN-ACK (establishing connection) | 30s (Netty default) |
+| responseTimeout (10s) | Time from request sent → first response byte | Infinite (no timeout!) |
+
+**Why these values matter for Resilience4j:**
+
+Without explicit timeouts, a hanging connection would block for 30s+ before Retry even kicks in.
+With 10s response timeout: each retry attempt is bounded to ~10s max.
+Total worst case: 3 attempts × (10s timeout + 2s wait) = 36 seconds before final failure.
+
+### 5.10 Annotation Stacking Order (Resilience4j Default Priority)
+
+Resilience4j defines a default decoration order (highest → lowest priority):
+
+```
+1. Retry          (outermost — retries the entire inner chain)
+2. CircuitBreaker (records successes/failures for state transitions)
+3. RateLimiter    (innermost — checks quota before calling)
+4. TimeLimiter    (if present)
+5. Bulkhead       (if present)
+```
+
+This order means:
+- **Retry wraps CircuitBreaker:** A retry re-checks the circuit breaker state each time. If the CB opened during retry wait → next retry fails immediately (no pointless call).
+- **CircuitBreaker wraps RateLimiter:** A rate-limit rejection (RequestNotPermitted) is NOT counted as a circuit breaker failure — it's a local throttle, not a downstream problem.
+
+You can customize this order via `resilience4j.circuitbreaker.circuitBreakerAspectOrder` properties, but defaults are correct for most use cases.
+
+### 5.11 When to Use Circuit Breaker vs Other Patterns
+
+| Scenario | Pattern |
+|----------|---------|
+| External API might be down | Circuit Breaker (fail-fast, protect threads) |
+| Transient network blip | Retry (brief wait, try again) |
+| API has call quota | Rate Limiter (enforce quota locally) |
+| Prevent thread exhaustion | Bulkhead (limit concurrent calls) |
+| Need all four | Stack them (as in EquityCart's AlphaVantageClient) |
+| Calling your own database | Typically none — if your DB is down, you're down anyway |
+| Calling another internal service | Circuit Breaker + Retry (network boundaries = failure points) |
+
+### 5.12 EquityCart Implementation Files
+
+```
+equitycart/market-data/src/main/java/com/equitycart/marketdata/
+├── client/AlphaVantageClient.java       ← @Retry + @CircuitBreaker + @RateLimiter annotated
+├── config/WebClientConfig.java          ← Reactor Netty HttpClient with connect + response timeouts
+└── (application.yml)                    ← resilience4j.retry/circuitbreaker/ratelimiter config
+
+Dependencies (market-data/build.gradle):
+  implementation 'io.github.resilience4j:resilience4j-spring-boot3'
+  implementation 'org.springframework.boot:spring-boot-starter-aop'  (required for @Retry etc.)
+```
+
+### 5.13 Historical Context
+
+- **2007**: Michael Nygard publishes "Release It!" — first popular description of the Circuit Breaker pattern for software
+- **2011**: Netflix builds Hystrix (internal) to handle cascading failures in their microservices (200+ services calling each other)
+- **2012**: Netflix open-sources Hystrix — becomes the de facto Java circuit breaker library
+- **2018**: Netflix announces Hystrix maintenance mode — recommends alternatives
+- **2018**: Resilience4j 1.0 released — designed as Hystrix successor, lighter weight, Java 8+, no thread-pool isolation (uses decorators instead)
+- **Today**: Resilience4j is the standard for Spring Boot 3.x applications (Spring Cloud Circuit Breaker wraps it)
+
+Key philosophical difference: Hystrix used thread-pool isolation (each downstream got its own thread pool). Resilience4j uses semaphore-based bulkheads by default — less overhead, less isolation. Trade-off: Hystrix guaranteed that a slow downstream couldn't starve other downstreams' threads; Resilience4j trusts your timeouts to be correct.

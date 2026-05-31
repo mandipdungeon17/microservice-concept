@@ -21,6 +21,7 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 | `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Implemented |
 | `market-data-service` | `com.equitycart.marketdata` | Real-time prices, health scores, SSE streaming  | Implemented |
 | `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Implemented |
+| `notification-service`| `com.equitycart.notification` | Event-driven notification dispatch (Kafka consumer, Strategy channels) | Implemented |
 | `app`                 | `com.equitycart`            | Monolith aggregator (runs all modules as one JAR) | Implemented |
 
 ### Folder Structure
@@ -78,7 +79,10 @@ equitycart/
 │       ├── dto/              (HoldingRequest/Response, TradeRequest/Response, SellToSpendRequest/Response, PortfolioAnalyticsResponse)
 │       ├── entity/           (Portfolio, Holding, StockBackReward)
 │       ├── enums/            (VestingStatus, TradeType)
+│       ├── event/            (NotificationPublisher — fire-and-forget Kafka publisher)
+│       ├── eventsourcing/    (Event Sourcing: PortfolioEvent MongoDB document, EventStore, Projection, Controller)
 │       ├── repository/       (PortfolioRepository, HoldingRepository, StockBackRewardRepository)
+│       ├── saga/             (Saga Pattern: SellToSpendSagaOrchestrator, SagaEntity, SagaStatus, TimeoutDetector)
 │       └── service/          (PortfolioService, PortfolioFacade, TradeService, SellToSpendService, VestingHelper + impls)
 ├── market-data/              (market-data-service module)
 │   └── src/main/java/com/equitycart/marketdata/
@@ -95,6 +99,15 @@ equitycart/
         ├── enums/            (AccountType, EntryType, ReferenceType)
         ├── repository/       (LedgerEntryRepository)
         └── service/          (LedgerService + LedgerServiceImpl)
+├── notification/             (notification-service module)
+│   └── src/main/java/com/equitycart/notification/
+│       ├── consumer/         (NotificationConsumer — @KafkaListener)
+│       ├── controller/       (NotificationController — history API)
+│       ├── dto/              (NotificationResponse)
+│       ├── entity/           (NotificationLog — audit trail)
+│       ├── enums/            (NotificationType, NotificationChannel, NotificationStatus)
+│       ├── repository/       (NotificationLogRepository)
+│       └── service/          (NotificationDispatcher + channel strategies: Email, Webhook, Log)
 ```
 
 ## Tech Stack
@@ -109,9 +122,9 @@ equitycart/
 | Resilience        | Resilience4j (Circuit Breaker, Retry, Rate Limiter) |
 | Reactive Client   | WebClient + Reactor Netty (non-blocking HTTP) |
 | SQL Database      | PostgreSQL                                    |
-| NoSQL Database    | MongoDB (price history, TTL indexes)      |
+| NoSQL Database    | MongoDB (price history, event sourcing, TTL indexes) |
 | Cache             | Redis (@Cacheable + RedisTemplate + manual opsForValue) |
-| Message Broker    | Apache Kafka (KRaft mode, event-driven rewards) |
+| Message Broker    | Apache Kafka (KRaft mode, event-driven rewards, notifications) |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
 | API Gateway       | Spring Cloud Gateway (planned)                |
 | Service Discovery | Netflix Eureka (planned)                      |
@@ -197,7 +210,11 @@ equitycart/
 - **Dead Letter Queue (DLQ)** — 3 retries with 1s backoff, then divert poison messages to .DLT topic
 - **Generic Outbox Poller** — re-hydrates JSON payload via Class.forName(FQCN), handles any event type without code changes
 - **Consumer Group Isolation** — separate group IDs for reward granting vs cancellation (independent offset tracking)
-- **Javadoc + Logging** — Log4j2 loggers + Javadoc across all Kafka classes
+- **Saga Pattern (Sell-to-Spend)** — orchestrator-based saga with 6 states, compensation on failure, timeout detection, idempotent steps
+- **Event Sourcing (Portfolio)** — append-only MongoDB event store for all portfolio mutations, projection-based rebuild, per-user sequence numbers
+- **Notification Service (Observer Pattern)** — Kafka Pub/Sub decouples business logic from notification delivery; Strategy Pattern for channel selection (Email, Webhook, Log); audit log for every dispatch attempt
+- **Stock Refund** — Kafka consumer restores holdings when order is refunded (REFUND_RESTORED event)
+- **Javadoc + Logging** — Log4j2 loggers + Javadoc across all Kafka, Saga, Event Sourcing, and Notification classes
 
 ## API Endpoints
 
@@ -290,6 +307,21 @@ equitycart/
 | GET    | `/api/portfolio/rewards`      | Auth   | Get stock-back reward history              |
 | GET    | `/api/portfolio/analytics`    | Auth   | Portfolio analytics (cost basis, weights)  |
 
+### Event Sourcing (Portfolio)
+
+| Method | Endpoint                                   | Access | Description                                     |
+| ------ | ------------------------------------------ | ------ | ----------------------------------------------- |
+| GET    | `/api/portfolio/events`                    | Auth   | Full event history for user (append-only log)   |
+| GET    | `/api/portfolio/events?type=X`             | Auth   | Filtered by event type                          |
+| GET    | `/api/portfolio/events/projection`         | Auth   | Rebuild current holdings from event replay      |
+
+### Notifications
+
+| Method | Endpoint                                   | Access | Description                                     |
+| ------ | ------------------------------------------ | ------ | ----------------------------------------------- |
+| GET    | `/api/notifications`                       | Auth   | All notifications for user (most recent first)  |
+| GET    | `/api/notifications?type=TRADE_EXECUTED`   | Auth   | Filtered by notification type                   |
+
 ## How to Build & Run
 
 ```bash
@@ -317,6 +349,7 @@ equitycart/
 - Redis (running on localhost:6379 — via Docker: `docker run -d --name redis -p 6379:6379 redis`)
 - MongoDB (running on localhost:27017 — via Docker: `docker run -d --name mongodb -p 27017:27017 mongo`)
 - Apache Kafka (running on localhost:9092 — via Docker: `docker run -d --name kafka -p 9092:9092 apache/kafka:latest`)
+- MailHog (SMTP trap for dev email — via Docker: `docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog`)
 
 ## Configuration
 
@@ -341,6 +374,11 @@ Key application properties (`app/src/main/resources/application.yml`):
 
 | `spring.kafka.bootstrap-servers`      | Kafka broker address (default: localhost:9092) |
 | `spring.kafka.consumer.group-id`      | Default consumer group ID                     |
+| `spring.mail.host`                    | SMTP server hostname (default: localhost)      |
+| `spring.mail.port`                    | SMTP server port (default: 1025 for MailHog)   |
+| `equitycart.notification.channel`     | Active notification channel (LOG, EMAIL, WEBHOOK) |
+| `equitycart.notification.webhook-url` | Webhook POST target URL                        |
+| `equitycart.notification.recipient-email` | Email recipient for notifications          |
 
 ## Project Documents
 
@@ -365,7 +403,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
 | Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)               |
 | Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE (reward grant deferred to Phase 6)  |
-| Phase 6 | Event-Driven Architecture     | FUNCTIONAL COMPLETE (e2e testing pending)    |
+| Phase 6 | Event-Driven Architecture     | COMPLETE                                     |
 
 ## Known Issues
 
