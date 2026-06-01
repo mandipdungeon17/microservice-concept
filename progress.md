@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 6 - Event-Driven Architecture — Kafka (COMPLETE)
+## Status: Phase 7 - Microservices Decomposition (IN PROGRESS)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -716,6 +716,51 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - application.yml: spring.mail (MailHog localhost:1025), equitycart.notification.channel=LOG, webhook-url, recipient-email
   - E2E tested: BUY trade → TRADE_EXECUTED notification logged + persisted + queryable via REST API
 
+## Phase 7: Microservices Decomposition (started 2026-06-01) — IN PROGRESS
+
+### Step Plan
+
+| Step | Deliverable | Status |
+|------|-------------|--------|
+| 1 | Eureka Discovery Server (new module, port 8761) | COMPLETE |
+| 2 | Config Server (new module, port 8888, Git-backed) | PENDING |
+| 3 | Spring Cloud Gateway (new module, port 8080, routing + filters) | PENDING |
+| 4 | Extract User-Service as standalone (port 8081, Eureka client) | PENDING |
+| 5 | Extract Market-Data-Service as standalone (port 8085) | PENDING |
+| 6 | Extract Order-Service as standalone (port 8083) | PENDING |
+| 7 | Extract Portfolio-Service as standalone (port 8084) | PENDING |
+| 8 | Extract Ledger-Service as standalone (port 8086) | PENDING |
+| 9 | Extract Notification-Service as standalone (port 8087) | PENDING |
+| 10 | OpenFeign clients (replace direct module deps with HTTP calls) | PENDING |
+| 11 | Correlation ID propagation (MDC + Gateway filter + Feign interceptor) | PENDING |
+| 12 | Docker Compose (full stack: all services + infrastructure) | PENDING |
+| 13 | End-to-end testing + re-audit (all services inter-communicating) | PENDING |
+
+### Design Completed
+- [x] Phase 7 architecture designed: Eureka (service discovery), Config Server (centralized config), Gateway (routing/filtering), database-per-service pattern
+- [x] 13-step implementation plan created and approved
+- [x] Service extraction sequence determined (utility → business logic → complex)
+- [x] Port allocations decided (8080 Gateway, 8081-8087 services, 8761 Eureka, 8888 Config)
+- [x] OpenFeign strategy: replace direct `implementation project()` calls with `@FeignClient` HTTP stubs
+- [x] Correlation ID flow: MDC in logs, propagated via Gateway filter + Feign interceptor
+
+### Implementation Completed
+- [x] Step 1: Eureka Discovery Server — COMPLETE (2026-06-01)
+  - New module: `discovery-server/` with `DiscoveryServerApplication` main class
+  - Port: 8761 (Eureka standard)
+  - Annotations: `@SpringBootApplication` + `@EnableEurekaServer`
+  - Configuration: `register-with-eureka=false`, `fetch-registry=false`, `enable-self-preservation=false` (strict learning mode)
+  - Verified: Eureka dashboard accessible at http://localhost:8761, shows "Instances currently registered with Eureka" = 0
+
+### Phase 7 Remaining
+- [ ] Step 2: Config Server (Git-backed) — IN PROGRESS
+- [ ] Step 3: Gateway — PENDING
+- [ ] Step 4-9: Service extraction — PENDING
+- [ ] Step 10: OpenFeign clients — PENDING
+- [ ] Step 11: Correlation ID — PENDING
+- [ ] Step 12: Docker Compose — PENDING
+- [ ] Step 13: End-to-end testing + re-audit — PENDING
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -724,7 +769,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [~] Phase 4: Market Data - Reactive (Weeks 8-9) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — FUNCTIONAL COMPLETE (reward grant deferred to Phase 6)
 - [x] Phase 6: Event-Driven Architecture (Weeks 13-15) — COMPLETE
-- [ ] Phase 7: Microservices Decomposition (Weeks 16-18)
+- [~] Phase 7: Microservices Decomposition (Weeks 16-18) — IN PROGRESS
 - [ ] Phase 8: Security Hardening (Weeks 19-20)
 - [ ] Phase 9: Observability (Weeks 21-22)
 - [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
@@ -767,6 +812,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-14**: Steps 7-9 complete — TradeService (BUY/SELL with ledger double-entry), SellToSpendService (cross-domain atomic transaction: portfolio + ledger + order), Portfolio Analytics (cost basis, weights, reward summary). Fixed: circular dependency (@Lazy + @Autowired field injection), BigDecimal divide precision, NullPointerException on full sell, log-after-mutation bug. Learned: guard clause pattern, facade as compositor, monolith @Transactional advantage, Saga pattern preview.
 - **2026-05-16**: Phase 5 FUNCTIONAL COMPLETE — Step 10 re-audit done (20 files verified). test-commands.md created with all phases (1-5) + Docker/Redis/MongoDB/PostgreSQL CLI. Identified gap: reward granting (creating PENDING StockBackReward on order delivery) not implemented — requires cross-module event chain (order→product→market-data→portfolio). Deferred to Phase 6 as first Kafka event. Vesting job exists but idle until rewards are granted. Next: Phase 6 — Event-Driven Architecture.
 - **2026-05-20**: Phase 6 COMPLETE — All 8 steps done. Kafka KRaft (Docker), event DTOs, producer (outbox-based), StockBackRewardConsumer, cancellation consumer, Outbox Pattern (atomic dual-write), DLQ (DefaultErrorHandler + DeadLetterPublishingRecoverer). E2E tested: happy path, multi-ticker rewards, return cancellation, idempotency, Kafka CLI. Re-audit passed (14 files). Next: Phase 7 — Microservices Decomposition.
+- **2026-06-01**: Phase 7 started — Microservices Decomposition design approved. 13-step plan created. Step 1 COMPLETE — Eureka Discovery Server module created (port 8761). DiscoveryServerApplication with @SpringBootApplication + @EnableEurekaServer. application.yml configured (client.register-with-eureka=false, client.fetch-registry=false, server.enable-self-preservation=false for strict learning mode). Eureka dashboard accessible at http://localhost:8761. Next: Config Server (Step 2).
 - **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, __TypeId__ default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).
 - **2026-05-24**: Step 11 done. Saga Orchestrator for Sell-to-Spend: orchestration-based saga with state machine entity, compensating transactions (reverse ledger + re-add shares), @Scheduled timeout detector, lifecycle events via outbox to Kafka. @ConditionalOnProperty toggle between transactional and saga strategies. 7 new files (entity, enum, repo, orchestrator, service, outbox writer, event DTO), 3 files modified. BUILD SUCCESSFUL. Next: test end-to-end.
 - **2026-05-31**: Step 13 done. Notification Service — Observer Pattern (distributed via Kafka Pub/Sub) + Strategy Pattern (pluggable channels). New module: notification-service (14 Java files). NotificationPublisher in portfolio (fire-and-forget KafkaTemplate). 3 channel strategies (Log, Email via MailHog, Webhook via WebClient). NotificationDispatcher resolves channel from config via Spring Map<String, Bean> injection. NotificationLog audit entity. REST API: GET /api/notifications. Integrated into TradeServiceImpl, VestingHelperImpl, SagaOrchestrator. E2E tested: TRADE_EXECUTED notification logged + persisted + queryable. Re-audit: all 16 files have Javadoc + Log4j logger.

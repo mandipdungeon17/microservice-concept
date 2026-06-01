@@ -1,0 +1,17 @@
+plugins {
+    id 'org.springframework.boot'
+    id 'io.spring.dependency-management'
+}
+
+dependencies {
+    implementation 'org.springframework.cloud:spring-cloud-config-server'
+}
+jar {
+    enabled = true
+}
+bootJar {
+    archiveBaseName.set('config-server')
+    archiveVersion.set(project.version.toString())
+    archiveClassifier.set('exec')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

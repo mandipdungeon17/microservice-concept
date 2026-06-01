@@ -1,0 +1,10 @@
+spring:
+  application:
+    name: config-server
+  cloud:
+    config:
+      server:
+        git:
+          uri: file:///C:/Users/H504024/Documents/Docs/Mandip/Preparation/microservice-concept/equitycart-config
+server:
+    port: 8888
