@@ -723,8 +723,8 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 | Step | Deliverable | Status |
 |------|-------------|--------|
 | 1 | Eureka Discovery Server (new module, port 8761) | COMPLETE |
-| 2 | Config Server (new module, port 8888, Git-backed) | PENDING |
-| 3 | Spring Cloud Gateway (new module, port 8080, routing + filters) | PENDING |
+| 2 | Config Server (new module, port 8888, Git-backed) | COMPLETE |
+| 3 | Spring Cloud Gateway (new module, port 8080, routing + filters) | COMPLETE |
 | 4 | Extract User-Service as standalone (port 8081, Eureka client) | PENDING |
 | 5 | Extract Market-Data-Service as standalone (port 8085) | PENDING |
 | 6 | Extract Order-Service as standalone (port 8083) | PENDING |
@@ -752,14 +752,52 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - Configuration: `register-with-eureka=false`, `fetch-registry=false`, `enable-self-preservation=false` (strict learning mode)
   - Verified: Eureka dashboard accessible at http://localhost:8761, shows "Instances currently registered with Eureka" = 0
 
+- [x] Step 2: Config Server — COMPLETE (2026-06-01)
+  - New module: `config-server/` with `ConfigServerApplication` main class
+  - Port: 8888 (Config Server standard)
+  - Annotations: `@SpringBootApplication` + `@EnableConfigServer`
+  - Git backend: Points to separate GitHub repo `equitycart-config` (hybrid monorepo: one main repo, one config repo)
+  - Configuration: `spring.cloud.config.server.git.uri` points to https://github.com/mandipjdungcr7/equitycart-config
+  - Verified: Config Server running, successfully fetches configs from remote Git repo
+  - API tested: GET http://localhost:8888/user-service/default returns merged application.yml + user-service.yml
+  - Javadoc added to both DiscoveryServerApplication and ConfigServerApplication (debug-mode explanations, internal flow, API details)
+
+- [x] Step 3: Spring Cloud Gateway — COMPLETE (2026-06-02)
+  - New module: `api-gateway/` with `GatewayApplication` main class
+  - Port: 8080 (gateway entry point)
+  - Annotations: `@SpringBootApplication` + `@EnableDiscoveryClient` (registers itself with Eureka, enables `lb://` URI resolution)
+  - Dependencies: `spring-cloud-starter-gateway-server-webflux`, `spring-cloud-starter-config`, `spring-cloud-starter-netflix-eureka-client`, `spring-boot-starter-actuator`
+  - Configuration: Centralized in `equitycart-config/api-gateway.yml` (fetched via `spring.config.import=configserver:http://localhost:8888`)
+  - Routes defined: 6 service routes (user-service, order-service, portfolio-service, market-data-service, ledger-service, notification-service) with `lb://` Eureka-aware URIs
+  - Actuator endpoints exposed: health, metrics, info (explicitly configured in management.endpoints.web.exposure.include)
+  - Verified: Both api-gateway and equitycart registered with Eureka (http://localhost:8761 shows 2 instances)
+  - Gateway properly routes requests to downstream services and resolves services via Eureka discovery
+  - **Lessons Learned & Issues Resolved**:
+    1. **bootstrap.yml doesn't work in Spring Boot 3.5.8 + Spring Cloud 2025.0.0**: Config import must be in `application.yml`, not `bootstrap.yml` (breaking change from earlier Spring Cloud versions)
+    2. **Missing Eureka client dependency**: `spring-cloud-starter-netflix-eureka-client` was required in build.gradle for `@EnableDiscoveryClient` to actually register service with Eureka (without it, no registration logs appear)
+    3. **YAML structure error**: Gateway routes were incorrectly under `server.cloud.gateway` instead of `spring.cloud.gateway` (fixed indentation in equitycart-config/api-gateway.yml)
+    4. **Actuator endpoints returning 403 on monolithic app (8082) but 200 on gateway (8080)**: Spring Security was blocking `/actuator/**` paths — required explicit authorization rule `http.authorizeHttpRequests(authz -> authz.requestMatchers("/actuator/**").permitAll())`
+    5. **All services need explicit `spring-cloud-starter-netflix-eureka-client` dependency** (not auto-provided by other starters)
+    6. **Port conflict**: Both services initially on 8080 → changed to 8080 (gateway), 8082 (equitycart)
+
 ### Phase 7 Remaining
-- [ ] Step 2: Config Server (Git-backed) — IN PROGRESS
-- [ ] Step 3: Gateway — PENDING
-- [ ] Step 4-9: Service extraction — PENDING
-- [ ] Step 10: OpenFeign clients — PENDING
-- [ ] Step 11: Correlation ID — PENDING
-- [ ] Step 12: Docker Compose — PENDING
-- [ ] Step 13: End-to-end testing + re-audit — PENDING
+- [x] Step 4: Extract User-Service as standalone (port 8081, Eureka client) — COMPLETE (2026-06-03)
+  - New main class: `UserServiceApplication` with `@SpringBootApplication` + `@EnableDiscoveryClient`
+  - Plugin changed from `java-library` to `org.springframework.boot` + `jar { enabled = true }` (dual artifact for transition)
+  - Added: `spring-cloud-starter-netflix-eureka-client`, `spring-cloud-starter-config`, `spring-boot-starter-actuator`, `runtimeOnly postgresql` to user/build.gradle
+  - Local `application.yml`: `spring.application.name: user-service` + `spring.config.import: configserver:`
+  - `equitycart-config/user-service.yml` expanded: full datasource config, JPA (ddl-auto: update overrides base validate), JWT, actuator, explicit `eureka.client.serviceUrl.defaultZone`
+  - Verified: registered in Eureka at http://localhost:8761, actuator health 200, register API tested and data created in `equitycart_user`
+  - **Key lessons**: Strangler Fig pattern (parallel operation), dual Gradle plugin pattern, config duplication during transition is intentional, jwt config stays in app/application.yml until user-service removed from app/build.gradle, `jar { enabled = true }` only needed while monolith depends on module
+- [ ] Step 5: Extract Market-Data-Service as standalone (port 8085) — PENDING
+- [ ] Step 6: Extract Order-Service as standalone (port 8083) — PENDING
+- [ ] Step 7: Extract Portfolio-Service as standalone (port 8084) — PENDING
+- [ ] Step 8: Extract Ledger-Service as standalone (port 8086) — PENDING
+- [ ] Step 9: Extract Notification-Service as standalone (port 8087) — PENDING
+- [ ] Step 10: OpenFeign clients (replace direct module deps with HTTP calls) — PENDING
+- [ ] Step 11: Correlation ID propagation (MDC + Gateway filter + Feign interceptor) — PENDING
+- [ ] Step 12: Docker Compose (full stack: all services + infrastructure) — PENDING
+- [ ] Step 13: End-to-end testing + re-audit (all services inter-communicating) — PENDING
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -816,3 +854,4 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, __TypeId__ default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).
 - **2026-05-24**: Step 11 done. Saga Orchestrator for Sell-to-Spend: orchestration-based saga with state machine entity, compensating transactions (reverse ledger + re-add shares), @Scheduled timeout detector, lifecycle events via outbox to Kafka. @ConditionalOnProperty toggle between transactional and saga strategies. 7 new files (entity, enum, repo, orchestrator, service, outbox writer, event DTO), 3 files modified. BUILD SUCCESSFUL. Next: test end-to-end.
 - **2026-05-31**: Step 13 done. Notification Service — Observer Pattern (distributed via Kafka Pub/Sub) + Strategy Pattern (pluggable channels). New module: notification-service (14 Java files). NotificationPublisher in portfolio (fire-and-forget KafkaTemplate). 3 channel strategies (Log, Email via MailHog, Webhook via WebClient). NotificationDispatcher resolves channel from config via Spring Map<String, Bean> injection. NotificationLog audit entity. REST API: GET /api/notifications. Integrated into TradeServiceImpl, VestingHelperImpl, SagaOrchestrator. E2E tested: TRADE_EXECUTED notification logged + persisted + queryable. Re-audit: all 16 files have Javadoc + Log4j logger.
+- **2026-06-03**: Phase 7 Step 4 COMPLETE — User-Service extracted as standalone microservice (port 8081). UserServiceApplication created with @EnableDiscoveryClient. Dual Gradle plugin (java-library → org.springframework.boot + jar enabled for monolith compatibility). Local application.yml with spring.application.name + configserver import. user-service.yml expanded with full datasource/JPA/JWT/actuator/eureka config. Strangler Fig pattern implemented: gateway routes /api/auth/** and /api/users/** to lb://user-service while monolith still runs on 8082. Key learnings: ddl-auto hierarchy (validate in base = prod default, update in service = dev override), config duplication during extraction is intentional, defaultZone should always be explicit. Next: Step 5 — Extract Market-Data-Service (port 8085).

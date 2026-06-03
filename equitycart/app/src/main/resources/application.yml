@@ -9,6 +9,8 @@ equitycart:
     recipient-email: demo@equitycart.local
 
 spring:
+  config:
+    import: optional:configserver:http://localhost:8888
   mail:
     host: localhost
     port: 1025
@@ -64,7 +66,7 @@ spring:
       properties.spring.json.trusted.packages: com.equitycart.commons.event
 
 server:
-  port: 8080
+  port: 8082
 
 jwt:
   secret: dGhpcyBpcyBhIHNlY3JldCBrZXkgZm9yIGVxdWl0eWNhcnQgand0IHRva2Vu  # base64 of a 256-bit key
@@ -94,3 +96,12 @@ resilience4j:
         limit-for-period: 5
         limit-refresh-period: 60s
         timeout-duration: 0s
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always

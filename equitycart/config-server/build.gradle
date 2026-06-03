@@ -6,9 +6,6 @@ plugins {
 dependencies {
     implementation 'org.springframework.cloud:spring-cloud-config-server'
 }
-jar {
-    enabled = true
-}
 bootJar {
     archiveBaseName.set('config-server')
     archiveVersion.set(project.version.toString())

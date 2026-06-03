@@ -59,7 +59,7 @@ public class SecurityConfig {
         .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
         .authorizeHttpRequests(
             auth ->
-                auth.requestMatchers("/api/auth/**")
+                auth.requestMatchers("/api/auth/**", "/actuator/**")
                     .permitAll()
                     .requestMatchers("/api/admin/**")
                     .hasRole(UserRoles.ADMIN.name())

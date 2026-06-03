@@ -4108,3 +4108,191 @@ A: Spring auto-configures a `WebClient.Builder` bean (not a `WebClient` bean) be
 
 **Q107: "Why not use @Async on the webhook call instead of .block()?" (2026-05-31)**
 A: @Async would move the HTTP call to a separate thread pool, but then exceptions are lost (CompletableFuture never checked). The dispatcher needs the exception to decide SENT vs FAILED in the NotificationLog. With .block(), we get synchronous exception propagation: if the webhook 500s, the catch block fires and we persist FAILED. @Async would give us "fire-and-forget" with no status tracking — defeating the purpose of the audit log.
+
+---
+
+## Phase 7: Microservices Decomposition — Steps 1-3 (Discovery, Config, Gateway) ✅
+
+### Date: 2026-06-02
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. bootstrap.yml Not Processed in Spring Boot 3.5.8 + Spring Cloud 2025.0.0**
+
+- Problem: All 9 service directories had `bootstrap.yml` with `spring.config.import`. Spring threw: "No spring.config.import property has been defined."
+- Root cause: Spring Cloud 2025.0.0 deprecated and removed separate bootstrap phase. `bootstrap.yml` is silently ignored.
+- Fix: Moved `spring.config.import` and `spring.application.name` to `application.yml`. Deleted all bootstrap.yml files.
+- Lesson: Spring Cloud versioning has breaking changes with Spring Boot major versions. Always check release notes when upgrading.
+
+**2. @EnableDiscoveryClient With No Eureka Dependency — No Registration**
+
+- Problem: `@EnableDiscoveryClient` on GatewayApplication, but zero registration logs and zero instances in Eureka dashboard.
+- Root cause: The annotation activates beans from `spring-cloud-starter-netflix-eureka-client`. Without that dependency, the annotation is a no-op.
+- Fix: Added `implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'` to api-gateway/build.gradle.
+- Lesson: Annotations don't add functionality — they activate beans from dependencies. Missing dependency = silent failure.
+
+**3. YAML Indentation: gateway routes under `server.cloud.gateway` instead of `spring.cloud.gateway`**
+
+- Problem: Routes were mis-nested under `server:` instead of `spring:` in equitycart-config/api-gateway.yml.
+- Fix: Restructured YAML to nest `cloud.gateway.routes` under `spring:`.
+- Lesson: YAML indentation errors are silent and hard to diagnose. Validate structure explicitly.
+
+**4. Actuator Endpoints Blocked by Spring Security (403 Forbidden)**
+
+- Problem: api-gateway (8080) returns 200 for `/actuator/health`, but equitycart (8082) returns 403.
+- Root cause: equitycart has `SecurityFilterChain` with `.anyRequest().authenticated()`, which blocks `/actuator/**`.
+- Fix: Added `.requestMatchers("/actuator/**").permitAll()` to SecurityConfig.
+- Lesson: Spring Security is the final gatekeeper. `management.endpoints.web.exposure.include` alone is insufficient.
+
+**5. Port Conflict: Both Services on Port 8080**
+
+- Problem: api-gateway and equitycart both defaulted to 8080 — "Address already in use" on second startup.
+- Fix: Changed equitycart to port 8082 via application.yml.
+- Lesson: Explicit port allocation required as soon as more than one service runs locally.
+
+**6. Discovery Server Trying to Register Itself on Port 8080 Instead of 8761**
+
+- Problem: When bootstrap.yml added to discovery-server, it fetched config from Config Server, which had no `server.port` override yet. Discovery server started on default port 8080 and tried to register with itself — failing (port 8761 not yet open).
+- Fix: Option A — Remove bootstrap.yml from discovery server (server is infrastructure, doesn't need external config). Option B — Add discovery-server.yml to equitycart-config with explicit `server.port: 8761` and `eureka.client.enabled: false`.
+- Lesson: Infrastructure services (Eureka, Config Server) are a bootstrapping problem — they must start before clients, so they should rely on local config, not external services.
+
+---
+
+### Core Concepts Learned
+
+**1. Eureka Service Discovery — In-Memory Registry Model**
+
+Netflix Eureka (open-sourced 2012) was built to solve AWS EC2's dynamic IP problem. Services register themselves, not DNS-based. The registry is in-memory (ConcurrentHashMap), not a database — fast but not durable across restarts. After restart, services re-register within their first heartbeat cycle (30s).
+
+Flow: `POST /eureka/apps/{name}` on startup → 30s heartbeat → 90s TTL lease → evict on 3 missed heartbeats. Other services fetch full registry every 30s + cache locally. `lb://service-name` in gateway triggers a local cache lookup, then round-robin selection.
+
+**2. Spring Cloud Config Server — Git-Backed Configuration**
+
+Configs in Git = immutable, auditable, rollback-able. Config Server is essentially a "Git file server" with YAML merging. When client calls `/api-gateway/default`, Config Server: (1) clones/pulls Git repo, (2) reads `application.yml`, (3) reads `api-gateway.yml`, (4) merges (service overrides base), (5) returns JSON PropertySource. Client applies over its local application.yml.
+
+**3. bootstrap.yml vs application.yml — Spring Boot 3.x Model**
+
+Old model (Spring Cloud < 2024): separate bootstrap phase processed `bootstrap.yml` before beans started.
+New model (Spring Cloud 2025.0.0): bootstrap phase removed. `spring.config.import` in `application.yml` is processed early enough (before beans initialize) to inject external configs. The distinction no longer exists.
+
+**4. API Gateway — Reverse Proxy Pattern**
+
+Single entry point that proxies requests to N downstream services. Enables: (1) centralized auth (one point to verify JWT), (2) service discovery decoupling (clients use gateway URL, not service URLs), (3) cross-cutting concerns (rate limiting, correlation IDs, logging) in one place. `lb://` prefix tells Spring Cloud LoadBalancer to resolve via Eureka.
+
+**5. Management vs Security Layer Independence**
+
+Two independent access control mechanisms in Spring Boot:
+- Management: `management.endpoints.web.exposure.include` — which actuator endpoints exist
+- Security: `SecurityFilterChain` — who can access any URL
+
+Both must allow access. Configuring management without security = 403. Common mistake: setting `exposure.include: health` and forgetting `requestMatchers("/actuator/**").permitAll()`.
+
+---
+
+### Interview Questions & Answers
+
+**Q108: "Why does Eureka need both heartbeat AND TTL lease?" (2026-06-02)**
+
+A: Heartbeat is the "I'm alive" signal, lease TTL is the death detection mechanism. Without TTL: a crashed service never gets evicted (registry keeps stale entries). Without heartbeat: healthy services get evicted after 90s. Together: heartbeat refreshes TTL for healthy services, missed heartbeats let TTL expire for dead services. This is identical to TCP keep-alive logic.
+
+**Q109: "What happens if Config Server is down at startup?" (2026-06-02)**
+
+A: Required import (`configserver:...`) causes startup failure if Config Server unreachable — correct for prod (prevents services starting with missing config). Optional import (`optional:configserver:...`) allows startup with local defaults — correct for dev/testing. EquityCart uses required because services need centralized config to know which database, Kafka broker, etc. to use.
+
+**Q110: "What's the difference between lb:// and http:// in gateway routes?" (2026-06-02)**
+
+A: `http://localhost:8081` is a hardcoded URL. If service moves or scales, you must update gateway config. `lb://user-service` resolves via Eureka at request time — gateway asks "give me an instance of user-service" and Eureka returns a healthy registered instance. Load balancer also handles failover: if one instance goes down, Eureka evicts it and `lb://` never routes there again.
+
+**Q111: "Is Config Server a single point of failure?" (2026-06-02)**
+
+A: Yes for new deployments, no for running services. Running services cache configs in memory — transient Config Server outages don't break them. New services or restarted services fail if Config Server is down. Mitigations: (1) cluster Config Server (multiple instances, same Git repo), (2) use `optional:configserver:` for graceful degradation, (3) set client retry/timeout properties for transient failures.
+
+
+---
+## Phase 7 Step 4: Extract User-Service as Standalone Microservice
+
+### Date: 2026-06-03
+---
+
+### Roadblocks & Issues Faced
+
+**1. plugin change: java-library → org.springframework.boot (dual plugin requirement)**
+
+- Problem: user-service had `id 'java-library'` plugin. Switching to `org.springframework.boot` means Spring Boot plugin disables the regular plain jar by default — only bootJar is produced. The `app` monolith still has `implementation project(':user-service')`, which requires a plain jar to compile.
+- Fix: Apply BOTH plugins (`org.springframework.boot` + `io.spring.dependency-management`) and add `jar { enabled = true }` to re-enable the plain jar alongside the bootJar.
+- Lesson: During Strangler Fig transition, service modules need dual build artifacts — plain jar for monolith classpath, bootJar for standalone deployment. `jar { enabled = true }` is the bridge.
+
+**2. Eureka registration worked without explicit defaultZone**
+
+- Observation: user-service registered with Eureka without setting `eureka.client.serviceUrl.defaultZone`.
+- Root cause: Spring Cloud has a hardcoded default: `http://localhost:8761/eureka/`. Since Eureka runs at that address locally, registration silently succeeded.
+- Fix: Added explicit `defaultZone` to user-service.yml regardless, per good practice.
+- Lesson: "Lucky defaults" work locally but break in Docker/Kubernetes where Eureka is at a container hostname. Always set `defaultZone` explicitly — it documents intent and is environment-portable.
+
+**3. JWT config duplication between app/application.yml and user-service.yml**
+
+- Question: Should we delete jwt config from app/application.yml since it's now in user-service.yml?
+- Answer: No — not yet. The monolith still compiles user-service code (including JwtServiceImpl which has `@Value("${jwt.secret}")`). Removing jwt from app/application.yml would cause the monolith to fail with "Could not resolve placeholder 'jwt.secret'".
+- Rule: Remove from app/application.yml ONLY after removing `implementation project(':user-service')` from app/build.gradle. Duplication during Strangler Fig is intentional and temporary.
+
+**4. ddl-auto: validate in base config vs update in service config**
+
+- Question: Why is ddl-auto: validate in equitycart-config/application.yml if every service uses update?
+- Answer: `validate` is the production-safe default — Hibernate checks schema matches entities but never auto-modifies DDL. In production, schema changes are managed by Flyway/Liquibase. Service-specific YMLs override with `update` for dev convenience (auto-creates tables on blank schemas).
+- Base config models prod defaults. Service config models dev convenience. This is Config Server merge hierarchy working as intended.
+
+**5. jar { enabled = true } not needed for discovery-server, api-gateway, config-server**
+
+- Question: Should discovery-server, api-gateway, config-server keep `jar { enabled = true }`?
+- Answer: No. Those modules are never referenced via `implementation project(':...')` by any other module. They are pure standalone services — only bootJar is needed. `jar { enabled = true }` is only required for modules that other Gradle subprojects depend on as libraries.
+
+---
+
+### Core Concepts Learned
+
+**1. Strangler Fig Pattern — Incremental Monolith Decomposition**
+
+Named after the strangler fig tree that grows around and replaces its host. In software: extract one service at a time, run alongside monolith, route traffic via gateway. Monolith shrinks service by service until it can be retired. Key advantage over Big Bang rewrites: each extraction is independently testable and rollback is a gateway config change. Gateway acts as the "Strangler Facade" — single entry point that routes to extracted services or legacy monolith transparently.
+
+**2. Dual Gradle Plugin Pattern**
+
+During Strangler Fig extraction from a multi-module monorepo:
+- `java-library` alone: library, no executable, can be depended on
+- `org.springframework.boot` alone: executable bootJar, BUT disables plain jar by default
+- Both together + `jar { enabled = true }`: produces both plain jar AND bootJar
+- Use both during transition; after monolith fully decommissioned, remove `jar { enabled = true }`
+
+**3. Config Server Merge Priority (Demonstrated)**
+
+equitycart-config/application.yml has `ddl-auto: validate` (prod default). user-service.yml has `ddl-auto: update` (dev override). When user-service fetches from Config Server, service-specific YAML wins: it gets `update`. This is Config Server's merge hierarchy: remote {service}.yml overrides remote application.yml. Production deployments would add application-prod.yml to reapply `validate`.
+
+**4. Eureka Default vs Explicit Registration**
+
+Spring Cloud default for `eureka.client.serviceUrl.defaultZone` is `http://localhost:8761/eureka/`. Works locally. Breaks in Docker/Kubernetes (different hostnames). Always set explicitly for environment portability.
+
+**5. Database-per-Service During Transition**
+
+Each extracted service gets its own schema (equitycart_user for user-service). Both monolith and extracted service have tables for the same domain during transition. Gateway routes authoritative traffic to extracted service. Monolith tables become legacy. After full extraction, original monolith database is dropped.
+
+---
+
+### Interview Questions & Answers
+
+**Q113: "What is the Strangler Fig pattern and why use it over Big Bang rewrites?" (2026-06-03)**
+
+A: Strangler Fig: extract one service at a time, run alongside monolith, route via gateway. Each extraction is small, testable, reversible. Big Bang: freeze development, rewrite everything, switch over at once. Big Bang fails because: months of no business value, no rollback path, edge cases only surface in production, no operational experience before go-live. Strangler Fig delivers value incrementally — every extracted service is a live production improvement.
+
+**Q114: "What is the API Gateway's role in Strangler Fig?" (2026-06-03)**
+
+A: The gateway is the Strangler Facade — the outer layer that intercepts all client traffic and routes to either extracted microservices or the legacy monolith. Clients never change their URLs. As each service is extracted, a new gateway route is added. The monolith handles fewer requests. When it handles zero, it's retired. In EquityCart: Spring Cloud Gateway (port 8080) has explicit routes for extracted services (lb://user-service, lb://market-data-service, etc.). Requests not matching any route could fall through to the monolith (though EquityCart routes are explicit).
+
+**Q115: "How do you handle shared config between monolith and extracted service during migration?" (2026-06-03)**
+
+A: Intentional temporary duplication. JWT secret, database credentials, and other config that both the monolith (which still compiles service code) and the standalone service need must exist in both places during the transition. Rule: clean up the monolith config ONLY after removing the service's project() dependency from app/build.gradle. Premature cleanup causes monolith startup failure. This is a known cost of incremental extraction — accept the duplication, schedule the cleanup.
+
+**Q116: "Why is ddl-auto: validate in base config but update in service config?" (2026-06-03)**
+
+A: Base config models production-safe defaults. `validate` means Hibernate checks entity-schema alignment but never auto-modifies DDL — safe for production where schema changes must go through Flyway/Liquibase migrations. Service-specific YAML overrides with `update` for developer convenience (new schema starts empty, Hibernate creates tables automatically). Config Server merge hierarchy makes this clean: service YAML wins over base YAML, so dev gets `update` without touching the prod-safe base config.
+

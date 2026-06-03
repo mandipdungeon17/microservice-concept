@@ -5,9 +5,8 @@ plugins {
 
 dependencies {
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-server'
-}
-jar {
-    enabled = true
+    implementation 'org.hibernate.validator:hibernate-validator'
+    implementation 'com.github.ben-manes.caffeine:caffeine'
 }
 bootJar {
     archiveBaseName.set('discovery-server')

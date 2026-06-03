@@ -887,3 +887,49 @@ Inter-service calls (Feign):
 - Use consistent error response format (ErrorResponse DTO)
 - Log security events (failed logins, authorization failures) at WARN level
 - Don't reveal whether an email exists in registration/login errors (prevents enumeration)
+
+---
+
+## Spring Security + Actuator Endpoints (Phase 7 — 2026-06-02)
+
+### Problem: Actuator returns 403 Despite exposure.include Configuration
+
+Spring Security's FilterChain runs before actuator endpoint resolution. Even if actuator is configured to expose endpoints, Spring Security can block them entirely.
+
+**Diagnostic steps for HTTP 403 on /actuator:**
+1. Is `/actuator/**` in `requestMatchers(...).permitAll()`? → If no, security is blocking it
+2. Is `management.endpoints.web.exposure.include` configured? → Necessary but not sufficient
+3. Is there a `SecurityFilterChain` bean in the app? → If yes, explicit actuator rules are needed
+
+**Fix: Explicitly permit /actuator in SecurityConfig:**
+```java
+http.authorizeHttpRequests(authz -> authz
+    .requestMatchers("/actuator/health").permitAll()         // Public health check
+    .requestMatchers("/actuator/**").hasRole("ADMIN")        // Sensitive endpoints: admin only
+    .requestMatchers("/api/auth/**").permitAll()
+    .anyRequest().authenticated()
+);
+```
+
+**Why this happens:**
+- api-gateway (8080): No `SecurityFilterChain` defined → Spring Boot default allows actuator
+- equitycart (8082): Has custom `SecurityFilterChain` → `.anyRequest().authenticated()` blocks everything including actuator
+
+**Principle: Two independent access control layers:**
+1. **Management layer** (`management.endpoints.web.exposure.include`) — controls WHICH endpoints exist
+2. **Security layer** (`SecurityFilterChain`) — controls WHO can call them
+
+Both must allow access. Configuring management alone is insufficient when Spring Security is active.
+
+**Actuator endpoint exposure by role:**
+| Endpoint | Recommended access | Reason |
+|----------|-------------------|---------|
+| `/actuator/health` | Public | Load balancers, monitoring need this without auth |
+| `/actuator/info` | Public | CI/CD pipelines display version info |
+| `/actuator/metrics` | ADMIN | Exposes memory, GC, request rates |
+| `/actuator/env` | ADMIN (or disabled) | May expose environment variables with secrets |
+| `/actuator/configprops` | ADMIN (or disabled) | Shows all properties including passwords |
+| `/actuator/beans` | ADMIN (or disabled) | Internal Spring bean wiring — not for clients |
+
+**EquityCart rule (applied in Phase 7):** Expose `health,metrics,info` in equitycart-config, allow `/actuator/**` in SecurityConfig for admin-only services. Public health check permitted for gateway.
+

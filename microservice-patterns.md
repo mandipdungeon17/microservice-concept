@@ -1047,3 +1047,304 @@ Dependencies (market-data/build.gradle):
 - **Today**: Resilience4j is the standard for Spring Boot 3.x applications (Spring Cloud Circuit Breaker wraps it)
 
 Key philosophical difference: Hystrix used thread-pool isolation (each downstream got its own thread pool). Resilience4j uses semaphore-based bulkheads by default — less overhead, less isolation. Trade-off: Hystrix guaranteed that a slow downstream couldn't starve other downstreams' threads; Resilience4j trusts your timeouts to be correct.
+
+---
+
+## Phase 7: Infrastructure Patterns — Eureka, Config Server, Gateway (2026-06-02)
+
+### Pattern: Service Discovery (Eureka Registry)
+
+**Problem:** Services scale dynamically — IPs change, instances die. Hardcoded IPs break immediately.
+
+**Solution:** Eureka maintains an in-memory registry. Services self-register; clients query it.
+
+**Registration lifecycle:**
+```
+Service startup → POST /eureka/apps/{appName} (host, port, status)
+Service running → Heartbeat every 30s → refreshes 90s TTL lease
+Service failure → Misses 3 heartbeats → Eureka evicts (if self-preservation OFF)
+Other services  → Fetch full registry every 30s → cache locally
+```
+
+**Self-preservation mode:** In production, leave enabled (prevents eviction during network partitions). In dev, disable (`enable-self-preservation: false`) so failures are immediately visible.
+
+**Discovery Server config:**
+```yaml
+eureka:
+  client:
+    register-with-eureka: false  # This IS the server
+    fetch-registry: false        # Server doesn't need its own registry
+  server:
+    enable-self-preservation: false
+    eviction-interval-timer-in-ms: 10000
+```
+
+**Client service requirements:**
+1. `spring-cloud-starter-netflix-eureka-client` in build.gradle
+2. `@EnableDiscoveryClient` on main class
+3. `spring.application.name` set in application.yml
+4. `eureka.client.serviceUrl.defaultZone: http://localhost:8761/eureka/` in config
+
+---
+
+### Pattern: Centralized Configuration (Config Server + Git Backend)
+
+**Problem:** Service configs differ per environment, but rebuilding JARs for config changes is expensive and error-prone.
+
+**Solution:** Config Server reads from Git (single source of truth), serves merged configs to clients.
+
+**Git repository structure:**
+```
+equitycart-config/
+├── application.yml         # Shared: JPA, Kafka, logging (all services)
+├── api-gateway.yml         # Gateway-specific: port, routes, actuator
+├── user-service.yml        # User-service-specific: port, DB settings
+├── portfolio-service.yml   # Portfolio-specific
+└── ... (one per service)
+```
+
+**Merge order (highest priority last wins):**
+```
+Spring defaults ← application.yml (base) ← service.yml (overrides) ← local application.yml
+```
+
+**Client bootstrap:**
+```yaml
+# local application.yml (MUST be in application.yml, NOT bootstrap.yml in Spring Cloud 2025.0.0)
+spring:
+  application:
+    name: api-gateway         # ← Config Server uses this to find api-gateway.yml
+  config:
+    import: configserver:http://localhost:8888   # ← Fetch from Config Server
+```
+
+**Why separate config repo?**
+- Ops can change environment configs without rebuilding/redeploying code
+- Git history provides audit trail for all config changes
+- Config rollback = Git revert (no DB migration needed)
+- Supports multiple environments (dev/staging/prod) via Spring profiles
+
+---
+
+### Pattern: API Gateway as Service Mesh Entry Point
+
+**Problem:** N clients × M services = N×M connections, duplicated auth/logging, hardcoded service IPs.
+
+**Solution:** Single gateway entry point handles routing, cross-cutting concerns, service discovery.
+
+**Routing via Eureka (lb:// URIs):**
+```yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: user-service
+          uri: lb://user-service          # Eureka resolves this dynamically
+          predicates:
+            - Path=/api/auth/**,/api/users/**
+```
+
+**How lb:// works:**
+```
+Client: POST /api/auth/login
+  → Gateway: matches Path=/api/auth/**
+  → lb://user-service → Eureka lookup: [localhost:8081, localhost:8091 (if scaled)]
+  → LoadBalancer picks instance (round-robin)
+  → Gateway forwards to http://localhost:8081/api/auth/login
+  → Returns response to client
+```
+
+**Gateway as cross-cutting concern host:**
+- Authentication (verify JWT before forwarding) — Phase 8
+- Rate limiting (per client/IP) — Phase 8
+- Correlation ID injection (add X-Correlation-Id header) — Phase 7 Step 11
+- Request/response logging — Phase 9
+
+**Port allocation (EquityCart Phase 7):**
+```
+8080 → API Gateway (single entry point for clients)
+8081 → user-service (future)
+8082 → equitycart app (current monolith, transitional)
+8083 → order-service (future)
+8084 → portfolio-service (future)
+8085 → market-data-service (future)
+8086 → ledger-service (future)
+8087 → notification-service (future)
+8761 → Eureka Discovery Server
+8888 → Config Server
+```
+
+---
+
+### Database-per-Service vs Single Database + Multiple Schemas
+
+**Shared database (single DB, multiple schemas):**
+- Pros: ACID transactions across schemas, single backup, lower infra cost
+- Cons: Schema changes affect all services, shared connection pool, tight coupling
+- Example: Real-world `momentum` app — 25+ schemas in one PostgreSQL database
+
+**Database-per-service (recommended for true microservices):**
+- Pros: Independent deployments, independent scaling, technology choice per service
+- Cons: No cross-service ACID, requires Saga pattern for distributed transactions, more infra
+
+**EquityCart decision:** Database-per-service for independence. Multi-service transactions use Saga Orchestrator (implemented in Phase 6 SellToSpendSagaOrchestrator). Each extracted service (Steps 4-9) gets its own PostgreSQL database.
+
+---
+
+## 7. The Strangler Fig Pattern (Phase 7, Step 4)
+
+**Why "Strangler Fig"?** The name comes from a tropical plant. The strangler fig starts as a vine on the outside of a large host tree, slowly grows roots and branches around it, and eventually completely encases and replaces the host tree — which dies, leaving the fig tree standing in its shape. Martin Fowler coined this analogy for monolith decomposition in 2004: the new microservices system grows around the old monolith, taking over function by function, until the monolith can be switched off.
+
+### 7.1 The Problem: Big Bang Rewrites
+
+The naive decomposition strategy: stop everything, rewrite all services from scratch, switch over on day one. This is the "Big Bang" rewrite.
+
+Why it fails:
+- Rewrites take months/years — business cannot freeze feature development during that time
+- New system complexity is underestimated (edge cases only appear in production)
+- No rollback path if the new system has bugs on day one
+- Team has no operational experience with the new system before it's live
+- Martin Fowler: "Big bang rewrites are the riskiest strategy possible"
+
+### 7.2 The Solution: Incremental Extraction
+
+Extract one bounded context at a time. Run the new service alongside the monolith, routing a subset of traffic to it via the gateway. Each extraction is independently deployable, testable, and reversible. The monolith shrinks service by service until it handles nothing.
+
+```
+EquityCart extraction timeline (Phase 7):
+
+Steps 1-3:  Infrastructure (Eureka + Config Server + Gateway)
+            Monolith still handles ALL requests directly
+
+Step 4:     User-Service extracted (port 8081)
+            Gateway: /api/auth/** and /api/users/** → user-service
+            Monolith: still running on 8082 (user code present, routes bypassed)
+
+Step 5:     Market-Data-Service extracted (port 8085)
+            Gateway: /api/market-data/** → market-data-service
+
+Steps 6-9:  Order, Portfolio, Ledger, Notification extracted one by one
+
+Step 10:    OpenFeign replaces direct project() dependencies
+            Monolith project() imports removed one by one
+
+Step 12:    Docker Compose — monolith retired, all services standalone
+```
+
+### 7.3 The Gateway is the Strangler Facade
+
+In the physical analogy, the fig tree grows a new outer structure around the old tree. In the pattern, the **API Gateway is that outer structure** — it intercepts all client requests and routes them to either the extracted microservice (new) or falls through to the monolith (old). Clients never change their URLs. The migration is transparent.
+
+```
+Before extraction:
+  Client → monolith (8082) → all business logic in one JVM
+
+After Step 4:
+  Client → Gateway (8080) → lb://user-service → User-Service (8081)   [auth requests: NEW path]
+  Client → monolith (8082)                                             [other requests: OLD path]
+
+Both paths coexist. User-Service is the fig growing around the monolith's user domain.
+```
+
+### 7.4 Dual Plugin Pattern (Gradle multi-module monorepo)
+
+When extracting from a Gradle monorepo, the service was a `java-library` (library for the monolith) and needs to become `org.springframework.boot` (executable for standalone deployment). Both are needed during the transition.
+
+```
+Monolith needs:    plain jar (so implementation project(':user-service') can compile it)
+Standalone needs:  executable bootJar (for java -jar user-service.jar)
+
+Solution: apply both plugins + re-enable plain jar:
+
+plugins {
+    id 'org.springframework.boot'         // builds executable bootJar
+    id 'io.spring.dependency-management'
+}
+jar { enabled = true }                    // re-enable plain jar (disabled by spring-boot plugin by default)
+bootJar { archiveBaseName.set('user-service') ... }
+
+Result — two artifacts in build/libs/:
+  user-service-1.0.0.jar         <- plain jar (monolith classpath dependency)
+  user-service-1.0.0-exec.jar    <- executable bootJar (standalone deployment)
+```
+
+Modules that are ONLY standalone (discovery-server, api-gateway, config-server) do NOT need `jar { enabled = true }` — no other module depends on them as libraries.
+
+### 7.5 Config Duplication During Transition (Expected, Temporary)
+
+While a service is being extracted, the monolith and standalone service need identical config values. This creates intentional duplication:
+
+```
+app/application.yml:
+  jwt.secret: XYZ            <- monolith needs this (still compiles user-service code)
+
+equitycart-config/user-service.yml:
+  jwt.secret: XYZ            <- standalone user-service also needs it
+
+Cleanup rule: remove from app/application.yml ONLY AFTER removing
+              implementation project(':user-service') from app/build.gradle.
+              Premature removal breaks the monolith.
+```
+
+### 7.6 Database Transition Strategy
+
+Each extracted service gets its own database (database-per-service). During transition both the monolith and the extracted service may have tables for the same domain:
+
+```
+Before Step 4:
+  monolith → equitycart database (all tables including users, roles, refresh_tokens)
+
+After Step 4:
+  monolith → equitycart database (user tables still exist but routes bypassed by gateway)
+  user-service → equitycart_user database (NEW — Hibernate creates tables on first start via ddl-auto: update)
+
+  Authoritative path: all /api/auth/** goes through gateway → user-service (8081)
+  Monolith user tables: legacy data, no new writes via gateway routes
+
+After all services extracted:
+  Each service → its own database (equitycart_user, equitycart_order, equitycart_portfolio, ...)
+  equitycart (original monolith database) → abandoned, safely dropped
+```
+
+### 7.7 ddl-auto Hierarchy During Extraction
+
+Config Server merge priority in action:
+
+```
+equitycart-config/application.yml (base — all services):
+  spring.jpa.hibernate.ddl-auto: validate   <- production-safe default
+  Rationale: prod schemas maintained by Flyway, not auto-DDL; auto-DDL on prod is dangerous
+
+equitycart-config/user-service.yml (service-specific override):
+  spring.jpa.hibernate.ddl-auto: update     <- dev convenience override
+  Rationale: new equitycart_user schema starts empty, needs tables created automatically
+
+Merge result for user-service: update (service overrides base)
+Other services: still get validate until they add their own override
+
+In production: add application-prod.yml to equitycart-config with ddl-auto: validate,
+deploy with spring.profiles.active=prod, use Flyway for controlled schema migrations.
+```
+
+### 7.8 Eureka Default vs Explicit Registration
+
+Spring Cloud's auto-configured default: `eureka.client.serviceUrl.defaultZone = http://localhost:8761/eureka/`
+
+This works locally. In Docker Compose or Kubernetes, Eureka runs on a container hostname (`eureka-server:8761`). Services relying on the default silently fail to register in non-local environments.
+
+**Rule:** Always set `defaultZone` explicitly in every service's config YAML, even if the default would work locally. Explicit config is self-documenting and environment-portable.
+
+### 7.9 Interview Questions on Strangler Fig
+
+**"What is the Strangler Fig pattern and why is it preferred over Big Bang rewrites?"**
+
+Big Bang: stop all development, rewrite from scratch, switch over at once. High risk (no rollback), long timeline (months with no business value), lost domain knowledge, no operational experience. Strangler Fig: extract one service at a time, route traffic via gateway, monolith and microservices coexist. Each extraction is independently testable, rollback is a gateway config change. Business features continue shipping during the migration.
+
+**"How does the API Gateway enable the Strangler Fig pattern?"**
+
+The gateway is the Strangler Facade — the single entry point that routes requests to either extracted microservices or the legacy monolith. Clients never change their URLs. As each service is extracted, the gateway gains a new route rule. The monolith handles fewer requests over time. When the monolith handles zero, it can be shut down.
+
+**"What happens to data during Strangler Fig extraction?"**
+
+For read-heavy domains: dual-read (both systems serve reads) until confident, then cut over. For write-heavy domains: the extracted service becomes the authoritative write path via gateway routing. The monolith database for that domain stops receiving writes. After verification, the monolith tables are deprecated. In EquityCart: equitycart_user is the authoritative source once user-service is registered with Eureka and gateway routes to it.
+

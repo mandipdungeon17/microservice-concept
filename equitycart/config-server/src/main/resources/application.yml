@@ -5,6 +5,6 @@ spring:
     config:
       server:
         git:
-          uri: file:///C:/Users/H504024/Documents/Docs/Mandip/Preparation/microservice-concept/equitycart-config
+          uri: https://github.com/mandipdungeon17/equitycart-config.git
 server:
     port: 8888

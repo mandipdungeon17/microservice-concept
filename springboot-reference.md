@@ -917,3 +917,85 @@ public class SellToSpendServiceImpl implements SellToSpendService { ... }
 | @Scheduled not firing       | Job never runs                          | Missing @EnableScheduling                 | Add to main class or @Configuration                                     |
 | @Async not async            | Method runs synchronously               | Same-class call, or no @EnableAsync       | Extract to separate bean + add @EnableAsync                             |
 | N+1 query problem           | 100 SQL queries instead of 1            | Lazy-loaded collections iterated          | Use @EntityGraph, JOIN FETCH, or DTO projections                        |
+
+---
+
+## Spring Cloud Config + bootstrap.yml (Phase 7 — 2026-06-02)
+
+### Breaking Change: bootstrap.yml Deprecated in Spring Boot 3.5.8 + Spring Cloud 2025.0.0
+
+In Spring Boot 3.x / Spring Cloud 2025.0.0+, `bootstrap.yml` is no longer processed. This is a breaking change from Spring Cloud 2024.x.
+
+**Historical context:**
+- Spring Cloud < 2024.0: `bootstrap.yml` processed in a separate "bootstrap phase" before `application.yml`
+- Spring Cloud 2024.0+: Bootstrap phase merged into normal startup
+- Spring Cloud 2025.0.0: `bootstrap.yml` deprecated, ignored silently
+
+**Symptom:** Error at startup: `"No spring.config.import property has been defined"` even though the property exists in bootstrap.yml.
+
+**Fix:** Move `spring.config.import` to `application.yml`:
+```yaml
+# application.yml (NOT bootstrap.yml)
+spring:
+  application:
+    name: api-gateway
+  config:
+    import: configserver:http://localhost:8888
+```
+
+**Key rule:** `spring.application.name` MUST remain in local `application.yml` — Config Server uses it to determine which service-specific YAML to fetch. If missing, Config Server is called with "UNKNOWN" and service-specific configs never load.
+
+---
+
+### @EnableDiscoveryClient — Annotation Activation Model (Phase 7)
+
+`@EnableDiscoveryClient` is an activation annotation — it enables beans provided by a discovery dependency. It does NOT provide discovery functionality on its own.
+
+**Required dependency:**
+```gradle
+implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
+```
+
+**Without this dependency:** Annotation silently does nothing. No errors thrown. No registration logs. Dashboard shows zero instances.
+
+**Diagnosis checklist when Eureka registration fails:**
+1. Is `spring-cloud-starter-netflix-eureka-client` in build.gradle? → Add it
+2. Is `@EnableDiscoveryClient` on main class or `@Configuration`? → Must be Spring-scanned
+3. Is `spring.application.name` set in application.yml? → Required for Eureka registration name
+4. Are startup logs showing "Registering application ... with eureka"? → If not, dependency is missing
+
+**Note:** `spring-cloud-starter-gateway` does NOT transitively include `spring-cloud-starter-netflix-eureka-client`.
+
+---
+
+### Actuator Endpoints — Configuration + Spring Security Interaction (Phase 7)
+
+Actuator configuration and Spring Security are INDEPENDENT layers. Both must allow access.
+
+**Enable endpoints (management layer):**
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info
+  endpoint:
+    health:
+      show-details: always
+```
+
+**Allow access (security layer):**
+```java
+http.authorizeHttpRequests(authz -> authz
+    .requestMatchers("/actuator/**").permitAll()
+    .anyRequest().authenticated()
+);
+```
+
+**Symptom if security is missing:** HTTP 403 on `/actuator/health` even though it's in `exposure.include`.
+
+**Endpoint sensitivity guide:**
+- `health`, `info` — safe (expose publicly)
+- `metrics` — moderate (internal use / admin only)
+- `env`, `configprops` — sensitive (may expose credentials — never public)
+
