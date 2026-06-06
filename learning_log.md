@@ -4296,3 +4296,116 @@ A: Intentional temporary duplication. JWT secret, database credentials, and othe
 
 A: Base config models production-safe defaults. `validate` means Hibernate checks entity-schema alignment but never auto-modifies DDL — safe for production where schema changes must go through Flyway/Liquibase migrations. Service-specific YAML overrides with `update` for developer convenience (new schema starts empty, Hibernate creates tables automatically). Config Server merge hierarchy makes this clean: service YAML wins over base YAML, so dev gets `update` without touching the prod-safe base config.
 
+
+## Phase 7 Step 7: Extract Portfolio-Service as Standalone (2026-06-06)
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. LedgerServiceImpl bean not found — `@EnableJpaRepositories` does not scan `@Service` beans**
+
+- **Error:** `Parameter 1 of constructor in TradeServiceImpl required a bean of type 'com.equitycart.ledger.service.api.LedgerService'`
+- **Cause:** Initial approach used `@EnableJpaRepositories` with expanded packages. But `@EnableJpaRepositories` only generates proxy beans for repository interfaces — it does not load `@Service` or `@Configuration` classes. `LedgerServiceImpl` is a `@Service`, so it needs `@ComponentScan`.
+- **Fix:** Add explicit `@ComponentScan(basePackages = { ... })` covering all six modules that contribute service beans.
+- **Lesson:** There are four separate scanning pipelines. Confusing `@EnableJpaRepositories` with `@ComponentScan` causes "bean not found" errors that seem contradictory — the packages ARE listed, but the wrong scanner is responsible for that bean type.
+
+**2. `BeanDefinitionOverrideException` when `@ComponentScan` covers `com.equitycart.order`**
+
+- **Error:** `The bean 'orderItemRepository' could not be registered. A bean with that name has already been defined in @EnableJpaRepositories declared on OrderServiceApplication and overriding is disabled.`
+- **Cause:** `@ComponentScan` covering `com.equitycart.order` found `OrderServiceApplication` (annotated `@SpringBootApplication`, which is a `@Configuration`). Spring loaded it as a configuration bean, which carries its own `@EnableJpaRepositories`. Spring then tried to register `OrderItemRepository` twice.
+- **Fix:** Add `excludeFilters = @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class)` to the `@ComponentScan`. This tells Spring to scan those packages for `@Service` and `@Configuration` beans, but skip any class annotated with `@SpringBootApplication`.
+- **Why this works:** `@SpringBootApplication` includes `@SpringBootConfiguration`, which is itself a `@Configuration`. The exclude filter suppresses the entire class from being processed as configuration.
+
+**3. Spring Batch auto-configuration fires unexpectedly**
+
+- **Cause:** `product-service` has `spring-batch` on its classpath (from Phase 2 Step 7). When `@ComponentScan` covers `com.equitycart.product.*`, it loads `ProductBatchConfig` (a `@Configuration` class). Spring Boot's `BatchAutoConfiguration` fires and expects batch-specific YAML.
+- **Why order-service did not need this:** Order-service uses `@EnableJpaRepositories` (not `@ComponentScan`) for the product module. `@EnableJpaRepositories` only creates proxy beans for repository interfaces — `ProductBatchConfig` is never loaded, so `BatchAutoConfiguration` never triggers.
+- **Fix:** Added to `portfolio-service.yml`: `spring.batch.jdbc.initialize-schema: always` and `spring.batch.job.enabled: false`.
+
+**4. `@Value("${alphavantage.base-url}")` injection fails at startup**
+
+- **Error:** `Could not resolve placeholder 'alphavantage.base-url' in value "${alphavantage.base-url}"`.
+- **Cause:** `@ComponentScan` covering `com.equitycart.marketdata` loads `WebClientConfig` and `MarketDataServiceImpl`, both of which use `@Value` to read Alpha Vantage config. Those properties exist in `market-data-service.yml` but not in `portfolio-service.yml`.
+- **Fix:** Added `alphaVantage.api-key` and `alphaVantage.base-url` to `portfolio-service.yml`.
+- **Lesson:** When you scan a foreign module's packages, you inherit ALL of its startup requirements: every `@Value`, every auto-configuration trigger, every `@ConfigurationProperties` binding.
+
+---
+
+### Interview Questions & Answers
+
+**Q124: "Why did portfolio-service need Spring Batch config properties but order-service did not?" (2026-06-06)**
+
+A: The difference is which Spring scanner was used to pull in cross-module dependencies. Order-service used `@EnableJpaRepositories` to pick up `ProductRepository` from the product module. This scanner only registers JPA repository proxies; it never loads `@Configuration` classes. So `ProductBatchConfig` is never instantiated, `BatchAutoConfiguration` never triggers, and no batch properties are required.
+
+Portfolio-service used `@ComponentScan` covering `com.equitycart.product.*` because it needs `ProductServiceImpl` as an actual service bean. `@ComponentScan` loads ALL `@Configuration` classes from the scanned packages, including `ProductBatchConfig`. Once that class is loaded, Spring Boot's `BatchAutoConfiguration` fires and expects `spring.batch.jdbc.initialize-schema` and `spring.batch.job.enabled` to be set. The difference is entirely in which scanner you choose: `@EnableJpaRepositories` is surgical (repositories only), `@ComponentScan` is broad (everything with a Spring annotation).
+
+**Q125: "What is `BeanDefinitionOverrideException` and how do you prevent it in a multi-service classpath?" (2026-06-06)**
+
+A: `BeanDefinitionOverrideException` fires when Spring tries to register a bean with a name that was already registered, and `spring.main.allow-bean-definition-overriding` is false (the secure default since Spring Boot 2.1). In a multi-service classpath, the typical cause is that `@ComponentScan` scans a package containing another service's `@SpringBootApplication` class. That main class carries additional annotation declarations like `@EnableJpaRepositories`, which generate repository beans that duplicate the current service's own registrations.
+
+Prevention: add `excludeFilters = @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class)` to your `@ComponentScan`. This suppresses any class annotated with `@SpringBootApplication` from being processed as a configuration bean, while still allowing all `@Service` and non-main `@Configuration` beans in the same package to be registered normally.
+
+**Q126: "Explain transitive classpath contamination in a Strangler Fig microservices transition." (2026-06-06)**
+
+A: When you use `implementation project(':some-service')` in Gradle, the entire compiled output of that module lands on your service's classpath — not just the classes you need, but every `@Configuration`, every auto-configuration trigger, and every `@Value` annotation in the module. If that module pulled in Spring Batch, your service now has `BatchAutoConfiguration` on its classpath. If it reads `${alphavantage.api-key}` via `@Value`, your service must supply that property.
+
+This is the defining tension of Strangler Fig decomposition: direct module dependencies provide compile-time type safety but come with invisible runtime requirements from all the code paths you did not intend to activate. The clean solution is Phase 10 (replacing direct project dependencies with Feign HTTP clients) — at that point, each service only sees the other's API contract (DTOs and Feign interfaces), not its implementation, and all auto-configuration side effects disappear.
+
+---
+
+## Phase 7 Step 8: Extract Ledger-Service as Standalone (2026-06-06)
+
+---
+
+### Roadblocks & Issues Faced
+
+Step 8 completed without runtime errors. No debugging sessions were needed. This is a direct consequence of ledger-service being the cleanest module in the codebase: it has no cross-module service bean dependencies, no foreign auto-configuration triggers, and no foreign `@Value` requirements.
+
+The only non-obvious design decision was determining which annotations were needed and which were not — see Core Concepts below.
+
+---
+
+### Interview Questions & Answers
+
+**Q127: "When is `@EntityScan` required without `@EnableJpaRepositories` being required?" (2026-06-06)**
+
+A: When an entity (or `@MappedSuperclass`) lives outside the main class's package tree, but all JPA repository interfaces are inside it. `@EntityScan` controls where Spring looks for `@Entity` and `@MappedSuperclass` classes. `@EnableJpaRepositories` controls where Spring looks for `JpaRepository` interfaces. They are independent.
+
+In ledger-service: `LedgerEntryRepository` is at `com.equitycart.ledger.repository` — covered by the default scan. No `@EnableJpaRepositories` needed. But `BaseEntity` is at `com.equitycart.commons.entity` — outside the default scan. Without `@EntityScan(basePackages = {"com.equitycart.ledger", "com.equitycart.commons"})`, Hibernate might not register `BaseEntity` as a managed superclass, and the inherited `id`/`createdAt`/`updatedAt` columns would be absent from schema generation.
+
+**Q128: "In a multi-service classpath, why did ledger-service start without additional property requirements while portfolio-service needed batch and alphaVantage config?" (2026-06-06)**
+
+A: Because ledger-service did not use `@ComponentScan` to scan foreign packages. Portfolio-service declared `@ComponentScan` covering `com.equitycart.product.*` and `com.equitycart.marketdata`, which caused Spring to load `ProductBatchConfig` and `WebClientConfig` as `@Configuration` beans — triggering `BatchAutoConfiguration` and `@Value` property injection respectively.
+
+Ledger-service has no cross-module service dependencies. Its default `@SpringBootApplication` scan covers only `com.equitycart.ledger.*`, where all its own beans live. Nothing in that package triggers Batch auto-configuration or reads external API properties. The rule: auto-configuration side effects are proportional to the breadth of your `@ComponentScan`. Narrow scan = minimal startup requirements.
+
+---
+
+## Phase 7 Step 9: Extract Notification-Service as Standalone (2026-06-06)
+
+---
+
+### Roadblocks & Issues Faced
+
+Step 9 completed without runtime errors. The extraction followed the same clean pattern as ledger-service: all beans in the same package tree, no cross-module service dependencies, only `@EntityScan` required beyond the minimum annotations.
+
+The two clarifying questions raised after this step produced important conceptual insights captured below.
+
+---
+
+### Interview Questions & Answers
+
+**Q129: "In a Strangler Fig decomposition, why can't you always extract every service as standalone immediately?" (2026-06-06)**
+
+A: Because some services are consumed as libraries via direct method calls, and those consumers must be migrated before the library can be removed. In EquityCart, product-service is a library that order-service and portfolio-service both depend on directly: order-service injects `ProductRepository` (a Spring Data JPA proxy from the product module), and portfolio-service loads `ProductServiceImpl` via `@ComponentScan`. Removing `implementation project(':product-service')` from either before replacing those calls would cause startup failures — missing beans and unresolvable imports.
+
+The Strangler Fig pattern handles this with sequential phases: Phase 7 extracts the services that are already independent. Phase 10 adds Feign HTTP clients that replicate the product-service API over HTTP, at which point the direct dependencies can be dropped and product-service becomes a true standalone. The rule: a library service can only be extracted as standalone once all its consumers have migrated to HTTP.
+
+**Q130: "What is the difference between `@ConditionalOnProperty(matchIfMissing = true)` and `@Value("${prop:default}")`?" (2026-06-06)**
+
+A: They solve related but different problems. `@ConditionalOnProperty(matchIfMissing = true)` controls whether a **bean is created at all** — when the property is absent, the condition is treated as met, so the bean IS instantiated. This is used to make a strategy the default-active choice without requiring an explicit config entry. For example, `SellToSpendSagaOrchestrator` has `matchIfMissing = true`, making saga the default strategy when no override is set.
+
+`@Value("${prop:default}")` provides a **fallback value for field injection** when the named property is absent. Spring resolves the default inline at injection time. The bean is always created; the field just gets the fallback value instead of a resolved property. `saga.timeout-seconds` uses this — the orchestrator always exists (controlled by `@ConditionalOnProperty`), and if the timeout property is missing, it defaults to 30 seconds.
+
+Combined: `@ConditionalOnProperty(matchIfMissing = true)` decides whether the bean exists; `@Value` with a default decides what value a field gets if the bean does exist but the property is absent. Both allow you to omit properties from YAML when the application's designed default is what you want.

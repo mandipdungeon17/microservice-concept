@@ -999,3 +999,234 @@ http.authorizeHttpRequests(authz -> authz
 - `metrics` — moderate (internal use / admin only)
 - `env`, `configprops` — sensitive (may expose credentials — never public)
 
+---
+
+## 12. Transitive Dependencies — `api` vs `implementation` in Gradle Multi-Module Projects
+
+### 12.1 Why This Matters for Spring Boot
+
+Spring Boot auto-configuration fires based on what is ON the classpath. If a dependency reaches your service's classpath transitively (even if you never asked for it), auto-configuration for that library will activate. This caused a real startup failure in EquityCart Phase 7:
+
+- `commons/build.gradle` declared: `api 'spring-boot-starter-data-jpa'`
+- `market-data/build.gradle` declared: `implementation project(':commons')`
+- Result: JPA landed on market-data's classpath transitively
+- Spring Boot saw JPA → fired `DataSourceAutoConfiguration` → looked for `spring.datasource.url` → found nothing → **crash**
+
+Market-data has no SQL entities. It never needed JPA. But because of `api` scope, it inherited JPA silently.
+
+### 12.2 `api` vs `implementation` — The Difference
+
+```
+Module A: commons/build.gradle
+  api 'spring-boot-starter-data-jpa'       ← leaks to consumers
+  implementation 'some-internal-lib'        ← private, NOT leaked
+
+Module B: market-data/build.gradle
+  implementation project(':commons')
+
+Result:
+  - market-data CAN use commons public types (BaseEntity, etc.)
+  - market-data ALSO gets spring-boot-starter-data-jpa on its classpath (api leak)
+  - market-data CANNOT see 'some-internal-lib' (implementation = private)
+```
+
+### 12.3 Decision Rule
+
+Use `api` scope only when the dependency's types appear in your module's **public API signatures** — method parameter types, return types, or public field types that consumers must use.
+
+```java
+// commons/BaseEntity.java — public type
+@MappedSuperclass               // ← this annotation is FROM spring-data-jpa
+public abstract class BaseEntity {
+    @Id                         // ← this annotation is FROM spring-data-jpa
+    @GeneratedValue
+    private Long id;
+}
+```
+
+Because `BaseEntity` extends/uses JPA annotations in its public declaration, any module that subclasses `BaseEntity` needs JPA to compile. So `api` is correct here. The problem is that market-data (which doesn't extend BaseEntity) inherited it unnecessarily by depending on commons.
+
+### 12.4 Two Fix Options When You Inherit Unwanted Auto-Configuration
+
+**Option A — Exclude auto-configuration at startup (keep the dependency):**
+```java
+@SpringBootApplication(exclude = {
+    DataSourceAutoConfiguration.class,
+    HibernateJpaAutoConfiguration.class
+})
+public class MarketDataServiceApplication { ... }
+```
+Use when: you need some commons types but not the auto-configured bean (e.g., you use `BaseEntity` for ID generation but have no SQL).
+
+**Option B — Remove the dependency entirely:**
+```groovy
+// market-data/build.gradle — comment out the unused commons dependency
+// implementation project(':commons')
+```
+Use when: the module genuinely has no use for commons at all. This is the cleaner fix.
+
+### 12.5 Detecting Transitive Dependency Leaks
+
+```bash
+# List all resolved dependencies for a module (shows transitive chain)
+./gradlew :market-data:dependencies --configuration compileClasspath
+
+# Look for unexpected entries like:
+# +--- project :commons
+# |    +--- org.springframework.boot:spring-boot-starter-data-jpa (transitive)
+```
+
+---
+
+## 13. Spring Security in Standalone Microservices — The Monolith vs Standalone Gap
+
+### 13.1 The Problem
+
+In a monolith, ONE `SecurityFilterChain` bean (defined in any module on the shared classpath) protects ALL modules. When you extract a service as a standalone Spring Boot app, it no longer shares a classpath — it must define its own security configuration.
+
+**EquityCart example:** In the monolith, `user-service/SecurityConfig` was compiled into the same JVM as `market-data`. All market-data endpoints required JWT authentication because SecurityConfig applied to the entire application. After extraction, standalone market-data has no SecurityConfig, so all endpoints are open.
+
+### 13.2 `spring-security-core` vs `spring-boot-starter-security`
+
+| What you add | What you get | Default HTTP protection |
+|---|---|---|
+| `spring-security-core` | Core types: `Authentication`, `SecurityContext`, `@PreAuthorize`, `GrantedAuthority` | **None** — no filter chain, no auto-config |
+| `spring-boot-starter-security` | Core types + `SecurityAutoConfiguration` | **Yes** — all routes require auth by default |
+
+The typical reason to use only `spring-security-core` in a microservice:
+- You need to work with security types (e.g., parse a JWT passed from a gateway) but don't want to impose a specific filter chain
+- You're in a transition phase and will add full security later
+- You're behind an API gateway that already validates tokens — downstream services only need to extract the userId from a forwarded header
+
+### 13.3 `@PreAuthorize` Without `@EnableMethodSecurity` — Silent No-Op
+
+```java
+// ❌ This annotation does NOTHING if @EnableMethodSecurity is not declared anywhere
+@PreAuthorize("hasRole('ADMIN')")
+public ResponseEntity<Void> evictCache(String symbol) { ... }
+```
+
+`@PreAuthorize` is just metadata (a Java annotation). Spring only processes it if the method security AOP advisor is registered. The advisor is registered only when a `@Configuration` class in the same application context declares `@EnableMethodSecurity`.
+
+In the monolith, `user-service`'s `SecurityConfig` had `@EnableMethodSecurity` and was on the shared classpath — all modules benefited. In a standalone service, you must declare it yourself.
+
+**To enable method security in a standalone service:**
+```java
+@Configuration
+@EnableMethodSecurity
+public class SecurityConfig {
+    // Even an empty class makes @PreAuthorize active
+}
+```
+
+### 13.4 Phase 8 Plan: Per-Service JWT Validation
+
+The correct approach for Phase 8 (Security Hardening) is Spring Security's OAuth2 Resource Server:
+
+```groovy
+// Each service build.gradle
+implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
+```
+
+```yaml
+# Each service's config YAML
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Either point to a JWK Set URI for public key retrieval,
+          # or use the shared secret for HMAC validation
+```
+
+The resource server auto-configuration creates a `JwtAuthenticationConverter` → `BearerTokenAuthenticationFilter` chain that validates JWT on every request. This replaces the manual `JwtAuthFilter` in the monolith with a declarative, standardized approach.
+
+
+---
+
+## 15. Spring Scanning Pipelines in Multi-Module Applications
+
+### 15.1 The Four Independent Scanning Pipelines
+
+Spring Boot registers beans through four entirely separate mechanisms. None covers the others automatically:
+
+| What is registered | Controlled by | Scans for |
+|---|---|---|
+| `@Component`, `@Service`, `@Controller`, `@Configuration` beans | `@ComponentScan` | Classes with those annotations |
+| JPA repository proxy beans | `@EnableJpaRepositories` | Interfaces extending `JpaRepository` |
+| JPA entity / MappedSuperclass registration | `@EntityScan` | Classes annotated `@Entity` / `@MappedSuperclass` |
+| MongoDB repository proxy beans | `@EnableMongoRepositories` | Interfaces extending `MongoRepository` |
+
+The key insight: expanding `@ComponentScan` does **not** automatically expand `@EntityScan` or `@EnableJpaRepositories`, and vice versa. You must configure each pipeline explicitly when its targets live outside the main class's package tree.
+
+### 15.2 Decision Guide: Which Scanner to Use
+
+| Need | Use |
+|---|---|
+| Use a foreign `@Service` or `@Component` bean directly | `@ComponentScan` covering that package |
+| Use only a foreign `JpaRepository` proxy | `@EnableJpaRepositories` covering that package |
+| Use a foreign `@Entity` / `@MappedSuperclass` | `@EntityScan` covering that package |
+
+**Rule:** only expand a scanner when the target class lives **outside** the main class's package tree. Within the tree, defaults cover everything.
+
+If you only need a repository, use the narrower `@EnableJpaRepositories` — it loads no `@Configuration` classes and avoids auto-configuration side effects. Only escalate to `@ComponentScan` when you need the full service layer.
+
+### 15.3 The `@ComponentScan` Breadth Hazard
+
+`@ComponentScan` is broad: it loads ALL `@Component`, `@Service`, and `@Configuration` classes from scanned packages. This has three cascading effects in multi-module projects:
+
+**1. BeanDefinitionOverrideException from other services' main classes**
+
+When `@ComponentScan` covers a package that contains another service's `@SpringBootApplication` class, Spring finds it and processes it as a `@Configuration` (because `@SpringBootApplication` meta-annotates `@SpringBootConfiguration`). That main class carries its own `@EnableJpaRepositories`, triggering duplicate repository registrations.
+
+**Fix:** `excludeFilters = @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class)` — skip classes annotated with `@SpringBootApplication` while still scanning all other beans in those packages.
+
+**2. Transitive auto-configuration triggers**
+
+`implementation project(':product-service')` puts that module's entire compiled classpath into your service. When `@ComponentScan` covers `com.equitycart.product.*`, it loads `ProductBatchConfig` (a `@Configuration` carrying `spring-batch`). Spring Boot's `BatchAutoConfiguration` then fires, expecting `spring.batch.jdbc.initialize-schema` and `spring.batch.job.enabled` to be present.
+
+With `@EnableJpaRepositories` instead: only JPA proxy beans are registered — `ProductBatchConfig` is never loaded, `BatchAutoConfiguration` never fires.
+
+**3. Transitive `@Value` property requirements**
+
+Any `@Configuration` or `@Service` loaded via `@ComponentScan` that reads `@Value("${some.property}")` requires that property in your YAML. In EquityCart: scanning `com.equitycart.marketdata` loads `WebClientConfig`, which reads `${alphavantage.api-key}` — forcing portfolio-service to supply that value even though it never uses Alpha Vantage directly.
+
+**Summary:** `@ComponentScan` expansion is the primary source of startup complexity during Strangler Fig service extraction. Services that can be extracted without it start cleanly. Services requiring it inherit all their dependencies' startup requirements.
+
+### 15.4 `@EntityScan` Independent from `@EnableJpaRepositories`
+
+`@EntityScan` and `@EnableJpaRepositories` each override only their own scanning default — they are entirely independent. You can need one without the other.
+
+**Pattern:** `@EntityScan` is needed when an `@Entity` or `@MappedSuperclass` lives outside the main class's package tree — even when all repository interfaces are inside it (so `@EnableJpaRepositories` is unnecessary). In EquityCart, ledger-service and notification-service need `@EntityScan` (for `BaseEntity` at `com.equitycart.commons.entity`) but NOT `@EnableJpaRepositories` (their own repositories are in-scope by default).
+
+Without `@EntityScan` covering `com.equitycart.commons`, Hibernate does not register `BaseEntity` as a managed superclass, and the inherited `id`, `createdAt`, `updatedAt` columns are omitted from schema generation.
+
+### 15.5 `@ConditionalOnProperty(matchIfMissing = true)` — Default-ON Beans
+
+`@ConditionalOnProperty` has a `matchIfMissing` parameter controlling what happens when the named property is absent:
+
+| `matchIfMissing` value | Property absent | Bean created? |
+|---|---|---|
+| `false` (default) | condition NOT met | No |
+| `true` | condition treated as met | Yes |
+
+Used to make a strategy bean **default-active** without requiring an explicit YAML entry. The property only needs to be set when overriding the default.
+
+Example: `@ConditionalOnProperty(name = "equitycart.sell-to-spend.strategy", havingValue = "saga", matchIfMissing = true)` makes `SellToSpendSagaOrchestrator` the active strategy whenever the property is absent or equals `"saga"`.
+
+### 15.6 `@Value` Inline Defaults — `${property:default}`
+
+Spring's `@Value` annotation supports an inline fallback with the `:` separator:
+
+```java
+@Value("${equitycart.saga.timeout-seconds:30}")
+private int timeoutSeconds;
+```
+
+When the property is absent, Spring substitutes `30` directly — no YAML entry required. The bean is always created; only the field value changes.
+
+**Contrast with `matchIfMissing`:**
+- `@ConditionalOnProperty(matchIfMissing = true)` controls **whether the bean exists at all**
+- `@Value("${prop:default}")` controls **what value a field gets** inside a bean that already exists
+
+**Rule of thumb:** only add a property to YAML when you need to override its designed default. Config files should express deviations from defaults, not repeat them.

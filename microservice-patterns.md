@@ -1348,3 +1348,35 @@ The gateway is the Strangler Facade — the single entry point that routes reque
 
 For read-heavy domains: dual-read (both systems serve reads) until confident, then cut over. For write-heavy domains: the extracted service becomes the authoritative write path via gateway routing. The monolith database for that domain stops receiving writes. After verification, the monolith tables are deprecated. In EquityCart: equitycart_user is the authoritative source once user-service is registered with Eureka and gateway routes to it.
 
+
+
+---
+
+### 7.10 Phase-Based Extraction: The Six-Service Comparison
+
+Not all services in a Strangler Fig decomposition can be extracted simultaneously — the order depends on inter-service dependencies. Annotation complexity is a direct proxy for coupling complexity:
+
+| Service | Annotations beyond minimum | Reason |
+|---|---|---|
+| User-service | `@EnableDiscoveryClient` only | All beans in `com.equitycart.user.*`, no cross-module deps |
+| Market-data-service | `@EnableDiscoveryClient` only, removed `commons` dep | Transitive JPA blast — `commons` `api` scope leaked JPA to a no-DB service |
+| Order-service | `@EnableDiscoveryClient`, `@EnableJpaRepositories`, `@EntityScan`, `@EnableScheduling` | Cross-module `ProductRepository` + cross-module entities + OutboxPoller |
+| Portfolio-service | `@ComponentScan` + `excludeFilters`, `@EnableJpaRepositories`, `@EntityScan`, `@EnableMongoRepositories`, `@EnableDiscoveryClient`, `@EnableScheduling` | Full service layer from 5 modules needed |
+| Ledger-service | `@EnableDiscoveryClient`, `@EntityScan` | `BaseEntity` in commons is sole out-of-scope class |
+| Notification-service | `@EnableDiscoveryClient`, `@EntityScan` | Same as ledger — `NotificationLog` extends `BaseEntity` |
+
+Portfolio-service needs the most annotations because it has the most cross-module dependencies — every annotation signals one more inter-service coupling that will be eliminated in Phase 10.
+
+### 7.11 Library Service Extraction Constraint
+
+A service acting as a shared library **cannot** be extracted as a standalone microservice until all its consumers have migrated to HTTP.
+
+In EquityCart, `product-service` is consumed as a library by two services:
+- `order-service`: `implementation project(':product-service')` → `OrderServiceImpl` injects `ProductRepository` directly for pessimistic stock locking
+- `portfolio-service`: `@ComponentScan` covers `com.equitycart.product.*` → `ProductServiceImpl` is loaded as a live Spring bean
+
+Removing `project(':product-service')` from either build without a replacement causes startup failures — missing beans and unresolvable class imports at compile time.
+
+**Resolution (Phase 10):** OpenFeign HTTP clients replace both direct dependencies. Order-service gets a `ProductFeignClient` that calls `GET /api/products/{id}` over HTTP. Portfolio-service stops scanning `com.equitycart.product.*` and uses the Feign client instead. At that point, product-service becomes a true standalone with REST endpoints and no consumers left on its classpath.
+
+**Strangler Fig principle:** Extract independent services first. Break remaining tight couplings only after the HTTP boundary is established. Never force an extraction before the consumer migration is ready — an incomplete extraction that requires hacks to compile is worse than the monolith state you started from.
