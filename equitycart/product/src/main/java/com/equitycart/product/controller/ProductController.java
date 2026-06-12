@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /** REST controller for product CRUD and search operations. Base path: {@code /api/products} */
@@ -108,5 +109,37 @@ public class ProductController {
     PagedResponse<ProductResponse> response = productService.searchProduct(request, pageable);
 
     return ResponseEntity.ok(response);
+  }
+
+  /**
+   * Deducts stock from a product. Called internally by order-service via Feign on order placement.
+   * No {@code @PreAuthorize} guard — relies on network-level isolation until Phase 8 OAuth2.
+   *
+   * @param id the product identifier
+   * @param quantity the number of units to deduct (query parameter)
+   * @return HTTP 200 OK on success; 409 Conflict if insufficient stock; 404 if product not found
+   */
+  @PutMapping("/{id}/deduct-stock")
+  public ResponseEntity<Void> deductStock(
+      @PathVariable("id") Long id, @RequestParam("quantity") int quantity) {
+    log.info("PUT /api/products/{}/deduct-stock - quantity: {}", id, quantity);
+    productService.deductStock(id, quantity);
+    return ResponseEntity.ok().build();
+  }
+
+  /**
+   * Restores previously deducted stock. Called internally by order-service via Feign on order
+   * return or cancellation — the compensating operation for {@code deductStock}.
+   *
+   * @param id the product identifier
+   * @param quantity the number of units to restore (query parameter)
+   * @return HTTP 200 OK on success; 404 if product not found
+   */
+  @PutMapping("/{id}/restore-stock")
+  public ResponseEntity<Void> restoreStock(
+      @PathVariable("id") Long id, @RequestParam("quantity") int quantity) {
+    log.info("PUT /api/products/{}/restore-stock - quantity: {}", id, quantity);
+    productService.restoreStock(id, quantity);
+    return ResponseEntity.ok().build();
   }
 }

@@ -1,0 +1,82 @@
+services:
+  postgres:
+    container_name: postgres
+    image: postgres:16
+    restart: always
+    ports:
+      - 5432:5432
+    environment:
+      - POSTGRES_DB=equitycart
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+#      - POSTGRES_MULTIPLE_DATABASES="equitycart",equitycart_ledger","equitycart_notification","equitycart_order","equitycart_product","equitycart_user","equitycart_portfolio"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+  kafka:
+    container_name: kafka
+    image: apache/kafka:latest
+    user: "0"            #← add this line (runs Kafka process as root inside container)
+    ports:
+      - 9092:9092
+      - 29092:29092
+    environment:
+      - KAFKA_NODE_ID=1
+      - KAFKA_PROCESS_ROLES=broker,controller
+      - KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093
+      - KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,DOCKER://:29092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092,DOCKER://kafka:29092
+      - KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,DOCKER:PLAINTEXT
+      - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+      - CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk
+      - KAFKA_LOG_DIRS=/var/kafka/data
+      - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1
+      - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
+    volumes:
+      - kafka-data:/var/kafka/data
+
+  debezium:
+    container_name: debezium
+    depends_on:
+      - postgres
+      - kafka
+    image: debezium/connect:2.5
+    ports:
+      - 8083:8083
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:29092
+      - GROUP_ID=equitycart-connect
+      - CONFIG_STORAGE_TOPIC=equitycart-connect-configs
+      - OFFSET_STORAGE_TOPIC=equitycart-connect-offsets
+      - STATUS_STORAGE_TOPIC=equitycart-connect-status
+
+  redis:
+    container_name: redis
+    image: redis:latest
+    ports:
+      - 6379:6379
+    volumes:
+      - redis-data:/data
+
+  mongodb:
+    container_name: mongodb
+    image: mongo:latest
+    ports:
+      - 27017:27017
+    volumes:
+      - mongo-data:/data/db
+
+  mailhog:
+    container_name: mailhog
+    image: mailhog/mailhog:latest
+    ports:
+      - 1025:1025
+      - 8025:8025
+
+volumes:
+  postgres-data:
+  kafka-data:
+  redis-data:
+  mongo-data:

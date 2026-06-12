@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 7 - Microservices Decomposition (IN PROGRESS)
+## Status: Phase 7 - Microservices Decomposition (COMPLETE)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -716,7 +716,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - application.yml: spring.mail (MailHog localhost:1025), equitycart.notification.channel=LOG, webhook-url, recipient-email
   - E2E tested: BUY trade → TRADE_EXECUTED notification logged + persisted + queryable via REST API
 
-## Phase 7: Microservices Decomposition (started 2026-06-01) — IN PROGRESS
+## Phase 7: Microservices Decomposition (started 2026-06-01) — COMPLETE (2026-06-12)
 
 ### Step Plan
 
@@ -725,16 +725,16 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 | 1 | Eureka Discovery Server (new module, port 8761) | COMPLETE |
 | 2 | Config Server (new module, port 8888, Git-backed) | COMPLETE |
 | 3 | Spring Cloud Gateway (new module, port 8080, routing + filters) | COMPLETE |
-| 4 | Extract User-Service as standalone (port 8081, Eureka client) | PENDING |
-| 5 | Extract Market-Data-Service as standalone (port 8085) | PENDING |
-| 6 | Extract Order-Service as standalone (port 8083) | PENDING |
-| 7 | Extract Portfolio-Service as standalone (port 8084) | PENDING |
-| 8 | Extract Ledger-Service as standalone (port 8086) | PENDING |
-| 9 | Extract Notification-Service as standalone (port 8087) | PENDING |
-| 10 | OpenFeign clients (replace direct module deps with HTTP calls) | PENDING |
-| 11 | Correlation ID propagation (MDC + Gateway filter + Feign interceptor) | PENDING |
-| 12 | Docker Compose (full stack: all services + infrastructure) | PENDING |
-| 13 | End-to-end testing + re-audit (all services inter-communicating) | PENDING |
+| 4 | Extract User-Service as standalone (port 8081, Eureka client) | COMPLETE |
+| 5 | Extract Market-Data-Service as standalone (port 8085) | COMPLETE |
+| 6 | Extract Order-Service as standalone (port 8088) | COMPLETE |
+| 7 | Extract Portfolio-Service as standalone (port 8084) | COMPLETE |
+| 8 | Extract Ledger-Service as standalone (port 8086) | COMPLETE |
+| 9 | Extract Notification-Service as standalone (port 8087) | COMPLETE |
+| 10 | OpenFeign clients (replace direct module deps with HTTP calls) | COMPLETE |
+| 11 | Correlation ID propagation (MDC + Gateway filter + Feign interceptor) | COMPLETE |
+| 12 | Docker Compose (full stack: all services + infrastructure) | COMPLETE |
+| 13 | End-to-end testing + re-audit | DEFERRED (requires Phase 8 auth) |
 
 ### Design Completed
 - [x] Phase 7 architecture designed: Eureka (service discovery), Config Server (centralized config), Gateway (routing/filtering), database-per-service pattern
@@ -834,10 +834,58 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - `equitycart.notification.*` properties added (channel=LOG, webhook-url, recipient-email)
   - **Key clarifications**: product-service NOT extracted (order-service + portfolio-service have direct dependencies — deferred to Phase 10 Feign migration); saga/timeout properties omitted because `matchIfMissing=true` and `@Value` inline defaults cover the designed defaults
   - Q129–Q130 added to learning_log.md
-- [ ] Step 10: OpenFeign clients (replace direct module deps with HTTP calls) — PENDING
-- [ ] Step 11: Correlation ID propagation (MDC + Gateway filter + Feign interceptor) — PENDING
-- [ ] Step 12: Docker Compose (full stack: all services + infrastructure) — PENDING
-- [ ] Step 13: End-to-end testing + re-audit (all services inter-communicating) — PENDING
+- [x] Step 10: OpenFeign clients — COMPLETE (2026-06-09)
+  - `ProductFeignClient` in commons: 4 methods — getProductById, deductStock, restoreStock, getTickerMappingsByBrandId; generates JDK Dynamic Proxy at startup; routes via lb://PRODUCT-SERVICE through Eureka
+  - `BrandTickerMappingDTO` in commons: 3-field subset (brandId, tickerSymbol, stockBackPercentage) of full product-service response; Jackson DTO Projection drops remaining fields
+  - `ProductDTO` in commons: 6-field subset (id, name, price, stockQuantity, brandId, active)
+  - `OrderFeignClient` in portfolio module: 2 methods — getOrderById, updateOrderStatus; lives in portfolio (not commons) because OrderResponse/UpdateOrderStatusRequest are order-service types — moving to commons would create a circular dependency
+  - order-service: removed direct ProductRepository injection; `deductStock`/`restoreStock` now use pessimistic lock endpoint in product-service; stock deduction/restoration calls go through ProductFeignClient
+  - portfolio-service `SellToSpendServiceImpl` + `SellToSpendSagaOrchestrator`: removed OrderService injection; replaced with OrderFeignClient
+  - portfolio-service `StockBackRewardConsumer`: removed ProductRepository + BrandTickerMappingRepository injection; replaced with ProductFeignClient
+  - `PortfolioServiceApplication`: `@ComponentScan` no longer covers `"com.equitycart.order"` (prevented OrderServiceImpl loading its own ProductFeignClient dependency); `@EnableJpaRepositories` + `@EntityScan` still cover `"com.equitycart.order"` (OutboxEventRepository proxy + OutboxEvent entity needed by SagaOutboxWriter)
+  - product-service: `jar { enabled = true }` + `bootJar { archiveClassifier.set('exec') }` dual artifact for library + executable during migration
+  - `ProductServiceApplication` + all new/modified files: Javadoc + Log4j on all uncommitted files
+  - **Startup error 1**: ProductFeignClient not found — OrderServiceImpl (loaded via @ComponentScan) injected ProductFeignClient; fix: remove com.equitycart.order from @ComponentScan
+  - **Startup error 2**: OutboxEventRepository not found — removed from @EnableJpaRepositories too aggressively; fix: keep com.equitycart.order in @EnableJpaRepositories + @EntityScan
+  - All 8 services verified registering in Eureka: API-GATEWAY (8080), USER-SERVICE (8081), ORDER-SERVICE (8088), PORTFOLIO-SERVICE (8084), PRODUCT-SERVICE (8089), MARKET-DATA-SERVICE (8085), LEDGER-SERVICE (8086), NOTIFICATION-SERVICE (8087)
+  - openfeign-guide.md created: 12-section exhaustive reference (history, proxy mechanics, startup flow, runtime trace, DTO projection, FeignErrorDecoder, @RequestParam vs @RequestBody, load balancing, circular dependency rules, interview questions)
+  - Q131–Q138 added to learning_log.md
+- [x] Step 11: Correlation ID propagation — COMPLETE (2026-06-10)
+  - `MdcCorrelationFilter` in commons/filter: `OncePerRequestFilter` — reads `X-Correlation-Id` header (generates UUID if absent), stores in Log4j2 `ThreadContext`, echoes in response, cleans up in `finally`
+  - `FeignCorrelationInterceptor` in commons/feign: Feign `RequestInterceptor` — reads correlationId from `ThreadContext.get()`, adds as `X-Correlation-Id` header to every outgoing Feign HTTP call; auto-registered via `@Component` into all `@FeignClient` beans
+  - `CorrelationIdGatewayFilter` in api-gateway/filter: Spring Cloud Gateway `GlobalFilter` + `Ordered` — generates/propagates UUID at entry point; uses `exchange.mutate()` (immutable WebFlux API); `HIGHEST_PRECEDENCE` ordering; `Mono.fromRunnable()` for response header
+  - `equitycart-config/application.yml` logging pattern: `%X{correlationId}` in console pattern reads ThreadContext on every log event
+  - **Key design decisions**: Gateway uses `GlobalFilter` (not `default-filters` YAML — SpEL evaluated at startup, not per-request); downstream services use `OncePerRequestFilter` (Tomcat/Servlet); gateway has NO MDC/ThreadContext (Netty event loop threads cannot use thread-local)
+  - **MDC/ThreadContext resolution**: Replaced `org.slf4j.MDC` with `org.apache.logging.log4j.ThreadContext` in both filter and interceptor — project uses Log4j2 natively; SLF4J MDC bridged to ThreadContext via log4j-slf4j-impl but added unnecessary indirection
+  - `mdc-correlation-guide.md` created: comprehensive reference covering request flow diagram, line-by-line filter explanation, GlobalFilter vs default-filters comparison, Netty vs Tomcat filter types, immutability/mutate() pattern, Correlation ID vs TraceId/SpanId hierarchy, background thread handling
+  - Javadoc added to all 3 implementation files + `GatewayApplication.java` updated with `@see`
+- [x] Step 12: Docker Compose (full stack: all services + infrastructure) — COMPLETE (2026-06-12)
+  - Two-file architecture: `docker-pets.yml` (infrastructure) + `docker-compose-services.yml` (application)
+  - Infrastructure: PostgreSQL (7 DBs via init-db.sh), Kafka (KRaft, dual-listener), Redis, MongoDB, Debezium, MailHog
+  - Application: 10 services (discovery, config-server, gateway, 7 business services) all containerized
+  - Start scripts: `start-pets.sh` (infra + readiness wait) + `start-services.sh` (discovery → config → all)
+  - `build-images.sh`: builds all 10 Docker images from bootJar output
+  - Config pattern: `${ENV_VAR:local-default}` in equitycart-config repo — works in both local dev and Docker
+  - Fixed: Kafka volume permissions (user: "0"), single-broker replication factors, Git Bash path mangling (MSYS_NO_PATHCONV), Eureka Hyper-V hostname (prefer-ip-address: true), config-server DNS refresh (refresh-rate: 3600)
+  - All 10 services UP and registered in Eureka, inter-service communication verified
+- [~] Step 13: End-to-end testing + re-audit — DEFERRED to Phase 8
+  - Reason: Full end-to-end flow requires per-service JWT validation (userId extraction from SecurityContext). Without Phase 8's OAuth2 Resource Server, SecurityContextHolder returns null in standalone services → NullPointerException on all userId-dependent endpoints.
+  - Infrastructure-level validation done: all 10 services register in Eureka, Feign HTTP calls resolve via lb://, Kafka topics produce/consume, Docker Compose stack starts cleanly.
+  - Will execute full business-flow E2E testing after Phase 8 adds per-service auth.
+
+### Phase 7 Architectural Notes (Strangler Fig — Remaining Coupling)
+
+**Fully decoupled (HTTP via Feign):**
+- Order → Product (ProductFeignClient: deductStock, restoreStock, getProductById)
+- Portfolio → Product (ProductFeignClient: getProductById, getTickerMappingsByBrandId)
+- Portfolio → Order (OrderFeignClient: getOrderById, updateOrderStatus)
+
+**Still coupled (same-JVM direct injection — to be resolved in Phase 10):**
+- Portfolio → Ledger: injects `LedgerServiceImpl` directly (needs LedgerFeignClient)
+- Portfolio → MarketData: injects `MarketDataServiceImpl` directly (needs MarketDataFeignClient)
+- Portfolio → Order entities: `@EntityScan`/`@EnableJpaRepositories` covers `com.equitycart.order` for `OutboxEvent` + `SagaOutboxWriter` (portfolio should own its own outbox table)
+
+**Target state (post Phase 10):** Each service's `build.gradle` contains ONLY `implementation project(':commons')` — no other service modules. All cross-service communication via HTTP (Feign) or messaging (Kafka).
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -847,7 +895,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [~] Phase 4: Market Data - Reactive (Weeks 8-9) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — FUNCTIONAL COMPLETE (reward grant deferred to Phase 6)
 - [x] Phase 6: Event-Driven Architecture (Weeks 13-15) — COMPLETE
-- [~] Phase 7: Microservices Decomposition (Weeks 16-18) — IN PROGRESS
+- [x] Phase 7: Microservices Decomposition (Weeks 16-18) — COMPLETE (E2E testing deferred to Phase 8)
 - [ ] Phase 8: Security Hardening (Weeks 19-20)
 - [ ] Phase 9: Observability (Weeks 21-22)
 - [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
@@ -899,4 +947,6 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - **2026-06-05**: Phase 7 Step 6 COMPLETE — Order-Service extracted as standalone microservice (port 8088). Three debugging sessions: (1) ProductRepository bean not found → @EnableJpaRepositories + @EntityScan with explicit basePackages required when OrderServiceImpl has cross-module repository dependency; @ComponentScan alone doesn't fix JPA repository scanning; (2) port conflict with Debezium Kafka Connect (8083) → changed to 8088; (3) Gateway AND vs OR predicate behaviour → comma-separated Path predicate for multi-path routing. @EnableScheduling required for OutboxPoller. CDC profile must NOT be active until Debezium watches equitycart_order DB. Kafka producer config moved to base application.yml. Q121–Q123 added to learning_log.md. Next: Step 7 — Extract Portfolio-Service (port 8084).
 - **2026-06-06**: Phase 7 Step 7 COMPLETE — Portfolio-Service extracted as standalone microservice (port 8084). Required `@ComponentScan` (not `@EnableJpaRepositories`) because service layer beans (LedgerServiceImpl, MarketDataServiceImpl) needed, not just repositories. `excludeFilters = @Filter(SpringBootApplication.class)` required to prevent `OrderServiceApplication` from being loaded as a `@Configuration`, causing `BeanDefinitionOverrideException`. Runtime surprises: Spring Batch config required (product-service has spring-batch on classpath; `@ComponentScan` loads `ProductBatchConfig`; `BatchAutoConfiguration` fires) and alphavantage.* config required (market-data's `WebClientConfig` uses `@Value` injection). Core lesson: `@EnableJpaRepositories` is surgical, `@ComponentScan` is broad — broader scanner = more auto-configuration side effects. Q124–Q126 added to learning_log.md. Next: Step 8 — Extract Ledger-Service (port 8086).
 - **2026-06-06**: Phase 7 Step 8 COMPLETE — Ledger-Service extracted as standalone (port 8086). Simplest extraction: only `@EntityScan` needed beyond `@SpringBootApplication + @EnableDiscoveryClient` — `BaseEntity` in commons is the sole out-of-scope class. No `@EnableJpaRepositories`, no `@ComponentScan` needed. No transitive contamination. No REST controllers (gateway route pre-wired for Phase 10). Q127–Q128 added. Next: Step 9 — Notification-Service (port 8087).
-- **2026-06-06**: Phase 7 Step 9 COMPLETE — Notification-Service extracted as standalone (port 8087). Same clean extraction pattern as ledger-service: `@EntityScan` for BaseEntity, no cross-module `@ComponentScan`. Key insights: product-service extraction deferred to Phase 10 (consumers must migrate to Feign first); saga strategy and timeout properties correctly omitted — `matchIfMissing=true` makes saga default-active, `@Value` inline `:30` default removes need for YAML entry. Q129–Q130 added. Next: Step 10 — OpenFeign clients.
+- **2026-06-09**: Phase 7 Step 10 COMPLETE — OpenFeign migration. ProductFeignClient (4 methods) + BrandTickerMappingDTO + ProductDTO in commons. OrderFeignClient in portfolio module (cannot go in commons — circular dependency via order-service types). SellToSpendServiceImpl + SagaOrchestrator migrated from OrderService → OrderFeignClient. StockBackRewardConsumer migrated from ProductRepository → ProductFeignClient. Two startup errors debugged: (1) @ComponentScan("com.equitycart.order") loaded OrderServiceImpl which now requires ProductFeignClient — fix: remove order from @ComponentScan; (2) OutboxEventRepository proxy removed too aggressively — fix: keep order in @EnableJpaRepositories + @EntityScan. All 8 services UP on Eureka. Javadoc added to all uncommitted files. openfeign-guide.md created (12 sections). Q131–Q138 added to learning_log.md. Next: Step 11 — Correlation ID propagation. Same clean extraction pattern as ledger-service: `@EntityScan` for BaseEntity, no cross-module `@ComponentScan`. Key insights: product-service extraction deferred to Phase 10 (consumers must migrate to Feign first); saga strategy and timeout properties correctly omitted — `matchIfMissing=true` makes saga default-active, `@Value` inline `:30` default removes need for YAML entry. Q129–Q130 added. Next: Step 10 — OpenFeign clients.
+- **2026-06-10**: Phase 7 Step 11 COMPLETE — Correlation ID propagation. Three components: (1) MdcCorrelationFilter (OncePerRequestFilter in commons, ThreadContext put/remove lifecycle); (2) FeignCorrelationInterceptor (Feign RequestInterceptor, propagates ID to downstream Feign calls); (3) CorrelationIdGatewayFilter (GlobalFilter + Ordered in api-gateway, generates UUID at entry point, mutates immutable WebFlux exchange). Replaced org.slf4j.MDC with org.apache.logging.log4j.ThreadContext (Log4j2 native, no SLF4J bridge). Debugged: default-filters YAML approach fails (SpEL evaluated at startup + wrong direction); OrderedGatewayFilter inheritance wrong (wrapper for route-level filter, not GlobalFilter). mdc-correlation-guide.md created (line-by-line filter explanation, GlobalFilter vs default-filters, Netty vs Tomcat filter types, Correlation ID vs TraceId/SpanId). Javadoc on all 3 files + GatewayApplication updated. Next: Step 12 — Docker Compose.
+- **2026-06-12**: Phase 7 Step 12 COMPLETE — Docker Compose full stack. Two-file split: docker-pets.yml (infra) + docker-compose-services.yml (10 Spring Boot services). Start scripts with readiness polling. build-images.sh for all 10 images. Config pattern: `${ENV_VAR:local-default}` in equitycart-config works in both environments. Debugging sessions: (1) Kafka AccessDeniedException → `user: "0"`; (2) INVALID_REPLICATION_FACTOR → single-broker env vars; (3) ConfigClientFailFastException → placeholder in spring.config.import; (4) Eureka registration with Hyper-V hostname → `prefer-ip-address: true` (without explicit ip-address); (5) Git Bash MINGW64 path mangling → `sh -c '...'` wrapper; (6) Config-server DNS failure → `refresh-rate: 3600` (local cache still serves). Key learnings: spring.config.import is ADDITIVE (merges, doesn't override), config-server serves placeholders (client resolves), Docker DNS resolves service names on custom bridge networks, port mapping bridges host↔container worlds. All 10 services UP in Eureka, gateway routing verified. Next: Step 13 — End-to-end testing + re-audit.

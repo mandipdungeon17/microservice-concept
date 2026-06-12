@@ -1,9 +1,12 @@
 package com.equitycart.portfolio.event;
 
+import com.equitycart.commons.dto.BrandTickerMappingDTO;
+import com.equitycart.commons.dto.ProductDTO;
 import com.equitycart.commons.event.OrderDeliveredEvent;
 import com.equitycart.commons.event.OrderItemEvent;
 import com.equitycart.commons.event.OrderRefundedEvent;
 import com.equitycart.commons.event.OrderReturnedEvent;
+import com.equitycart.commons.feign.ProductFeignClient;
 import com.equitycart.ledger.enums.AccountType;
 import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
@@ -16,14 +19,14 @@ import com.equitycart.portfolio.repository.StockBackRewardRepository;
 import com.equitycart.portfolio.saga.enums.SagaStatus;
 import com.equitycart.portfolio.saga.repository.SellToSpendSagaRepository;
 import com.equitycart.portfolio.service.api.PortfolioService;
-import com.equitycart.product.entity.BrandTickerMapping;
-import com.equitycart.product.entity.Product;
-import com.equitycart.product.repository.BrandTickerMappingRepository;
-import com.equitycart.product.repository.ProductRepository;
+import feign.FeignException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -59,8 +62,7 @@ public class StockBackRewardConsumer {
   private static final Logger log = LogManager.getLogger(StockBackRewardConsumer.class);
 
   private final PortfolioService portfolioService;
-  private final ProductRepository productRepository;
-  private final BrandTickerMappingRepository brandTickerMappingRepository;
+  private final ProductFeignClient productFeignClient;
   private final MarketDataService marketDataService;
   private final StockBackRewardRepository stockBackRewardRepository;
   private final LedgerService ledgerService;
@@ -81,19 +83,23 @@ public class StockBackRewardConsumer {
 
     List<OrderItemEvent> orderItemEvents = event.getOrderItems();
     Map<String, List<OrderItemEvent>> listMap = new HashMap<>();
-    Map<String, BrandTickerMapping> tickerMappingBySymbol = new HashMap<>();
+    Map<String, BrandTickerMappingDTO> tickerMappingBySymbol = new HashMap<>();
 
     for (OrderItemEvent item : orderItemEvents) {
-      Optional<Product> product = productRepository.findById(item.getProductId());
-      if (product.isEmpty()) {
-        log.warn(
-            "Product not found for productId={}, skipping reward for orderId={}",
+      ProductDTO product;
+      try {
+        product = productFeignClient.getProductById(item.getProductId());
+      } catch (FeignException feignException) {
+        log.error(
+            "Failed to fetch product details for productId={}, orderId={}. Skipping item. Error: {}",
             item.getProductId(),
-            event.getOrderId());
+            event.getOrderId(),
+            feignException.getMessage());
         continue;
       }
-      Long brandId = product.get().getBrand().getId();
-      List<BrandTickerMapping> tickerMappings = brandTickerMappingRepository.findByBrandId(brandId);
+      Long brandId = product.brandId();
+      List<BrandTickerMappingDTO> tickerMappings =
+          productFeignClient.getTickerMappingsByBrandId(brandId);
       if (tickerMappings.isEmpty()) {
         log.info(
             "No ticker mapping for brandId={}, product '{}' does not participate in stock-back",
@@ -101,7 +107,7 @@ public class StockBackRewardConsumer {
             item.getProductName());
         continue;
       }
-      String tickerSymbol = tickerMappings.getFirst().getTickerSymbol();
+      String tickerSymbol = tickerMappings.getFirst().tickerSymbol();
 
       listMap.computeIfAbsent(tickerSymbol, k -> new ArrayList<>()).add(item);
       tickerMappingBySymbol.putIfAbsent(tickerSymbol, tickerMappings.getFirst());
@@ -109,13 +115,13 @@ public class StockBackRewardConsumer {
 
     listMap.forEach(
         (tickerSymbol, items) -> {
-          BrandTickerMapping mapping = tickerMappingBySymbol.get(tickerSymbol);
+          BrandTickerMappingDTO mapping = tickerMappingBySymbol.get(tickerSymbol);
           BigDecimal rewardDollarValue = BigDecimal.ZERO;
 
           for (OrderItemEvent orderItem : items) {
             rewardDollarValue =
                 rewardDollarValue.add(
-                    orderItem.getSubtotal().multiply(mapping.getStockBackPercentage()));
+                    orderItem.getSubtotal().multiply(mapping.stockBackPercentage()));
           }
           rewardDollarValue = rewardDollarValue.divide(new BigDecimal(100), RoundingMode.HALF_UP);
 

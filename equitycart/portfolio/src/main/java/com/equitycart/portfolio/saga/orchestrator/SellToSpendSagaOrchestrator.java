@@ -6,11 +6,11 @@ import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
 import com.equitycart.order.dto.UpdateOrderStatusRequest;
 import com.equitycart.order.enums.OrderStatus;
-import com.equitycart.order.service.api.OrderService;
 import com.equitycart.portfolio.dto.SellToSpendRequest;
 import com.equitycart.portfolio.event.NotificationPublisher;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
+import com.equitycart.portfolio.feign.OrderFeignClient;
 import com.equitycart.portfolio.saga.entity.SellToSpendSaga;
 import com.equitycart.portfolio.saga.enums.SagaStatus;
 import com.equitycart.portfolio.saga.event.SagaOutboxWriter;
@@ -35,15 +35,17 @@ import org.springframework.transaction.annotation.Transactional;
  * sequentially and runs compensating transactions in reverse on failure.
  *
  * <p><b>Pattern:</b> Orchestration-based Saga (vs. Choreography). One class knows the full step
- * sequence, making the flow readable in a single location. The orchestrator calls services directly
- * (same JVM) and publishes lifecycle events to Kafka via the outbox for observability.
+ * sequence, making the flow readable in a single location. Steps 1 and 2 call local service beans
+ * (same JVM); Step 3 calls {@link com.equitycart.portfolio.feign.OrderFeignClient} over HTTP to
+ * confirm the order in ORDER-SERVICE. Lifecycle events are published to Kafka via the outbox for
+ * observability.
  *
  * <p><b>Steps:</b>
  *
  * <pre>
- * 1. reduceHolding()       — sell shares from portfolio
- * 2. recordTransaction()   — double-entry ledger (CASH ← HOLDING_ASSET)
- * 3. updateOrderStatus()   — confirm order (CREATED → CONFIRMED)
+ * 1. reduceHolding()          — sell shares from portfolio (local)
+ * 2. recordTransaction()      — double-entry ledger, CASH ← HOLDING_ASSET (local)
+ * 3. updateOrderStatus()      — confirm order via OrderFeignClient HTTP → ORDER-SERVICE
  * </pre>
  *
  * <p><b>Compensation (on failure):</b> Runs in reverse from the last completed step:
@@ -52,6 +54,12 @@ import org.springframework.transaction.annotation.Transactional;
  * Undo step 2: recordTransaction(HOLDING_ASSET ← CASH, SELL_TO_SPEND_REVERSAL)
  * Undo step 1: addOrUpdateHolding() — re-adds sold shares
  * </pre>
+ *
+ * <p><b>Why Step 3 has no compensating action:</b> {@code updateOrderStatus()} is an HTTP call that
+ * commits in ORDER-SERVICE's own database. A local rollback cannot undo a committed remote
+ * transaction. If Step 3 fails, Steps 2 and 1 are compensated locally (ledger reversed, shares
+ * restored). If Step 3 succeeds but portfolio-service crashes before persisting COMPLETED status,
+ * the timeout detector re-drives the saga from its last persisted state.
  *
  * <p><b>Critical design choice:</b> {@code executeSaga()} is deliberately NOT
  * {@code @Transactional} — each step commits independently via its own repository save. This means
@@ -64,6 +72,7 @@ import org.springframework.transaction.annotation.Transactional;
  * @see SagaStatus
  * @see SellToSpendSaga
  * @see com.equitycart.portfolio.saga.service.SellToSpendSagaServiceImpl
+ * @see com.equitycart.portfolio.feign.OrderFeignClient
  */
 @Component
 @RequiredArgsConstructor
@@ -73,7 +82,7 @@ public class SellToSpendSagaOrchestrator {
 
   private final PortfolioService portfolioService;
   private final LedgerService ledgerService;
-  private final OrderService orderService;
+  private final OrderFeignClient orderFeignClient;
   private final SellToSpendSagaRepository sellToSpendSagaRepository;
   private final SagaOutboxWriter sagaOutboxWriter;
   private final PortfolioEventStore portfolioEventStore;
@@ -241,7 +250,7 @@ public class SellToSpendSagaOrchestrator {
     saga.setStatus(SagaStatus.CONFIRMING_ORDER);
     savedSaga = sellToSpendSagaRepository.save(saga);
 
-    orderService.updateOrderStatus(
+    orderFeignClient.updateOrderStatus(
         savedSaga.getOrderId(), new UpdateOrderStatusRequest(OrderStatus.CONFIRMED.name()));
 
     saga.setStatus(SagaStatus.COMPLETED);

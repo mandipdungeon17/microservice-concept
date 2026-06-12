@@ -2,11 +2,11 @@
   "name": "equitycart-outbox-connector",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-    "database.hostname": "host.docker.internal",
+    "database.hostname": "postgres",
     "database.port": "5432",
     "database.user": "postgres",
     "database.password": "postgres",
-    "database.dbname": "equitycart",
+    "database.dbname": "equitycart_order",
     "database.server.name": "equitycart-db",
     "table.include.list": "public.outbox_events",
     "topic.prefix": "equitycart-db",

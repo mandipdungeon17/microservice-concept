@@ -6,5 +6,7 @@ spring:
       server:
         git:
           uri: https://github.com/mandipdungeon17/equitycart-config.git
+          clone-on-start: true    # clone immediately at startup, not lazily
+          refresh-rate: 3600      # seconds between re-fetch attempts (default is 0 = every request)
 server:
     port: 8888

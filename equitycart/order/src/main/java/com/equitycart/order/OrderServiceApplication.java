@@ -6,7 +6,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
-import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -95,11 +95,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * @see com.equitycart.order.event.OutboxPoller
  */
 @SpringBootApplication
-@EnableJpaRepositories(basePackages = {"com.equitycart.order", "com.equitycart.product"})
-@EntityScan(
-    basePackages = {"com.equitycart.order", "com.equitycart.product", "com.equitycart.commons"})
+@EntityScan(basePackages = {"com.equitycart.order", "com.equitycart.commons"})
 @EnableDiscoveryClient
 @EnableScheduling
+@EnableFeignClients(basePackages = "com.equitycart.commons.feign")
 public class OrderServiceApplication {
 
   private static final Logger log = LogManager.getLogger(OrderServiceApplication.class);

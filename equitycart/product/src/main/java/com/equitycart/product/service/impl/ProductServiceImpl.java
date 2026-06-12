@@ -2,6 +2,7 @@ package com.equitycart.product.service.impl;
 
 import com.equitycart.commons.dto.PagedResponse;
 import com.equitycart.commons.exception.DuplicateResourceException;
+import com.equitycart.commons.exception.InsufficientStockException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
 import com.equitycart.product.dto.ProductRequest;
 import com.equitycart.product.dto.ProductResponse;
@@ -195,6 +196,59 @@ public class ProductServiceImpl implements ProductService {
     log.info("Product search returned {} results", productPage.getTotalElements());
 
     return PagedResponse.from(responsePage);
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  @Transactional
+  public void deductStock(Long productId, int quantity) {
+    log.info("Deducting stock for product id: {}, quantity: {}", productId, quantity);
+    Product product =
+        productRepository
+            .findByProductId(productId)
+            .orElseThrow(
+                () -> new ResourceNotFoundException("Product not found with id: " + productId));
+
+    if (product.getStockQuantity() < quantity) {
+      log.warn(
+          "Insufficient stock for product id: {}. Available: {}, Requested: {}",
+          productId,
+          product.getStockQuantity(),
+          quantity);
+      throw new InsufficientStockException(
+          "Insufficient stock for product id: "
+              + productId
+              + ". Available: "
+              + product.getStockQuantity()
+              + ", Requested: "
+              + quantity);
+    }
+
+    product.setStockQuantity(product.getStockQuantity() - quantity);
+    productRepository.save(product);
+    log.info(
+        "Stock deducted successfully for product id: {}. New stock quantity: {}",
+        productId,
+        product.getStockQuantity());
+  }
+
+  /** {@inheritDoc} */
+  @Transactional
+  @Override
+  public void restoreStock(Long productId, int quantity) {
+    log.info("Restoring stock for product id: {}, quantity: {}", productId, quantity);
+    Product product =
+        productRepository
+            .findByProductId(productId)
+            .orElseThrow(
+                () -> new ResourceNotFoundException("Product not found with id: " + productId));
+
+    product.setStockQuantity(product.getStockQuantity() + quantity);
+    productRepository.save(product);
+    log.info(
+        "Stock restored successfully for product id: {}. New stock quantity: {}",
+        productId,
+        product.getStockQuantity());
   }
 
   /**

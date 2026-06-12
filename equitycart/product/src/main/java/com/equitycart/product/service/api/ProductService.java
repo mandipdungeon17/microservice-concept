@@ -61,4 +61,31 @@ public interface ProductService {
    * @return a paged response of matching products
    */
   PagedResponse<ProductResponse> searchProduct(ProductSearchRequest request, Pageable pageable);
+
+  /**
+   * Deducts stock from a product using a pessimistic write lock to prevent concurrent over-sells.
+   * Called by order-service via HTTP ({@code ProductFeignClient}) on order placement.
+   *
+   * <p>This method owns the {@code SELECT FOR UPDATE} lock because the data lives here. The lock
+   * cannot span the HTTP boundary — only this service can enforce atomic stock checks.
+   *
+   * @param productId the product whose stock to deduct
+   * @param quantity the number of units to deduct
+   * @throws com.equitycart.commons.exception.ResourceNotFoundException if the product does not
+   *     exist
+   * @throws com.equitycart.commons.exception.InsufficientStockException if available stock is less
+   *     than the requested quantity
+   */
+  void deductStock(Long productId, int quantity);
+
+  /**
+   * Restores previously deducted stock — the compensating transaction for {@link #deductStock(Long,
+   * int)}. Called by order-service via HTTP on order return or cancellation.
+   *
+   * @param productId the product whose stock to restore
+   * @param quantity the number of units to add back
+   * @throws com.equitycart.commons.exception.ResourceNotFoundException if the product does not
+   *     exist
+   */
+  void restoreStock(Long productId, int quantity);
 }

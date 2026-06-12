@@ -1,0 +1,151 @@
+services:
+  discovery:
+    image: discovery-server:latest
+    ports:
+    - 8761:8761
+    environment:
+      - SERVER_PORT=8761
+      - SPRING_CONFIG_IMPORT=optional:configserver   #← optional because Config Server not yet up
+      - EUREKA_CLIENT_REGISTER_WITH_EUREKA=false
+      - EUREKA_CLIENT_FETCH_REGISTRY=false
+
+  config-server:
+    image: config-server:latest
+    ports:
+      - 8888:8888
+    environment:
+      - SERVER_PORT=8888
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://discovery:8761/eureka/
+    depends_on:
+      - discovery
+
+  api-gateway:
+    image: api-gateway:latest
+    ports:
+      - 8080:8080
+    environment:
+      - SERVER_PORT=8080
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+    depends_on:
+      - config-server
+
+  user-service:
+    image: user-service:latest
+    ports:
+      - 8081:8081
+    environment:
+      - SERVER_PORT=8081
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_user
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+    depends_on:
+      - config-server
+      - postgres
+
+  order-service:
+    image: order-service:latest
+    ports:
+      - 8088:8088
+    environment:
+      - SERVER_PORT=8088
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_order
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - SPRING_DATA_REDIS_HOST=redis
+    depends_on:
+      - config-server
+      - postgres
+      - kafka
+      - redis
+
+  portfolio-service:
+    image: portfolio-service:latest
+    ports:
+      - 8084:8084
+    environment:
+      - SERVER_PORT=8084
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_portfolio
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart
+    depends_on:
+      - config-server
+      - postgres
+      - kafka
+      - mongodb
+
+  product-service:
+    image: product-service:latest
+    ports:
+      - 8089:8089
+    environment:
+      - SERVER_PORT=8089
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_product
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - SPRING_DATA_REDIS_HOST=redis
+    depends_on:
+      - config-server
+      - postgres
+      - redis
+
+  market-data-service:
+    image: market-data-service:latest
+    ports:
+      - 8085:8085
+    environment:
+      - SERVER_PORT=8085
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart
+      - SPRING_DATA_REDIS_HOST=redis
+    depends_on:
+      - config-server
+      - mongodb
+      - redis
+
+  ledger-service:
+    image: ledger-service:latest
+    ports:
+      - 8086:8086
+    environment:
+      - SERVER_PORT=8086
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_ledger
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+    depends_on:
+      - config-server
+      - postgres
+
+  notification-service:
+    image: notification-service:latest
+    ports:
+      - 8087:8087
+    environment:
+      - SERVER_PORT=8087
+      - CONFIG_SERVER_URL=http://config-server:8888 
+      - EUREKA_URL=http://discovery:8761/eureka/
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_notification
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - SPRING_MAIL_HOST=mailhog
+      - SPRING_MAIL_PORT=1025
+    depends_on:
+      - config-server
+      - postgres
+      - kafka
+      - mailhog

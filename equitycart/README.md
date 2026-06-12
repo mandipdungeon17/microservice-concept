@@ -8,21 +8,50 @@ A hybrid E-Commerce + Stock Market platform where users earn fractional stocks a
 
 ## Architecture
 
-**Monolith-first** (Phases 0-6) evolving to **Microservices** (Phase 7+).
+**Monolith-first** (Phases 0-6) evolved to **Microservices** (Phase 7).
+
+### Current State: Fully Containerized Microservices
+
+All services run as independent Docker containers, communicating via Eureka service discovery and Spring Cloud Gateway.
+
+```
+Browser → localhost:8080 (API Gateway)
+              │
+              ├── lb://USER-SERVICE (8081)
+              ├── lb://ORDER-SERVICE (8088)
+              ├── lb://PORTFOLIO-SERVICE (8084)
+              ├── lb://PRODUCT-SERVICE (8089)
+              ├── lb://MARKET-DATA-SERVICE (8085)
+              ├── lb://LEDGER-SERVICE (8086)
+              └── lb://NOTIFICATION-SERVICE (8087)
+
+Infrastructure:
+  Eureka (8761) — Service Registry
+  Config Server (8888) — Centralized configuration (Git-backed)
+  PostgreSQL — 7 databases (one per service)
+  Kafka (KRaft) — Event streaming (outbox, notifications, rewards)
+  Redis — Caching (products, cart, market-data prices)
+  MongoDB — Document store (price history, event sourcing)
+  Debezium — CDC (Change Data Capture via WAL)
+  MailHog — Dev email trap (SMTP on 1025, UI on 8025)
+```
 
 ### Modules
 
-| Module                | Package                     | Purpose                                           | Status      |
-| --------------------- | --------------------------- | ------------------------------------------------- | ----------- |
-| `commons`             | `com.equitycart.commons`    | Shared DTOs, exceptions, events, config       | Implemented |
-| `user-service`        | `com.equitycart.user`       | Authentication, authorization, user profiles, KYC | Implemented |
-| `product-service`     | `com.equitycart.product`    | Product catalog, brands, categories, batch import | Implemented |
-| `order-service`       | `com.equitycart.order`      | Cart, orders, inventory, idempotency              | Implemented |
-| `portfolio-service`   | `com.equitycart.portfolio`  | Holdings, trading, stock-back rewards, vesting    | Implemented |
-| `market-data-service` | `com.equitycart.marketdata` | Real-time prices, health scores, SSE streaming  | Implemented |
-| `ledger-service`      | `com.equitycart.ledger`     | Double-entry bookkeeping, wallet, audit trail     | Implemented |
-| `notification-service`| `com.equitycart.notification` | Event-driven notification dispatch (Kafka consumer, Strategy channels) | Implemented |
-| `app`                 | `com.equitycart`            | Monolith aggregator (runs all modules as one JAR) | Implemented |
+| Module                | Package                     | Port  | Purpose                                           | Status      |
+| --------------------- | --------------------------- | ----- | ------------------------------------------------- | ----------- |
+| `discovery-server`    | `com.equitycart.discovery`  | 8761  | Eureka service registry                           | Implemented |
+| `config-server`       | `com.equitycart.config`     | 8888  | Spring Cloud Config (Git-backed)                  | Implemented |
+| `api-gateway`         | `com.equitycart.gateway`    | 8080  | Spring Cloud Gateway (routing, correlation ID)    | Implemented |
+| `commons`             | `com.equitycart.commons`    | —     | Shared DTOs, exceptions, events, Feign clients    | Implemented |
+| `user-service`        | `com.equitycart.user`       | 8081  | Authentication, authorization, user profiles, KYC | Implemented |
+| `product-service`     | `com.equitycart.product`    | 8089  | Product catalog, brands, categories, batch import | Implemented |
+| `order-service`       | `com.equitycart.order`      | 8088  | Cart, orders, inventory, outbox, idempotency      | Implemented |
+| `portfolio-service`   | `com.equitycart.portfolio`  | 8084  | Holdings, trading, stock-back rewards, saga       | Implemented |
+| `market-data-service` | `com.equitycart.marketdata` | 8085  | Real-time prices, health scores, SSE streaming    | Implemented |
+| `ledger-service`      | `com.equitycart.ledger`     | 8086  | Double-entry bookkeeping, wallet, audit trail     | Implemented |
+| `notification-service`| `com.equitycart.notification` | 8087 | Event-driven notification dispatch (Kafka, Strategy) | Implemented |
+| `app`                 | `com.equitycart`            | 8082  | Monolith aggregator (legacy, runs all as one JAR) | Deprecated  |
 
 ### Folder Structure
 
@@ -116,22 +145,29 @@ equitycart/
 | ----------------- | --------------------------------------------- |
 | Language          | Java 21 (LTS)                                 |
 | Framework         | Spring Boot 3.5.8                             |
+| Cloud             | Spring Cloud 2025.0.0 (Gateway, Config, Eureka, OpenFeign) |
 | Batch Processing  | Spring Batch (chunk-oriented CSV import)      |
 | Build             | Gradle 8.14.2 (Groovy DSL)                    |
 | Code Formatting   | Spotless (Google Java Format)                 |
 | Resilience        | Resilience4j (Circuit Breaker, Retry, Rate Limiter) |
 | Reactive Client   | WebClient + Reactor Netty (non-blocking HTTP) |
-| SQL Database      | PostgreSQL                                    |
+| SQL Database      | PostgreSQL (7 databases, one per service)      |
 | NoSQL Database    | MongoDB (price history, event sourcing, TTL indexes) |
 | Cache             | Redis (@Cacheable + RedisTemplate + manual opsForValue) |
 | Message Broker    | Apache Kafka (KRaft mode, event-driven rewards, notifications) |
+| CDC               | Debezium (PostgreSQL WAL → Kafka via Outbox Event Router) |
 | Security          | Spring Security + JWT (later Keycloak/OAuth2) |
-| API Gateway       | Spring Cloud Gateway (planned)                |
-| Service Discovery | Netflix Eureka (planned)                      |
-| Monitoring        | Prometheus + Grafana (planned)                |
-| Containerization  | Docker + Kubernetes (planned)                 |
-| API Docs          | SpringDoc OpenAPI (planned)                   |
-| Testing           | JUnit 5, Mockito, Testcontainers (planned)    |
+| API Gateway       | Spring Cloud Gateway (WebFlux, Eureka-aware lb://) |
+| Service Discovery | Netflix Eureka (prefer-ip-address for Docker)  |
+| Config Management | Spring Cloud Config Server (Git-backed)        |
+| Inter-Service     | OpenFeign (declarative HTTP clients via Eureka) |
+| Observability     | Correlation ID (MDC + Gateway filter + Feign interceptor) |
+| Containerization  | Docker + Docker Compose (full stack)           |
+| Dev Email         | MailHog (SMTP trap on port 1025, UI on 8025)   |
+| Monitoring        | Prometheus + Grafana (planned — Phase 9)       |
+| Orchestration     | Kubernetes (planned — Phase 10)                |
+| API Docs          | SpringDoc OpenAPI (planned)                    |
+| Testing           | JUnit 5, Mockito, Testcontainers (planned)     |
 
 ## Implemented Features
 
@@ -215,6 +251,17 @@ equitycart/
 - **Notification Service (Observer Pattern)** — Kafka Pub/Sub decouples business logic from notification delivery; Strategy Pattern for channel selection (Email, Webhook, Log); audit log for every dispatch attempt
 - **Stock Refund** — Kafka consumer restores holdings when order is refunded (REFUND_RESTORED event)
 - **Javadoc + Logging** — Log4j2 loggers + Javadoc across all Kafka, Saga, Event Sourcing, and Notification classes
+
+### Phase 7 — Microservices Decomposition (Complete)
+
+- **Eureka Discovery Server** — service registry, all 10 services auto-register with prefer-ip-address
+- **Spring Cloud Config Server** — Git-backed centralized configuration, placeholder pattern for dual-environment support
+- **Spring Cloud Gateway** — WebFlux-based routing with `lb://` Eureka-aware URI resolution, Correlation ID GlobalFilter
+- **Service Extraction** — each service runs independently with own `@SpringBootApplication`, own PostgreSQL database, own port
+- **OpenFeign** — declarative HTTP clients replace direct module dependencies (ProductFeignClient, OrderFeignClient)
+- **Correlation ID Propagation** — UUID generated at gateway, propagated via MdcCorrelationFilter + FeignCorrelationInterceptor, logged in every service
+- **Docker Compose** — fully containerized stack (10 services + 6 infrastructure), two-file split (infra vs apps), start scripts with readiness polling
+- **Build Pipeline** — Gradle bootJar → Dockerfile → Docker image (one per service), build-images.sh script
 
 ## API Endpoints
 
@@ -324,32 +371,60 @@ equitycart/
 
 ## How to Build & Run
 
+### Docker Compose (Recommended — full microservices stack)
+
+```bash
+cd equitycart/docker/
+
+# Build all Docker images
+sh build-images.sh
+
+# Start infrastructure (PostgreSQL, Kafka, Redis, MongoDB, MailHog, Debezium)
+sh start-pets.sh
+
+# Start all services (Eureka → Config → Gateway → business services)
+sh start-services.sh
+
+# Verify: http://localhost:8761 (Eureka Dashboard — all 10 services registered)
+# Access APIs: http://localhost:8080/api/... (via Gateway)
+# MailHog UI: http://localhost:8025
+```
+
+### Local Development (individual services on host)
+
 ```bash
 # Build all modules
 ./gradlew build
 
-# Run the monolith
+# Run individual service
+./gradlew :user:bootRun
+./gradlew :order:bootRun
+# etc.
+
+# Run the monolith (all modules in one JVM — legacy mode)
 ./gradlew :app:bootRun
 
-# Build fat JAR
-./gradlew :app:bootJar
-# JAR output: app/build/libs/equitycart-exec.jar
+# Build fat JARs for all services
+./gradlew bootJar
 
 # Format code with Spotless
 ./gradlew spotlessApply
-
-# Check formatting without fixing
-./gradlew spotlessCheck
 ```
 
 ## Prerequisites
 
+### For Docker Compose mode:
+- JDK 21 (for building)
+- Docker Desktop (with WSL2 backend on Windows)
+- ~8GB RAM allocated to Docker (10 services + 6 infrastructure containers)
+
+### For local development:
 - JDK 21
-- PostgreSQL (running on localhost:5432, database: equitycart)
-- Redis (running on localhost:6379 — via Docker: `docker run -d --name redis -p 6379:6379 redis`)
-- MongoDB (running on localhost:27017 — via Docker: `docker run -d --name mongodb -p 27017:27017 mongo`)
-- Apache Kafka (running on localhost:9092 — via Docker: `docker run -d --name kafka -p 9092:9092 apache/kafka:latest`)
-- MailHog (SMTP trap for dev email — via Docker: `docker run -d --name mailhog -p 1025:1025 -p 8025:8025 mailhog/mailhog`)
+- PostgreSQL (running on localhost:5432, databases: equitycart_user, equitycart_order, etc.)
+- Redis (localhost:6379)
+- MongoDB (localhost:27017)
+- Apache Kafka (localhost:9092)
+- MailHog (localhost:1025 SMTP, localhost:8025 Web UI)
 
 ## Configuration
 
@@ -402,16 +477,18 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)               |
 | Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
 | Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)               |
-| Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE (reward grant deferred to Phase 6)  |
+| Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE                                     |
 | Phase 6 | Event-Driven Architecture     | COMPLETE                                     |
+| Phase 7 | Microservices Decomposition    | COMPLETE (E2E testing deferred to Phase 8)   |
 
 ## Known Issues
 
 - **403 instead of 401** for unauthenticated requests — needs custom `AuthenticationEntryPoint` (planned fix)
+- **Eureka links show container IPs** (172.18.0.x) — not routable from host browser; use `localhost:PORT` instead
+- **Config-server DNS warning** — `UnknownHostException: github.com` on health check refresh; harmless (serves from cache)
 
 ## Roadmap Ahead
 
-- **Phase 7**: Microservices Decomposition (Eureka, Gateway, Config Server)
-- **Phase 8**: Security Hardening (OAuth2/Keycloak, rate limiting)
-- **Phase 9**: Observability (Prometheus, Grafana, distributed tracing)
+- **Phase 8**: Security Hardening (OAuth2/Keycloak, per-service JWT validation, rate limiting)
+- **Phase 9**: Observability (Prometheus, Grafana, distributed tracing with Micrometer)
 - **Phase 10**: Advanced Features & Scale (Kubernetes, CI/CD, load testing)

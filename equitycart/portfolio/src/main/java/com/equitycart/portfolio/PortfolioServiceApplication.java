@@ -6,6 +6,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.FilterType;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
@@ -29,40 +30,50 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  *       (order-returned)
  * </ul>
  *
- * <p><b>Why explicit {@code @ComponentScan} is required here (not just in order-service):</b>
- * Portfolio-service depends on actual <em>service beans</em> from other modules — {@code
- * LedgerServiceImpl}, {@code ProductServiceImpl}, {@code MarketDataServiceImpl}, etc. These are
+ * <p><b>Why explicit {@code @ComponentScan} is required here:</b> Portfolio-service depends on
+ * actual <em>service beans</em> from other modules — {@code LedgerServiceImpl}, {@code
+ * MarketDataServiceImpl}, etc. ({@code ProductServiceImpl} was removed from the scan in Phase 10 —
+ * product operations now go through {@code ProductFeignClient} HTTP calls). These are
  * {@code @Service} / {@code @Configuration} classes that live in foreign packages.
  * {@code @SpringBootApplication} only scans {@code com.equitycart.portfolio.*} by default; without
- * an explicit {@code @ComponentScan} covering all six packages, these beans are never registered
+ * an explicit {@code @ComponentScan} covering all four packages, these beans are never registered
  * and injection fails with {@code UnsatisfiedDependencyException}.
  *
- * <p>Order-service only needed <em>repository proxies</em> from the product module — it used
- * {@code @EnableJpaRepositories} alone (which only registers proxy beans, not
- * {@code @Configuration} classes). Portfolio-service needs the full service layer, so it must use
- * {@code @ComponentScan}, which loads ALL {@code @Configuration} beans including {@code
- * ProductBatchConfig} (from {@code product-service}) and {@code WebClientConfig} (from {@code
- * market-data-service}).
+ * <p>{@code @EnableJpaRepositories} alone (which only registers JPA proxy beans, not
+ * {@code @Configuration} classes) is insufficient because portfolio-service needs the full service
+ * layer. {@code @ComponentScan} loads ALL {@code @Configuration} beans, including {@code
+ * WebClientConfig} (from {@code market-data-service}) which injects
+ * {@code @Value("${alphavantage.*}")} properties — see note below.
  *
- * <p><b>Why {@code excludeFilters = @Filter(SpringBootApplication.class)} is mandatory:</b>
- * {@code @ComponentScan} covering {@code com.equitycart.order} would otherwise find {@code
- * OrderServiceApplication} (annotated {@code @SpringBootApplication}, which is a
- * {@code @Configuration}) and load its embedded {@code @EnableJpaRepositories} declaration. That
- * would cause Spring to register repository beans a second time, throwing {@code
- * BeanDefinitionOverrideException} on startup. The filter prevents any class annotated with
- * {@code @SpringBootApplication} from being treated as a configuration bean.
+ * <p><b>Why {@code excludeFilters = @Filter(SpringBootApplication.class)} is mandatory:</b> Any
+ * {@code @SpringBootApplication}-annotated class found during scanning is itself a
+ * {@code @Configuration} — it carries embedded {@code @EnableJpaRepositories} and similar
+ * declarations. Loading a second application class would register repository beans a second time,
+ * throwing {@code BeanDefinitionOverrideException}. The filter prevents this for any application
+ * class (e.g., {@code LedgerServiceApplication}) that may appear in a scanned package.
  *
- * <p><b>Why Spring Batch config properties are required (but were NOT needed in order-service):</b>
- * {@code product-service} has {@code spring-batch} on its classpath. When this service's
- * {@code @ComponentScan} covers {@code com.equitycart.product.*}, Spring loads {@code
- * ProductBatchConfig} — a {@code @Configuration} class that registers Batch beans. {@code
- * BatchAutoConfiguration} then fires and expects {@code spring.batch.jdbc.initialize-schema} to be
- * set. Order-service avoided this because it used {@code @EnableJpaRepositories} (not
- * {@code @ComponentScan}), which only picks up repository interfaces — {@code ProductBatchConfig}
- * is never loaded.
+ * <p><b>Phase 10 — product-service and order-service extraction:</b>
  *
- * <p><b>Why {@code alphavantage.*} properties are required:</b> {@code @ComponentScan} covering
- * {@code com.equitycart.marketdata} loads {@code WebClientConfig} and {@code
+ * <ul>
+ *   <li>{@code @ComponentScan} no longer covers {@code com.equitycart.product}. Product lookups
+ *       (stock deductions, brand-ticker lookups) now go through {@code ProductFeignClient} HTTP
+ *       calls to {@code PRODUCT-SERVICE}. {@code spring.batch.*} properties have been removed from
+ *       {@code portfolio-service.yml} — {@code ProductBatchConfig} is no longer on the classpath.
+ *   <li>{@code @ComponentScan} no longer covers {@code com.equitycart.order}. After Step 10, {@code
+ *       OrderServiceImpl} injects {@code ProductFeignClient}, which is only registered by this
+ *       service's own {@code @EnableFeignClients}. Loading {@code OrderServiceImpl} via
+ *       {@code @ComponentScan} caused an {@code UnsatisfiedDependencyException} at startup. Fix:
+ *       removed {@code com.equitycart.order} from {@code @ComponentScan}. Order operations are now
+ *       handled by {@code OrderFeignClient} in {@code com.equitycart.portfolio.feign}.
+ *   <li>{@code @EnableJpaRepositories} and {@code @EntityScan} <em>still</em> cover {@code
+ *       com.equitycart.order} — {@code SagaOutboxWriter} injects {@code OutboxEventRepository} (a
+ *       JPA repository proxy, no transitive bean dependencies). {@code @EntityScan} must also
+ *       include the package so Hibernate registers {@code OutboxEvent} (and transitively {@code
+ *       Order}, {@code OrderItem}) as managed entities in {@code equitycart_portfolio}.
+ * </ul>
+ *
+ * <p><b>Why {@code alphavantage.*} properties are still required:</b> {@code @ComponentScan}
+ * covering {@code com.equitycart.marketdata} loads {@code WebClientConfig} and {@code
  * MarketDataServiceImpl}, both of which inject {@code @Value("${alphavantage.base-url}")} and
  * {@code @Value("${alphavantage.api-key}")}. Without those properties in the environment, Spring
  * fails at startup with a {@code PropertyValueException}.
@@ -73,9 +84,11 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  *   <li>{@code main()} → {@code SpringApplication.run()} bootstraps the context
  *   <li>Spring Cloud Config client fetches {@code portfolio-service.yml} from Config Server (8888)
  *   <li>HikariCP connects to {@code equitycart_portfolio} PostgreSQL database
- *   <li>Hibernate auto-creates tables for ALL scanned entities (portfolio, holding,
- *       stock_back_reward, ledger_entry, order, order_item, outbox_events, product, brand,
- *       category, sell_to_spend_saga, notification_log)
+ *   <li>Hibernate auto-creates tables for scanned entities: portfolio, holding, stock_back_reward,
+ *       ledger_entry, outbox_events, order, order_item, sell_to_spend_saga, notification_log.
+ *       ({@code order} and {@code order_item} tables are created in {@code equitycart_portfolio}
+ *       because {@code @EntityScan("com.equitycart.order")} is retained for {@code OutboxEvent}.
+ *       Product/brand/category tables live exclusively in PRODUCT-SERVICE’s database.)
  *   <li>MongoDB connects for {@code portfolio_events} event store
  *   <li>Kafka consumer ({@code StockBackRewardConsumer}) subscribes to {@code order-delivered} +
  *       {@code order-returned} topics
@@ -114,14 +127,14 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * @see com.equitycart.portfolio.service.impl.VestingHelperImpl
  * @see com.equitycart.portfolio.saga.orchestrator.SellToSpendSagaOrchestrator
  * @see com.equitycart.portfolio.eventsourcing.service.impl.PortfolioEventStoreImpl
+ * @see com.equitycart.commons.feign.ProductFeignClient
+ * @see com.equitycart.portfolio.feign.OrderFeignClient
  */
 @SpringBootApplication
 @ComponentScan(
     basePackages = {
       "com.equitycart.portfolio",
       "com.equitycart.ledger", // LedgerServiceImpl (@Service)
-      "com.equitycart.order", // OrderServiceImpl, CartServiceImpl (@Service)
-      "com.equitycart.product", // ProductServiceImpl, etc. (@Service)
       "com.equitycart.commons", // GlobalExceptionHandler, KafkaConsumerConfig (@Configuration)
       "com.equitycart.marketdata" // MarketDataServiceImpl (@Service) — used by //
       // StockBackRewardConsumer
@@ -129,19 +142,13 @@ import org.springframework.scheduling.annotation.EnableScheduling;
     excludeFilters =
         @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
 @EnableJpaRepositories(
-    basePackages = {
-      "com.equitycart.portfolio",
-      "com.equitycart.ledger",
-      "com.equitycart.order",
-      "com.equitycart.product"
-    })
+    basePackages = {"com.equitycart.portfolio", "com.equitycart.ledger", "com.equitycart.order"})
 @EntityScan(
     basePackages = {
       "com.equitycart.portfolio",
       "com.equitycart.ledger",
-      "com.equitycart.order",
-      "com.equitycart.product",
-      "com.equitycart.commons"
+      "com.equitycart.commons",
+      "com.equitycart.order"
     })
 @EnableMongoRepositories(
     basePackages = {
@@ -150,6 +157,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
     })
 @EnableDiscoveryClient
 @EnableScheduling
+@EnableFeignClients(
+    basePackages = {"com.equitycart.commons.feign", "com.equitycart.portfolio.feign"})
 public class PortfolioServiceApplication {
 
   private static final Logger log = LogManager.getLogger(PortfolioServiceApplication.class);

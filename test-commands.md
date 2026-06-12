@@ -5,7 +5,79 @@
 
 ---
 
-## Docker — Start Infrastructure
+## Docker Compose — Full Stack (Phase 7)
+
+### Start Everything (Recommended)
+
+```bash
+# From equitycart/docker/ directory:
+
+# Step 1: Build all Docker images (run once, or after code changes)
+sh build-images.sh
+
+# Step 2: Start infrastructure (PostgreSQL, Kafka, Redis, MongoDB, MailHog, Debezium)
+sh start-pets.sh
+
+# Step 3: Start all services (discovery → config-server → all business services)
+sh start-services.sh
+
+# Verify: All services should appear at http://localhost:8761 (Eureka Dashboard)
+```
+
+### Stop Everything
+
+```bash
+# Stop services only (infra stays running)
+cd equitycart/
+docker compose -f docker/docker-compose-services.yml down
+
+# Stop infrastructure only
+docker compose -f docker/docker-pets.yml down
+
+# Stop both (preserves volumes/data)
+docker compose -f docker/docker-pets.yml -f docker/docker-compose-services.yml down
+
+# Nuclear: stop + delete all data (volumes removed)
+docker compose -f docker/docker-pets.yml -f docker/docker-compose-services.yml down -v
+```
+
+### Useful Docker Commands
+
+```bash
+# See all running containers
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+# View logs for a specific service
+docker logs docker-order-service-1 -f --tail 50
+
+# View config-server logs (check for DNS errors)
+docker logs docker-config-server-1 --tail 100
+
+# Check Eureka registrations
+curl -s http://localhost:8761/eureka/apps | grep "<app>"
+
+# Kafka: List topics
+docker exec kafka sh -c '/opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092'
+
+# Kafka: Consume from topic
+docker exec kafka sh -c '/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic portfolio-notification --from-beginning'
+
+# Redis CLI
+docker exec -it redis redis-cli
+
+# MongoDB shell
+docker exec -it mongodb mongosh
+
+# PostgreSQL: connect to specific database
+docker exec -it postgres psql -U postgres -d equitycart_order
+
+# MailHog Web UI (view caught emails)
+# Open in browser: http://localhost:8025
+```
+
+---
+
+## Docker — Legacy Individual Containers (Phase 6 — local dev without Compose)
 
 ```bash
 # Start PostgreSQL

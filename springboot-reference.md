@@ -1230,3 +1230,166 @@ When the property is absent, Spring substitutes `30` directly — no YAML entry 
 - `@Value("${prop:default}")` controls **what value a field gets** inside a bean that already exists
 
 **Rule of thumb:** only add a property to YAML when you need to override its designed default. Config files should express deviations from defaults, not repeat them.
+
+---
+
+## Section 16: Spring Cloud OpenFeign - Declarative HTTP Clients
+
+### 16.1 History: RestTemplate (2009) to OpenFeign (2012-2015)
+
+**RestTemplate** (Spring 3.0, 2009): Imperative HTTP client. Requires hardcoding URLs, manual header management, no contract, and custom error handling per call.
+
+**Netflix Feign** (2012, open-sourced 2013): Invented at Netflix alongside Eureka and Ribbon. Core insight: an HTTP API is a contract, and the same Java interface mechanism that defines local contracts can define HTTP contracts across services. Feign generates the HTTP implementation at startup from an annotated interface - no implementation code needed.
+
+**Spring Cloud OpenFeign** (integrated ~2015): Wraps Feign with Spring MVC annotations (@GetMapping, @PathVariable, etc.) and wires in Spring encoder/decoder, load balancer, and error handling. @EnableFeignClients triggers the entire startup wiring.
+
+---
+
+### 16.2 Startup Flow: What @EnableFeignClients Does
+
+1. @EnableFeignClients(basePackages = "...") imports FeignClientsRegistrar
+2. FeignClientsRegistrar scans packages for interfaces annotated with @FeignClient
+3. For each interface, registers a FeignClientFactoryBean bean definition in the context
+4. When the context requests a ProductFeignClient bean, FeignClientFactoryBean.getObject() fires:
+   - Builds Feign.Builder with: SpringMvcContract (interprets @GetMapping etc.), SpringEncoder, SpringDecoder, FeignErrorDecoder, FeignBlockingLoadBalancerClient (lb:// via Eureka)
+   - Calls ReflectiveFeign.newInstance() -> Proxy.newProxyInstance() -> JDK Dynamic Proxy
+5. The proxy is injected as the bean wherever ProductFeignClient is declared
+
+**JDK Dynamic Proxy vs CGLIB:**
+- JDK Dynamic Proxy: works on Java interface only. Generates a class at runtime that implements the interface and delegates all method calls to an InvocationHandler.
+- CGLIB: generates bytecode subclassing a concrete class. Cannot be used here - there is no concrete class, only an interface.
+- Feign uses JDK Dynamic Proxy exclusively.
+
+---
+
+### 16.3 Runtime Call Flow (Debug-Level Trace)
+
+When productFeignClient.getProductById(42L) is called:
+
+1. JVM routes to FeignInvocationHandler.invoke() (the InvocationHandler behind the proxy)
+2. FeignInvocationHandler looks up SynchronousMethodHandler for the getProductById method
+3. SynchronousMethodHandler builds a RequestTemplate: fills /api/products/{id} -> /api/products/42
+4. Passes RequestTemplate to FeignBlockingLoadBalancerClient
+5. LoadBalancer queries Eureka, selects a live PRODUCT-SERVICE instance (e.g., localhost:8089)
+6. Substitutes instance into URL: http://localhost:8089/api/products/42
+7. Makes a blocking HTTP GET
+8. Response (200 OK + JSON body) returned to SynchronousMethodHandler
+9. SpringDecoder calls Jackson ObjectMapper.readValue(body, ProductDTO.class)
+10. Jackson populates the ProductDTO record from matching JSON fields
+11. Proxy returns ProductDTO to the calling code
+
+---
+
+### 16.4 DTO Projection - Jackson Subset Deserialization
+
+When JSON response has more fields than the target type, Jackson silently drops the extras.
+
+**Why it works:** Spring Boot sets DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES = false globally. Jackson only maps fields that exist in BOTH the JSON AND the target class.
+
+**Pattern (DTO Projection):** Each consuming service declares its own DTO with only the fields it needs. No coupling to the full API response shape.
+
+Example: ProductResponse (12 fields in product-service) vs ProductDTO (6 fields in commons). Jackson maps the 6 matching fields and drops the other 6.
+
+| Scenario | Result |
+|---|---|
+| JSON has field, target has field | Mapped normally |
+| JSON has field, target lacks field | Silently dropped (FAIL_ON_UNKNOWN=false) |
+| Target has field, JSON lacks field | Field is null or primitive default |
+| Incompatible types | Deserialization exception |
+
+---
+
+### 16.5 FeignErrorDecoder - Non-2xx Interception
+
+Feign default on non-2xx: throws FeignException subclass (FeignException.NotFound for 404, FeignException.Conflict for 409). These are library types with no domain meaning.
+
+FeignErrorDecoder intercepts the Response object before the default exception is thrown, mapping HTTP status codes to domain exceptions:
+
+  HTTP 409 -> FeignErrorDecoder.decode() -> throw InsufficientStockException
+  HTTP 404 -> FeignErrorDecoder.decode() -> new Default().decode() -> FeignException.NotFound
+
+Registration: @Component on the decoder causes Spring to wire it into every Feign client in the context automatically.
+
+**Cannot intercept 200-but-failure responses:** The decoder only fires on non-2xx. For 200-but-failure: (1) return type as envelope (ApiResponse<T>), (2) custom Decoder that inspects the body, or (3) ResponseInterceptor (Feign 12+).
+
+---
+
+### 16.6 @RequestParam vs @RequestBody in Feign Interfaces
+
+- @RequestParam: single scalar passed as query parameter (?quantity=5). Use for scalar inputs on PUT/GET without a body.
+- @RequestBody: multi-field payload serialized as JSON in the request body. Use for structured input.
+
+Rule: single scalar -> @RequestParam. Structured payload -> @RequestBody with a DTO.
+
+Example from ProductFeignClient:
+  void deductStock(@PathVariable("id") Long id, @RequestParam("quantity") int quantity);
+
+---
+
+## 17. Spring Cloud Config Server — Property Resolution in Docker
+
+### 17.1 How spring.config.import Works
+
+`spring.config.import=configserver:http://config-server:8888` tells Spring Boot:
+
+1. Before building the ApplicationContext, contact the config server
+2. Fetch properties for this application's name (spring.application.name)
+3. MERGE those properties with the local application.yml (not replace)
+
+Priority order (highest wins):
+1. OS environment variables (SPRING_DATASOURCE_URL=...)
+2. Config Server properties (fetched remotely)
+3. Embedded application.yml in the JAR
+
+**Critical insight:** `spring.config.import` is ADDITIVE. It doesn't replace local properties — it merges additional sources. This means a property defined in both the local YAML and the config server will use the config server's value (higher priority), but properties only in local YAML remain untouched.
+
+### 17.2 The Placeholder Pattern for Dual-Environment Configs
+
+Config server's YAML files contain placeholders, not final values:
+
+```yaml
+# equitycart-config/application.yml (served to all services):
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+```
+
+The config server sends this LITERALLY to the client as `${EUREKA_URL:http://localhost:8761/eureka/}`. The CLIENT resolves the placeholder using its own environment. In Docker Compose, `EUREKA_URL=http://discovery:8761/eureka/` is set on the client container → resolved to the Docker hostname.
+
+**Why not resolve at config-server?** Because the same config must work for services running locally (use localhost default) AND in Docker (use container hostname). Client-side resolution with env vars gives flexibility without multiple config profiles.
+
+### 17.3 spring.config.import Is NOT a Standard Spring Property
+
+Unlike `spring.datasource.url` which can be overridden by setting `SPRING_DATASOURCE_URL` env var via relaxed binding, `spring.config.import` does NOT support relaxed binding override from env vars.
+
+To make it configurable, you MUST use an explicit placeholder:
+
+```yaml
+# WRONG — cannot be overridden by any env var:
+spring:
+  config:
+    import: configserver:http://localhost:8888
+
+# RIGHT — CONFIG_SERVER_URL env var overrides the default:
+spring:
+  config:
+    import: configserver:${CONFIG_SERVER_URL:http://localhost:8888}
+```
+
+### 17.4 Config Server Git Backend — Clone and Cache
+
+1. Config server starts → clones Git repo to /tmp/config-repo-RANDOM/
+2. All subsequent requests read from this local clone
+3. Periodically (controlled by `refresh-rate`), it tries `git fetch` to pull updates
+4. If fetch fails (DNS, network), it continues serving from cached clone — no error to clients
+5. Health indicator separately polls the repo — disable with `health.enabled: false`
+
+### 17.5 Eureka prefer-ip-address and Docker
+
+When `eureka.instance.prefer-ip-address: true`, Spring calls `InetUtils.findFirstNonLoopbackAddress()` to determine the IP to register with Eureka. In Docker, this returns the container's IP on the bridge network (172.18.0.x).
+
+**DO NOT set `eureka.instance.ip-address: 127.0.0.1` in Docker.** Each service would register its own loopback — gateway would route requests to itself instead of the target service.
+
+Let Spring auto-detect the container IP. The Docker DNS resolver handles the rest.
+  // quantity is a single int -> @RequestParam (maps to ?quantity=5 in the URL)

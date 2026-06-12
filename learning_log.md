@@ -4408,4 +4408,148 @@ A: They solve related but different problems. `@ConditionalOnProperty(matchIfMis
 
 `@Value("${prop:default}")` provides a **fallback value for field injection** when the named property is absent. Spring resolves the default inline at injection time. The bean is always created; the field just gets the fallback value instead of a resolved property. `saga.timeout-seconds` uses this — the orchestrator always exists (controlled by `@ConditionalOnProperty`), and if the timeout property is missing, it defaults to 30 seconds.
 
+---
+
+## Phase 7 — Microservices Decomposition (Step 12: Docker Compose)
+
+### Date: 2026-06-12
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. Kafka AccessDeniedException on volume write**
+
+- Problem: `java.nio.file.AccessDeniedException: /var/kafka/data/...` on Kafka container startup
+- Root cause: `apache/kafka:latest` runs as `appuser` (UID 1000); Docker named volumes are root-owned
+- Fix: Added `user: "0"` to kafka service in docker-pets.yml (runs process as root inside container)
+- Lesson: Image default user may not have write access to Docker-managed volumes. `user: "0"` is acceptable for dev.
+
+**2. Kafka INVALID_REPLICATION_FACTOR**
+
+- Problem: Internal topics (`__consumer_offsets`, `__transaction_state`) require replication-factor 3 by default
+- Root cause: Single-broker setup can't replicate to non-existent brokers
+- Fix: Set `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`
+- Lesson: Kafka defaults assume multi-broker production cluster; single-broker dev needs explicit overrides.
+
+**3. ConfigClientFailFastException: localhost:8888**
+
+- Problem: Services in Docker trying to connect to `localhost:8888` instead of `config-server:8888`
+- Root cause: `spring.config.import=configserver:http://localhost:8888` was hardcoded (no placeholder)
+- Fix: Changed to `configserver:${CONFIG_SERVER_URL:http://localhost:8888}` + set `CONFIG_SERVER_URL=http://config-server:8888` in docker-compose
+- Key learning: `spring.config.import` does NOT support relaxed binding override from env vars — MUST use explicit `${PLACEHOLDER}`
+
+**4. Services not registering with Eureka (wrong defaultZone)**
+
+- Problem: Config repo used `${EUREKA_URL:...}` placeholder but docker-compose set `EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE`
+- Root cause: `EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE` maps to a Spring property via relaxed binding, but the config-server YAML uses a CUSTOM placeholder `${EUREKA_URL}` — different names
+- Fix: Docker-compose must set the same env var name that the config placeholder references: `EUREKA_URL=http://discovery:8761/eureka/`
+- Lesson: Custom placeholders and relaxed-binding env vars are different mechanisms. Match the placeholder name.
+
+**5. Eureka registration with `ip-address: 127.0.0.1` breaks Docker routing**
+
+- Problem: Gateway routes to 127.0.0.1:8081 — its OWN loopback, not the target service
+- Root cause: `eureka.instance.ip-address: 127.0.0.1` forces every service to register with loopback
+- Fix: Commented out `ip-address: 127.0.0.1`, kept only `prefer-ip-address: true` — Spring auto-detects container IP (172.18.0.x)
+- Lesson: In Docker, each container has its own `127.0.0.1`. Let Spring auto-detect the Docker network IP.
+
+**6. Git Bash (MINGW64) path mangling breaks `docker exec` commands**
+
+- Problem: `docker exec kafka /opt/kafka/bin/script.sh` fails — Git Bash converts `/opt/kafka/...` to `C:/Program Files/Git/opt/kafka/...`
+- Fix: Wrap in `sh -c '...'` (single quotes prevent path translation) or set `MSYS_NO_PATHCONV=1`
+- Lesson: Git Bash on Windows translates absolute Unix paths in command arguments. Docker exec arguments pass through this translation.
+
+**7. Config-server UnknownHostException: github.com**
+
+- Problem: Health indicator periodically tries `git fetch` from github.com; Docker DNS can't resolve
+- Impact: HARMLESS — configs served from local cache (initial clone succeeded)
+- Fix: `refresh-rate: 3600` (reduces fetch frequency) or `health.enabled: false` (suppresses health check)
+- Lesson: Config server serves from a local file cache, not by hitting GitHub on every request. DNS failure only affects refresh.
+
+### Concepts Learned
+
+- **spring.config.import is ADDITIVE** — it merges external properties with local, doesn't replace. Priority: env vars > config-server > embedded YAML.
+- **Config server sends placeholders, not resolved values** — `${EUREKA_URL:localhost:8761}` is delivered to the client literally; the CLIENT resolves it using its own env vars.
+- **Docker Compose default network** — auto-creates a bridge network named `<dir>_default`; all services get DNS entries by service name.
+- **Port mapping is the bridge between host and container worlds** — without it, services are only reachable from within the Docker network.
+- **Eureka container IPs are NOT routable from host** — browser links in Eureka dashboard show 172.18.0.x which the host can't reach; use localhost:PORT instead.
+- **Twelve-Factor App Config** — same immutable image works anywhere by changing only environment variables.
+
+### Interview Questions & Answers
+
+**Q139: "Why can't you override `spring.config.import` using the environment variable `SPRING_CONFIG_IMPORT`?" (2026-06-12)**
+
+A: `spring.config.import` is processed during the **bootstrap phase** — before the full `Environment` with relaxed binding is constructed. At that point, Spring's `PropertySourcesPropertyResolver` hasn't loaded all property sources yet, so the relaxed-binding mechanism (which maps `SPRING_CONFIG_IMPORT` to `spring.config.import`) isn't available. The property is resolved literally from the YAML file using basic string interpolation. To make it configurable, you must use an explicit `${PLACEHOLDER:default}` syntax, which IS resolved at that early stage via a simpler property placeholder resolver that checks OS env vars directly.
+
+**Q140: "In Docker Compose, what's the difference between `depends_on` and actual readiness?" (2026-06-12)**
+
+A: `depends_on` controls **container start order** — Docker starts the dependency first. But Docker considers a container "started" the instant its main process begins (typically 1-2 seconds). A Spring Boot application needs 10-30 seconds to be actually ready (serving HTTP, connected to databases, registered with Eureka). `depends_on` doesn't wait for application readiness — it only waits for the process to exist. For true readiness ordering, use either `depends_on` with `condition: service_healthy` (requires healthcheck definition) or external polling scripts that check HTTP endpoints before launching dependent services.
+
+**Q141: "Why does the config server serve configs correctly even when `git fetch` fails?" (2026-06-12)**
+
+A: Spring Cloud Config Server uses a **local clone** strategy. On first startup, it performs `git clone` into a temporary directory (`/tmp/config-repo-RANDOM/`). All subsequent config requests are served from this local filesystem — NOT by hitting GitHub. The `git fetch` is only needed to pull new changes from the remote; if it fails, the server continues serving whatever was in the clone at the time of last successful fetch. The health indicator's DNS failure is an operational concern (configs won't auto-update), not a functional failure (current configs continue serving correctly).
+
 Combined: `@ConditionalOnProperty(matchIfMissing = true)` decides whether the bean exists; `@Value` with a default decides what value a field gets if the bean does exist but the property is absent. Both allow you to omit properties from YAML when the application's designed default is what you want.
+
+---
+
+## Phase 7 Conclusion: Microservices Decomposition ✅
+
+### Date: 2026-06-12
+
+---
+
+### Phase Outcome
+
+Phase 7 is **COMPLETE** — all 12 implementation steps finished. Step 13 (end-to-end testing) is **DEFERRED to Phase 8** because every service currently relies on `SecurityContextHolder.getContext().getAuthentication()` for userId extraction. Without per-service JWT validation (Phase 8 scope), standalone services return `null` from `SecurityContextHolder` — making cross-service flows untestable.
+
+### Key Architectural Lesson: Strangler Fig Transitional Coupling
+
+**Observation**: After decomposition, portfolio-service's `build.gradle` still contains:
+```
+implementation project(':ledger-service')
+implementation project(':market-data-service')
+implementation project(':order-service')
+```
+
+This contradicts the microservice ideal of only sharing a thin commons library.
+
+**Why it's acceptable in Phase 7**: The Strangler Fig Pattern is an **incremental migration strategy**. Services are extracted in phases — the pattern explicitly permits transitional coupling during the migration window. At this stage, portfolio-service calls ledger and market-data via direct bean injection (same JVM), not HTTP. The target state (post-Phase 8+) is:
+
+| Pair | Current (Phase 7) | Target (Phase 9+) |
+|------|------|------|
+| portfolio → product | ✅ Feign (HTTP) | ✅ No change |
+| portfolio → order | ✅ Feign (HTTP) | ✅ No change |
+| order → product | ✅ Feign (HTTP) | ✅ No change |
+| portfolio → ledger | ❌ Direct import | Feign (HTTP) |
+| portfolio → market-data | ❌ Direct import | Feign (HTTP) |
+| portfolio → order entities | ❌ EntityScan (OutboxEvent) | Outbox moved to commons |
+
+**Rule for production microservices**: Each service's `build.gradle` should import ONLY `implementation project(':commons')`. Any other service dependency means the services cannot be deployed independently — they share a classloader and lifecycle.
+
+### Interview Questions & Answers
+
+**Q142: "Why defer end-to-end testing to Phase 8 instead of testing now?" (2026-06-12)**
+
+A: In a JWT-based microservices system, each service needs its own JWT validation filter to extract userId from the token. In Phase 7, authentication logic still lives only in user-service — other services rely on `SecurityContextHolder` which returns `null` when running standalone (no shared security context across processes). Without per-service JWT validation, every API call that needs userId fails with NPE or 403. Phase 8 introduces per-service `JwtAuthFilter` beans, making each service independently capable of authenticating requests — at which point cross-service flows become testable.
+
+**Q143: "What's the difference between the Strangler Fig Pattern and a Big-Bang rewrite?" (2026-06-12)**
+
+A: **Big-Bang**: Rebuild everything in the new architecture simultaneously, switch over on a single release day. Risk: months of parallel development with no production validation; if anything fails at cutover, rollback means discarding all work.
+
+**Strangler Fig** (Martin Fowler, 2004 — named after Australian fig trees that grow around host trees and gradually replace them): Incrementally migrate one capability at a time while the old system continues running. Each increment is independently deployable and testable. The old monolith "shrinks" as functionality moves out.
+
+Key tradeoffs:
+- Big-Bang is faster IF nothing goes wrong (rare for complex systems)
+- Strangler Fig is slower but each step is reversible and validates independently
+- Strangler Fig explicitly permits **transitional coupling** — some components temporarily depend on both old and new, and that's expected (not a design flaw)
+
+**Q144: "In a microservices build, why shouldn't service A import service B's Gradle module?" (2026-06-12)**
+
+A: Gradle `implementation project(':service-B')` means A and B share a classloader, compile together, and produce a single deployment artifact. This defeats the purpose of microservices:
+1. **Independent deployment** impossible — changing B requires rebuilding A
+2. **Separate scaling** impossible — they're the same JAR
+3. **Fault isolation** lost — B's OOM kills A too
+4. **Technology heterogeneity** prevented — both locked to same JVM version and framework
+
+The correct pattern is: A depends only on `project(':commons')` (shared DTOs, exceptions), and calls B via **Feign/REST** or **Kafka events**. The network boundary is the contract — not the classpath.

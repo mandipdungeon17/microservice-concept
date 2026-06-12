@@ -41,9 +41,16 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  * spring.config.import in application.yml) - Routes, ports, and actuator settings defined in
  * equitycart-config/api-gateway.yml - Config Server must be running before gateway starts
  *
+ * <p>Correlation ID: {@link com.equitycart.gateway.filter.CorrelationIdGatewayFilter} is a {@code
+ * GlobalFilter} that assigns (or propagates) a UUID-based {@code X-Correlation-Id} header on every
+ * request before routing. This ID travels through all downstream services via {@code
+ * MdcCorrelationFilter} and {@code FeignCorrelationInterceptor}, appearing on every log line for
+ * cross-service request tracing.
+ *
  * <p>Actuator endpoints: /actuator/health, /actuator/metrics, /actuator/info (port 8080)
  *
  * @see EnableDiscoveryClient
+ * @see com.equitycart.gateway.filter.CorrelationIdGatewayFilter
  */
 @SpringBootApplication
 @EnableDiscoveryClient

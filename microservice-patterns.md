@@ -720,7 +720,444 @@ Command Side                              Query Side
 
 ---
 
-## 4. (Placeholder: API Gateway Pattern — coming in later phases)
+## 4. API Gateway Pattern (Spring Cloud Gateway)
+
+### 4.1 The Problem: Client-to-Microservice Coupling
+
+Without a gateway, every client (browser, mobile app, third-party integration) must know the address of every microservice it needs. In a system with 10 services, each on a different port, the client becomes a hardcoded routing table:
+
+```
+WITHOUT Gateway — Client Knows Everything:
+
+Browser/Mobile App
+├── http://192.168.1.50:8081/api/auth/login     (user-service)
+├── http://192.168.1.50:8088/api/order          (order-service)
+├── http://192.168.1.50:8084/api/portfolio      (portfolio-service)
+├── http://192.168.1.50:8089/api/products       (product-service)
+├── http://192.168.1.50:8085/api/market-data    (market-data-service)
+├── http://192.168.1.50:8086/api/ledger         (ledger-service)
+└── http://192.168.1.50:8087/api/notifications  (notification-service)
+
+Problems:
+1. Client breaks if ANY service moves to a different host/port
+2. Client must handle service discovery itself (which instance is healthy?)
+3. Cross-cutting concerns (auth, rate limiting, logging) duplicated in every service
+4. Internal service topology exposed to the public internet
+5. CORS configuration needed on every service individually
+6. Can't scale/replace services independently without client changes
+```
+
+### 4.2 The Solution: Single Entry Point (Facade for the Network)
+
+The API Gateway pattern places a single reverse proxy between ALL clients and ALL backend services. Clients know ONE address; the gateway knows the rest.
+
+```
+WITH Gateway — Client Knows ONE Address:
+
+Browser/Mobile App
+│
+│  All requests → http://localhost:8080/api/...
+│
+▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    API GATEWAY (port 8080)                        │
+│                                                                  │
+│  Responsibilities:                                               │
+│  ① Routing      — /api/auth/** → user-service                  │
+│  ② Discovery    — "user-service" → ask Eureka → 172.18.0.5:8081│
+│  ③ Load Balance — round-robin across healthy instances           │
+│  ④ Cross-cutting— correlation ID, auth check, rate limit, CORS │
+│  ⑤ Abstraction  — internal topology invisible to clients        │
+│                                                                  │
+│  Path Match          Route To                                    │
+│  ─────────────────── ─────────────────────                      │
+│  /api/auth/**        lb://user-service                          │
+│  /api/users/**       lb://user-service                          │
+│  /api/order/**       lb://order-service                         │
+│  /api/cart/**        lb://order-service                         │
+│  /api/portfolio/**   lb://portfolio-service                     │
+│  /api/market-data/** lb://market-data-service                   │
+│  /api/products/**    lb://product-service                       │
+│  /api/ledger/**      lb://ledger-service                        │
+│  /api/notifications/**lb://notification-service                 │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+            ┌──────────────┼──────────────────┐
+            ▼              ▼                  ▼
+     user-service   order-service   portfolio-service  ...
+     (8081)         (8088)          (8084)
+```
+
+### 4.3 Historical Context: Gateway Evolution
+
+| Era | Technology | Model | Limitations |
+|-----|-----------|-------|-------------|
+| 2005–2012 | Apache HTTP Server / Nginx | Static reverse proxy, config-file routing | No service discovery, manual reload on topology change |
+| 2012–2015 | Netflix Zuul 1.x | Servlet-based (blocking), integrated with Eureka | One thread per request → thread exhaustion under load |
+| 2015–2018 | Netflix Zuul 2.x | Non-blocking (Netty), async I/O | Netflix-internal, limited community adoption |
+| 2018–present | **Spring Cloud Gateway** | Reactive (Project Reactor + Netty), non-blocking | Requires understanding reactive programming |
+| 2019–present | Envoy / Istio | Service mesh sidecar proxy | Infrastructure-level, higher operational complexity |
+
+**Why Spring Cloud Gateway replaced Zuul 1:** Zuul 1 uses a thread-per-request model (Servlet API). Under 1000 concurrent connections, each connection holds a thread. If downstream services are slow (2s response), 1000 threads are blocked simultaneously — the gateway's thread pool is exhausted and it stops accepting new connections. Spring Cloud Gateway uses Netty's event loop (non-blocking I/O) — a single thread can handle thousands of concurrent connections because it never blocks waiting for a downstream response.
+
+### 4.4 Reactive vs Servlet — Why the Gateway Is Different
+
+Every other EquityCart service (order, portfolio, product) runs on **Tomcat** (Servlet container, blocking I/O). The API Gateway runs on **Netty** (non-blocking, event-loop). This is not an arbitrary choice — it's dictated by the gateway's unique workload:
+
+```
+Downstream Service (e.g., order-service):
+  - Receives a request
+  - Does CPU work (validate, query DB, build response)
+  - Returns response
+  - Thread usage: most time spent in useful computation
+  - Model: thread-per-request (Tomcat) is efficient
+
+API Gateway:
+  - Receives a request
+  - Adds headers, checks auth
+  - Forwards to downstream (network I/O)
+  - WAITS for downstream to respond (pure I/O wait)
+  - Returns downstream's response
+  - Thread usage: 95% of time is I/O waiting, 5% is actual work
+  - Model: thread-per-request WASTES resources (threads just sit idle)
+  - Better model: event-loop (one thread handles many connections)
+```
+
+**Consequence:** You cannot use `jakarta.servlet.Filter` (like `OncePerRequestFilter`) in the gateway. Instead, you use `org.springframework.cloud.gateway.filter.GlobalFilter` which operates on reactive types (`ServerWebExchange`, `Mono<Void>`).
+
+| Concept | Servlet (downstream services) | Reactive (gateway) |
+|---------|-----|-----|
+| Request type | `HttpServletRequest` | `ServerWebExchange` |
+| Filter base | `OncePerRequestFilter` | `GlobalFilter` |
+| Return type | `void` (blocking) | `Mono<Void>` (non-blocking) |
+| Thread model | One thread per request | Event loop (few threads, many requests) |
+| Container | Tomcat | Netty |
+| Request mutation | `request.setAttribute(...)` | `exchange.mutate().request(...)` (immutable) |
+
+### 4.5 Route Resolution — How a Request Finds Its Service
+
+When a request arrives at the gateway, this sequence executes:
+
+```
+Step 1: HTTP request arrives → GET /api/portfolio/holdings
+        │
+        ▼
+Step 2: Route Predicate Matching (evaluated in definition order)
+        │
+        │  Route "user-service":      Path=/api/auth/**,/api/users/**     → NO MATCH
+        │  Route "order-service":     Path=/api/order/**,/api/cart/**     → NO MATCH
+        │  Route "portfolio-service": Path=/api/portfolio/**              → MATCH ✓
+        │
+        ▼
+Step 3: URI Resolution
+        │
+        │  Matched route URI: lb://portfolio-service
+        │  "lb://" prefix triggers Spring Cloud LoadBalancer
+        │
+        ▼
+Step 4: Service Discovery (Eureka Lookup)
+        │
+        │  Gateway asks Eureka: "give me instances of PORTFOLIO-SERVICE"
+        │  Eureka responds: [172.18.0.8:8084, 172.18.0.9:8084]
+        │  (if multiple instances are registered)
+        │
+        ▼
+Step 5: Load Balancing (Round-Robin)
+        │
+        │  LoadBalancer selects: 172.18.0.8:8084
+        │  (alternates between instances on each request)
+        │
+        ▼
+Step 6: Filters Execute (pre-routing)
+        │
+        │  CorrelationIdGatewayFilter (HIGHEST_PRECEDENCE):
+        │    - Reads X-Correlation-Id header (if present)
+        │    - If absent → generates UUID
+        │    - Mutates request → adds header to forwarded request
+        │
+        ▼
+Step 7: Proxy the Request
+        │
+        │  Gateway sends: GET http://172.18.0.8:8084/api/portfolio/holdings
+        │  With headers: X-Correlation-Id: abc-123-def
+        │  (original client headers preserved + gateway-added headers)
+        │
+        ▼
+Step 8: Response Returns
+        │
+        │  Downstream responds with body + status
+        │  Post-filter: adds X-Correlation-Id to response headers
+        │  Gateway forwards response to the original client
+```
+
+### 4.6 The `lb://` URI Scheme — Service Discovery at Runtime
+
+`lb://` is not a real network protocol — it's a Spring Cloud convention that triggers the `ReactorLoadBalancerClientFilter`. When the gateway encounters this scheme:
+
+```
+URI: lb://portfolio-service
+      ^^   ^^^^^^^^^^^^^^^^^^
+      │    │
+      │    └── Logical service name (must match spring.application.name
+      │        of the target service, case-insensitive)
+      │
+      └── Triggers LoadBalancerClientFilter instead of direct HTTP
+
+Resolution chain:
+  lb://portfolio-service
+    → LoadBalancerClient.choose("portfolio-service")
+      → EurekaDiscoveryClient.getInstances("portfolio-service")
+        → returns ServiceInstance(host=172.18.0.8, port=8084)
+      → RoundRobinLoadBalancer selects one instance
+    → rewrite URI: http://172.18.0.8:8084
+  Final request: GET http://172.18.0.8:8084/api/portfolio/holdings
+```
+
+**What happens if no instances are registered?** The gateway returns HTTP 503 (Service Unavailable) to the client immediately — no timeout waiting. The LoadBalancer detects an empty instance list and short-circuits.
+
+**What happens if the selected instance is down?** The request fails (connection refused or timeout). By default, no automatic retry. In Phase 8+, a retry filter can be added to try the next instance.
+
+### 4.7 Route Predicates — The Matching Language
+
+Spring Cloud Gateway supports many predicate types beyond simple path matching:
+
+| Predicate | Example | Use Case |
+|-----------|---------|----------|
+| `Path` | `Path=/api/auth/**` | Most common — match URL path pattern |
+| `Method` | `Method=GET,POST` | Route only specific HTTP methods |
+| `Header` | `Header=X-Request-Id, \d+` | Route based on header presence/regex |
+| `Query` | `Query=version, v2` | Route based on query parameter |
+| `Host` | `Host=api.equitycart.com` | Route based on Host header (multi-tenant) |
+| `Weight` | `Weight=group1, 8` | Traffic splitting (canary releases) |
+| `After` / `Before` | `After=2026-07-01T00:00:00Z` | Time-based routing (feature launches) |
+
+**EquityCart uses only `Path` predicates** — simplest and sufficient for path-based microservice routing. Other predicates become relevant for:
+- **Canary deployments** — route 10% of traffic to v2 (`Weight`)
+- **A/B testing** — route based on query parameter or header
+- **API versioning** — `Path=/v2/api/**` → new service, `Path=/v1/api/**` → legacy
+
+### 4.8 Filters — Cross-Cutting Concerns
+
+Filters are the gateway's middleware layer. They intercept requests before routing (pre-filters) and responses after routing (post-filters).
+
+```
+Client Request
+     │
+     ▼
+┌────────────────────────────────────────────────────────────┐
+│  GLOBAL FILTERS (apply to ALL routes, ordered by getOrder())│
+│                                                            │
+│  ① CorrelationIdGatewayFilter (HIGHEST_PRECEDENCE)         │
+│     - Generate/propagate X-Correlation-Id                  │
+│     - PRE: mutate request with header                      │
+│     - POST: echo header in response (.then() block)        │
+│                                                            │
+│  ② [Future: AuthenticationFilter]                          │
+│     - Validate JWT token                                   │
+│     - Reject 401 if invalid/expired                        │
+│     - PRE only (no post action)                            │
+│                                                            │
+│  ③ [Future: RateLimitingFilter]                            │
+│     - Track request count per client IP                    │
+│     - Reject 429 if limit exceeded                         │
+│                                                            │
+│  ④ ReactorLoadBalancerClientFilter (built-in)              │
+│     - Resolves lb:// → actual host:port                    │
+│     - Routes request to selected instance                  │
+│                                                            │
+│  ⑤ NettyRoutingFilter (built-in, lowest precedence)        │
+│     - Actually sends the HTTP request to downstream         │
+│     - Returns the response as a Mono                       │
+└────────────────────────────────────────────────────────────┘
+     │
+     ▼
+Downstream Service
+```
+
+**Two types of filters:**
+
+| Type | Scope | Registration | Example |
+|------|-------|--------------|---------|
+| GlobalFilter | ALL routes automatically | `@Component` on class | CorrelationIdGatewayFilter |
+| GatewayFilter | Specific route only | YAML `filters:` list or factory | `AddRequestHeader`, `StripPrefix` |
+
+### 4.9 GlobalFilter Implementation — CorrelationIdGatewayFilter Deep Dive
+
+The gateway cannot use `MdcCorrelationFilter` (which downstream services use) because that filter extends `OncePerRequestFilter` — a Servlet API class that doesn't exist in the reactive WebFlux stack.
+
+```
+Downstream service (Tomcat):           Gateway (Netty):
+─────────────────────────────          ─────────────────────────────
+OncePerRequestFilter                   GlobalFilter
+  doFilterInternal(                      filter(
+    HttpServletRequest,                    ServerWebExchange,
+    HttpServletResponse,                   GatewayFilterChain
+    FilterChain)                         ) → Mono<Void>
+  │                                      │
+  │ request.getHeader("X-Corr-Id")       │ exchange.getRequest()
+  │ ThreadContext.put(...)               │   .getHeaders().getFirst(...)
+  │ filterChain.doFilter(req, res)       │
+  │ ThreadContext.remove(...)            │ exchange.mutate()
+  │                                      │   .request(mutated).build()
+  │ (mutable request object)            │ (immutable — must create new)
+  └─ return void                        └─ return chain.filter(mutated)
+                                              .then(Mono.fromRunnable(...))
+```
+
+**Why `exchange.mutate()`?** In reactive programming, objects are immutable by design (thread-safety without locks). You can't call `request.addHeader(...)` — instead you create a copy with modifications:
+
+```
+// Can't do this (immutable):
+exchange.getRequest().getHeaders().add("X-Correlation-Id", id);  // ✗ UnsupportedOperation
+
+// Must do this (create modified copy):
+ServerHttpRequest mutated = exchange.getRequest()
+    .mutate()
+    .header("X-Correlation-Id", id)
+    .build();
+ServerWebExchange newExchange = exchange.mutate()
+    .request(mutated)
+    .build();
+return chain.filter(newExchange);  // forward the new immutable exchange
+```
+
+**Filter ordering via `Ordered` interface:**
+
+```
+HIGHEST_PRECEDENCE = Integer.MIN_VALUE = -2147483648
+  → Runs FIRST (before everything else)
+
+LOWEST_PRECEDENCE = Integer.MAX_VALUE = 2147483647
+  → Runs LAST (after everything else)
+
+CorrelationIdGatewayFilter.getOrder() → HIGHEST_PRECEDENCE
+  Why: correlation ID must be available before any other filter logs or routes
+```
+
+### 4.10 Gateway vs Reverse Proxy vs Load Balancer — Distinctions
+
+These terms are often confused. Each has a different primary concern:
+
+| Component | Primary Concern | Aware of Service Registry? | Application Logic? |
+|-----------|----------------|---|---|
+| **Load Balancer** (e.g., AWS ALB) | Distribute traffic across instances | No (static target groups) | No |
+| **Reverse Proxy** (e.g., Nginx) | Forward requests, terminate TLS, cache | No (static upstreams config) | Minimal (rewrite rules) |
+| **API Gateway** (Spring Cloud Gateway) | Route + discover + cross-cut | **Yes** (queries Eureka at runtime) | **Yes** (custom filters, auth, transform) |
+| **Service Mesh** (Istio/Envoy sidecar) | Transparent inter-service communication | Yes (control plane) | Yes (policy-driven) |
+
+**Spring Cloud Gateway combines** all three roles for EquityCart: it's the load balancer (round-robin via `lb://`), the reverse proxy (forwards requests transparently), and the application gateway (runs custom filters).
+
+### 4.11 Why Not Just Use Nginx?
+
+Nginx is a production-grade reverse proxy, but for microservices it lacks:
+
+| Need | Nginx | Spring Cloud Gateway |
+|------|-------|---------------------|
+| Service discovery integration | Manual upstream blocks, reload on change | `lb://` auto-discovers from Eureka in real-time |
+| Dynamic routing | Config file reload (SIGHUP) | Runtime route refresh via Config Server |
+| Custom Java filters | Lua scripting (limited) | Full Java/Kotlin with Spring ecosystem |
+| Circuit breaking | Passive health checks only | Can integrate Resilience4j per route |
+| JWT validation | Requires auth_request module + external service | Spring Security OAuth2 resource server in-process |
+
+**When to use Nginx instead:** In production, Nginx often sits IN FRONT of Spring Cloud Gateway as a TLS terminator and static content server. The architecture becomes: Client → Nginx (TLS, static files) → Spring Cloud Gateway (routing, auth, discovery) → Microservices.
+
+### 4.12 Configuration Externalization — Why Routes Live in Config Server
+
+EquityCart's gateway route config lives in `equitycart-config/api-gateway.yml` (a Git-backed repository served by Config Server), NOT embedded in the gateway's own `application.yml`.
+
+```
+Gateway's embedded application.yml (in the JAR):
+  spring:
+    config:
+      import: configserver:${CONFIG_SERVER_URL:http://localhost:8888}
+    application:
+      name: api-gateway
+
+Config Server fetches api-gateway.yml from Git → merges into gateway's config.
+
+Why externalize routes?
+┌────────────────────────────────────────────────────────────┐
+│ Without Config Server:                                      │
+│   Change a route → edit code → rebuild JAR → redeploy       │
+│   Downtime: minutes                                         │
+│                                                            │
+│ With Config Server:                                         │
+│   Change a route → git push to config repo                 │
+│   Gateway picks up on next refresh (or POST /actuator/refresh)│
+│   Downtime: zero (hot-reload possible)                     │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 4.13 Security at the Gateway Level (Current and Future)
+
+**Current state (Phase 7):** The gateway performs NO authentication. All requests pass through to downstream services. Security relies on network isolation (Docker bridge — only port 8080 is exposed to the host).
+
+**Phase 8 plan — JWT validation at the gateway:**
+
+```
+CURRENT (Phase 7): No auth at gateway
+  Client → Gateway → downstream (no token check anywhere)
+
+PHASE 8: Gateway validates JWT before routing
+  Client → Gateway [AuthFilter: validate JWT, extract userId]
+    → VALID: forward to downstream with X-User-Id header
+    → INVALID: return 401 immediately (request never reaches downstream)
+
+Benefits:
+  - Downstream services trust X-User-Id header (no JWT parsing needed per service)
+  - Invalid requests rejected at the edge (saves downstream resources)
+  - Token validation logic exists in ONE place (not duplicated across 7 services)
+  - Can implement different auth rules per route (public vs protected)
+```
+
+### 4.14 Gateway Patterns for Future Phases
+
+| Pattern | What It Does | When We'll Add It |
+|---------|-------------|-------------------|
+| **Rate Limiting** | Limit requests per client (IP or user) per time window | Phase 8 (security hardening) |
+| **Request/Response Transformation** | Modify headers, add metadata, strip internal fields from responses | Phase 8 |
+| **Circuit Breaking per route** | If a downstream is unhealthy, fail fast at gateway level | Phase 9 (observability) |
+| **Request Aggregation (BFF)** | Combine multiple downstream calls into one client response | If mobile client added |
+| **Canary Routing** | Route percentage of traffic to new version | Blue-green deployments |
+| **WebSocket Support** | Upgrade HTTP → WS for real-time features | If real-time market feed needed |
+
+### 4.15 API Gateway Anti-Patterns
+
+| Anti-Pattern | Why It's Bad | EquityCart's Approach |
+|---|---|---|
+| **Business logic in the gateway** | Gateway becomes a monolith again; all teams coupled to one codebase | Gateway only routes and cross-cuts; zero business logic |
+| **Gateway as data aggregator** | Couples gateway to multiple service schemas; changes cascade | Each client calls one service per request (Phase 7) |
+| **Single gateway for all clients** | Mobile needs different data shapes than web; one gateway can't optimize both | Single gateway is fine at current scale; BFF pattern if mobile added |
+| **No health checks on routes** | Gateway routes to dead instances until Eureka deregisters them (90s default) | Eureka heartbeat + LoadBalancer skips unhealthy |
+| **Storing session state in gateway** | Gateway instances can't scale independently; sticky sessions needed | Stateless — JWT token carries identity |
+
+### 4.16 Comparison: API Gateway Implementations
+
+| Feature | Spring Cloud Gateway | Kong | AWS API Gateway | Nginx + Lua |
+|---------|---------------------|------|----------------|-------------|
+| Language | Java (reactive) | Lua + Go | Managed service | C + Lua |
+| Service discovery | Eureka, Consul, K8s | DNS, Consul | AWS Cloud Map | Manual upstream |
+| Config model | Java code + YAML | Admin API + DB | AWS Console / CloudFormation | nginx.conf |
+| Custom filters | Java GlobalFilter | Lua plugins | Lambda authorizers | Lua scripts |
+| Performance | High (Netty event loop) | Very high (Nginx core) | Managed (auto-scale) | Very high |
+| Deployment | Self-hosted (your JVM) | Self-hosted or Cloud | Fully managed | Self-hosted |
+| Best for | Spring ecosystem, Eureka | Multi-language, plugin marketplace | AWS-native, serverless | Raw performance, simple routing |
+
+**Why Spring Cloud Gateway for EquityCart:** The entire backend is Spring Boot + Eureka. The gateway integrates natively — shares the same config server, same service registry, same security libraries. No polyglot overhead.
+
+### 4.17 Interview-Ready Concepts
+
+**Q: What's the difference between a gateway and a reverse proxy?**
+A: A reverse proxy forwards requests based on static configuration (Nginx upstream blocks). An API gateway adds dynamic service discovery (asks Eureka at runtime), programmable cross-cutting logic (authentication, rate limiting via custom filters), and operates as an application-level component aware of your service topology.
+
+**Q: Why is Spring Cloud Gateway non-blocking?**
+A: A gateway's job is mostly I/O wait (proxy request → wait for downstream → return response). Blocking thread-per-request model (Zuul 1) wastes threads on idle waiting. Non-blocking event loop (Netty) handles thousands of concurrent connections with few threads because it never blocks — it registers a callback and moves to the next request.
+
+**Q: What happens to requests if the gateway crashes?**
+A: All traffic stops. The gateway is a single point of failure. Production mitigation: run multiple gateway instances behind a load balancer (AWS ALB / Nginx). Eureka registers multiple gateway instances; the external LB distributes across them. EquityCart Phase 7 uses a single instance (acceptable for learning).
+
+**Q: Why not put authentication in each microservice?**
+A: You CAN, but you duplicate JWT validation logic in 7 services (same library, same config, same token parsing). Gateway-level auth centralizes it: validate once at the edge, forward trusted identity (userId header) to downstream. Downstream trusts the gateway (network-internal only). Trade-off: if a service is accessed outside the gateway (debugging, internal tool), it has no auth protection — Phase 8 adds per-service fallback validation.
 
 ---
 
@@ -1380,3 +1817,146 @@ Removing `project(':product-service')` from either build without a replacement c
 **Resolution (Phase 10):** OpenFeign HTTP clients replace both direct dependencies. Order-service gets a `ProductFeignClient` that calls `GET /api/products/{id}` over HTTP. Portfolio-service stops scanning `com.equitycart.product.*` and uses the Feign client instead. At that point, product-service becomes a true standalone with REST endpoints and no consumers left on its classpath.
 
 **Strangler Fig principle:** Extract independent services first. Break remaining tight couplings only after the HTTP boundary is established. Never force an extraction before the consumer migration is ready — an incomplete extraction that requires hacks to compile is worse than the monolith state you started from.
+
+---
+
+## 7.12 Distributed Transaction Problem - Why Cross-Service Atomicity Is Hard
+
+### The Problem
+
+In a monolith, a single @Transactional method calling multiple repositories is atomic: all changes commit or none do. In microservices, each service has its own database and connection pool. There is no shared transaction coordinator.
+
+EquityCart example: OrderServiceImpl.placeOrder() calls:
+1. productFeignClient.deductStock() - product-service commits a stock decrement to its database
+2. orderRepository.save(order) - order-service commits the order to its database
+
+If step 2 fails after step 1 commits, stock is decremented but no order exists. There is no automatic rollback - the HTTP call already completed and the product-service transaction is closed.
+
+---
+
+### Why Distributed Transactions Are Not the Answer
+
+**Two-Phase Commit (2PC):** Coordinates commit/rollback across databases via a shared coordinator. Problems: synchronous blocking (both databases held in prepared state), coordinator is a single point of failure, does not work across heterogeneous datastores (PostgreSQL + MongoDB + Redis).
+
+**XA Transactions:** Standard Java implementation of 2PC via JTA. Same fundamental problems.
+
+Not used in modern microservice architectures.
+
+---
+
+### The Solution: Saga Pattern
+
+A Saga is a sequence of local transactions, each with a compensating transaction that undoes it if a later step fails.
+
+  Forward:    deductStock() -> saveOrder() -> clearCart()
+  Compensate: restoreStock() <- [triggered if saveOrder fails]
+
+Two variants:
+- **Choreography:** Each service publishes an event; the next service listens and reacts. No central coordinator. Harder to trace.
+- **Orchestration:** A central orchestrator drives the sequence and compensations explicitly. EquityCart SellToSpendSagaOrchestrator follows this pattern.
+
+Order placement (deductStock -> saveOrder) is a Phase 10 known limitation - full Saga coverage for this flow is a future phase.
+
+---
+
+### ACID vs BASE
+
+Microservices trade ACID for BASE (Basically Available, Soft-state, Eventually consistent):
+- Operations are not globally atomic - they become consistent eventually via compensations and retries
+- Designing for compensation from the start is mandatory; retrofitting is expensive
+
+---
+
+## 7. Docker Compose Patterns for Microservices
+
+### 7.1 Two-File Split (Infrastructure vs Application)
+
+Separate infrastructure (databases, brokers) from application services:
+- `docker-pets.yml` — PostgreSQL, Kafka, Redis, MongoDB, Debezium, MailHog
+- `docker-compose-services.yml` — Spring Boot microservices
+
+**Why:** Different lifecycles. You restart services 10x/day during development; you restart databases rarely. Splitting prevents accidental data loss and speeds up iteration.
+
+### 7.2 Startup Ordering Pattern
+
+`depends_on` only ensures container start order, not application readiness. For Spring Cloud services:
+
+```
+Infrastructure (must be READY: accepting connections)
+  → Discovery Server (must be READY: accepting registrations)
+    → Config Server (must be READY: serving configs)
+      → Business Services (can start in parallel after config-server)
+```
+
+Readiness scripts poll HTTP endpoints before proceeding:
+```bash
+until curl -s http://localhost:8761/actuator/health | grep -q '"status":"UP"'; do
+  sleep 5
+done
+```
+
+### 7.3 Config Externalization Pattern
+
+Same Docker image works in ANY environment via environment variables:
+```yaml
+environment:
+  - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_order
+  - EUREKA_URL=http://discovery:8761/eureka/
+```
+
+The JAR is immutable — behavior changes come from environment, not code changes. This is the Twelve-Factor App methodology (Factor III: Store config in the environment).
+
+### 7.4 Service Mesh (preview — current state)
+
+Current inter-service communication in EquityCart:
+- **Synchronous:** OpenFeign (HTTP) via Eureka service discovery (lb:// URIs)
+- **Asynchronous:** Kafka events (order-delivered, portfolio-notification, sell-to-spend-saga)
+- **Observability:** Correlation ID propagated via Gateway GlobalFilter → Feign RequestInterceptor
+
+Future (Phase 9-10): Istio service mesh would replace Eureka/Feign with sidecar proxies for mTLS, traffic management, and circuit breaking at the infrastructure level.
+
+---
+
+## 8. Observer Pattern (Distributed) — Kafka Pub/Sub
+
+### GoF Observer vs Kafka Observer
+
+| GoF Observer (in-memory) | Kafka Observer (distributed) |
+|---|---|
+| Subject maintains `List<Observer>` | Producer has no knowledge of consumers |
+| `subject.notifyAll()` — synchronous, blocking | `kafkaTemplate.send()` — async, non-blocking |
+| Observer failure blocks subject | Consumer failure doesn't affect producer |
+| Same JVM, same thread | Cross-process, cross-machine |
+| No persistence | Events retained, replayable |
+| Adding observer = code change | Adding consumer = new consumer group (zero code change) |
+
+### EquityCart Implementation
+
+Portfolio services are **subjects** (publishers). Notification service is the **observer** (subscriber). Kafka broker is the **intermediary** — the original GoF pattern lacks this, limiting it to same-JVM communication.
+
+Key benefit: TradeServiceImpl has ZERO knowledge of how or whether notifications are sent. It publishes an event and moves on. The notification service can be down, restarted, or replaced without affecting trade execution.
+
+---
+
+## 9. Strategy Pattern — Pluggable Notification Channels
+
+### Pattern Structure
+
+```
+NotificationChannelStrategy (interface)
+  │
+  ├── LogChannelStrategy      (logs at INFO level — zero infrastructure)
+  ├── EmailChannelStrategy    (JavaMailSender → MailHog SMTP)
+  └── WebhookChannelStrategy  (WebClient POST to configurable URL)
+```
+
+### Runtime Channel Selection
+
+```yaml
+equitycart:
+  notification:
+    channel: LOG   # Change to EMAIL or WEBHOOK without code modification
+```
+
+The dispatcher uses Spring's `Map<String, NotificationChannelStrategy>` auto-injection (bean name → bean instance) to resolve the active channel at runtime. New channels can be added by implementing the interface and annotating with `@Component("newChannel")` — zero changes to existing code.
+- The Outbox Pattern (already implemented for order events) ensures event delivery is durable even if the broker is temporarily down

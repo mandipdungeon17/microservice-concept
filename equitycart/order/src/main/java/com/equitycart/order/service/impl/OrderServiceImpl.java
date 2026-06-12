@@ -1,8 +1,9 @@
 package com.equitycart.order.service.impl;
 
-import com.equitycart.commons.exception.InsufficientStockException;
+import com.equitycart.commons.dto.ProductDTO;
 import com.equitycart.commons.exception.InvalidStatusTransitionException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
+import com.equitycart.commons.feign.ProductFeignClient;
 import com.equitycart.order.cart.dto.CartItemResponse;
 import com.equitycart.order.cart.dto.CartResponse;
 import com.equitycart.order.cart.service.api.CartService;
@@ -16,8 +17,6 @@ import com.equitycart.order.enums.OrderStatus;
 import com.equitycart.order.event.OrderOutboxWriter;
 import com.equitycart.order.repository.OrderRepository;
 import com.equitycart.order.service.api.OrderService;
-import com.equitycart.product.entity.Product;
-import com.equitycart.product.repository.ProductRepository;
 import java.util.List;
 import java.util.Optional;
 import lombok.RequiredArgsConstructor;
@@ -38,7 +37,7 @@ public class OrderServiceImpl implements OrderService {
 
   private final CartService cartService;
   private final OrderRepository orderRepository;
-  private final ProductRepository productRepository;
+  private final ProductFeignClient productFeignClient;
   private final OrderOutboxWriter orderOutboxWriter;
 
   /** {@inheritDoc} */
@@ -74,23 +73,14 @@ public class OrderServiceImpl implements OrderService {
             .build();
 
     for (CartItemResponse cartItemResponse : itemResponses) {
-      Product product =
-          productRepository
-              .findByProductId(cartItemResponse.productId())
-              .orElseThrow(() -> new ResourceNotFoundException("Product Not Found"));
+      ProductDTO product = productFeignClient.getProductById(cartItemResponse.productId());
 
-      if (product.getStockQuantity() < cartItemResponse.quantity())
-        throw new InsufficientStockException(
-            "Insufficient stock for product: " + cartItemResponse.productId());
-
-      product.setStockQuantity(product.getStockQuantity() - cartItemResponse.quantity());
-
-      productRepository.save(product);
+      productFeignClient.deductStock(cartItemResponse.productId(), cartItemResponse.quantity());
 
       OrderItem orderItem =
           OrderItem.builder()
-              .productId(product.getId())
-              .productName(product.getName())
+              .productId(cartItemResponse.productId())
+              .productName(product.name())
               .quantity(cartItemResponse.quantity())
               .priceAtPurchase(cartItemResponse.price())
               .subTotal(cartItemResponse.subtotal())
@@ -158,16 +148,7 @@ public class OrderServiceImpl implements OrderService {
         List<OrderItem> orderItems = order.getItems();
 
         for (OrderItem orderItem : orderItems) {
-          Product product =
-              productRepository
-                  .findByProductId(orderItem.getProductId())
-                  .orElseThrow(
-                      () ->
-                          new ResourceNotFoundException(
-                              "Product not found with product Id: " + orderItem.getProductId()));
-
-          product.setStockQuantity(product.getStockQuantity() + orderItem.getQuantity());
-          productRepository.save(product);
+          productFeignClient.restoreStock(orderItem.getProductId(), orderItem.getQuantity());
         }
       }
       log.info("Order {} transitioned from {} to {}", orderId, order.getStatus(), status);

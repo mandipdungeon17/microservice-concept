@@ -1222,3 +1222,81 @@ While CDC eliminates polling overhead, it introduces its own failure modes:
 ---
 
 _This document will be expanded as Phase 6 progresses with: Saga patterns, exactly-once semantics, and production tuning._
+
+---
+
+## 14. Notification Topic — Observer Pattern via Kafka Pub/Sub
+
+### Topic: `portfolio-notification`
+
+| Field | Value |
+|-------|-------|
+| Topic name | `portfolio-notification` |
+| Producer | NotificationPublisher (portfolio-service) |
+| Consumer | NotificationConsumer (notification-service) |
+| Consumer group | `equitycart-notification-group` |
+| Key | userId (String) |
+| Value | NotificationEvent (JSON) |
+| Delivery guarantee | Fire-and-forget (best-effort, no outbox) |
+
+### Why fire-and-forget (no Outbox)?
+
+Unlike order events (business-critical — lost event = lost reward), notification events are low-severity. A missed notification is annoying but not data-corrupting. The user can always check the API. This justifies simpler KafkaTemplate.send() without the complexity of the Outbox Pattern.
+
+```
+Trade completes in TradeServiceImpl:
+  ↓
+  notificationPublisher.publish(NotificationEvent{
+    userId, TRADE_EXECUTED, ticker, qty, price, totalValue, metadata, timestamp
+  })
+  ↓
+  KafkaTemplate.send("portfolio-notification", userId.toString(), event)
+  ↓ (async, wrapped in try-catch — failure logged at WARN, never propagates)
+  ↓
+Kafka broker stores message
+  ↓
+NotificationConsumer.handleNotification(@Payload event)
+  ↓ @KafkaListener(topics="portfolio-notification", groupId="equitycart-notification-group")
+  ↓
+NotificationDispatcher.dispatch(event)
+  ↓ resolves channel from config: LOG | EMAIL | WEBHOOK
+  ↓
+  ├── LogChannelStrategy: logs at INFO level
+  ├── EmailChannelStrategy: JavaMailSender → MailHog SMTP (port 1025)
+  └── WebhookChannelStrategy: WebClient POST to configured URL
+  ↓
+NotificationLog entity persisted to PostgreSQL (audit trail)
+```
+
+### Event Types Published
+
+| Event Type | Publisher | Trigger |
+|-----------|-----------|---------|
+| TRADE_EXECUTED | TradeServiceImpl | After BUY or SELL trade completes |
+| REWARD_VESTED | VestingHelperImpl | After reward transitions to VESTED |
+| SELL_TO_SPEND_COMPLETED | SellToSpendSagaOrchestrator | Saga reaches COMPLETED state |
+| SELL_TO_SPEND_FAILED | SellToSpendSagaOrchestrator | Saga reaches terminal failure |
+
+### Kafka in Docker — Single-Broker Configuration
+
+When running Kafka with one broker (development), these three settings prevent `INVALID_REPLICATION_FACTOR` errors:
+
+```yaml
+KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+```
+
+Without these, Kafka tries to replicate internal topics (`__consumer_offsets`, `__transaction_state`) to 3 brokers that don't exist.
+
+### Docker Kafka Dual-Listener (Container-to-Container + Host-to-Container)
+
+```yaml
+KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,DOCKER://:29092
+KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,DOCKER://kafka:29092
+```
+
+- `PLAINTEXT://localhost:9092` — advertised to host applications connecting from outside Docker
+- `DOCKER://kafka:29092` — advertised to other containers (Debezium, Spring Boot services in Docker)
+
+When a Kafka client connects, the broker responds with its advertised listener address. If Kafka only advertised `localhost:9092`, a container trying to connect would use `localhost` — which inside that container means itself, not Kafka.
