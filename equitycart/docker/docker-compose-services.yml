@@ -1,3 +1,7 @@
+# EquityCart Application Services
+# All JDBC/Redis/MongoDB URLs use INTERNAL container ports (e.g., postgres:5432, NOT 9432).
+# Host port mappings (in docker-pets.yml) are only for host-to-container access (DBeaver, browser).
+# Containers on the same Docker bridge network resolve each other by service name + internal port.
 services:
   discovery:
     image: discovery-server:latest
@@ -77,7 +81,7 @@ services:
       - SPRING_DATASOURCE_PASSWORD=postgres
       - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart_portfolio
-      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_HOST=redis  # Required because MarketDataServiceImpl (embedded via module dep) uses Redis cache
     depends_on:
       - config-server
       - postgres

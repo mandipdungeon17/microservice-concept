@@ -590,13 +590,55 @@ FeignAuthorizationInterceptor.apply(template):
 - @Async child threads (ThreadLocal does not propagate to new threads)
 - @Scheduled threads (no originating HTTP request)
 
-In all null cases, the interceptor skips silently — no crash, but no Authorization header sent.
+In null cases, the interceptor falls back to `ServiceTokenProvider.getServiceToken()` — generating a short-lived machine-identity JWT (subject=0, role=SERVICE, 60s expiry) so the downstream service still receives a valid Bearer token. This was added in Phase 8 after discovering that Kafka consumers calling Feign clients got 403 Forbidden.
 
 ### Two Interceptors, Two Concerns
 
 | Interceptor | Reads from | Writes to | Survives across threads? |
 |-------------|-----------|-----------|--------------------------|
 | FeignCorrelationInterceptor | MDC ThreadContext (InheritableThreadLocal) | X-Correlation-Id header | YES — InheritableThreadLocal |
-| FeignAuthorizationInterceptor | RequestContextHolder (plain ThreadLocal) | Authorization header | NO — plain ThreadLocal |
+| FeignAuthorizationInterceptor | RequestContextHolder (plain ThreadLocal) | Authorization header | NO — plain ThreadLocal (fallback: ServiceTokenProvider) |
 
 This difference is intentional: correlation IDs are lightweight tracing data safe to propagate anywhere; auth tokens are sensitive and should NOT leak to unrelated threads.
+
+---
+
+## Section 13: HTTP Client Transport — feign-hc5 and the PATCH Problem
+
+### The Problem
+
+OpenFeign's default HTTP transport is `java.net.HttpURLConnection` — a class from JDK 1.1 (late 1990s). It hardcodes supported methods as: GET, POST, PUT, DELETE, HEAD, OPTIONS, TRACE. The PATCH method (RFC 5789, 2010) was never added. Any `@PatchMapping` on a Feign interface throws:
+```
+java.net.ProtocolException: Invalid HTTP method: PATCH
+```
+
+### Why It Bites in EquityCart
+
+`OrderFeignClient.updateOrderStatus()` uses PATCH — semantically correct (partial update of order status). Works fine in Postman and via direct controller testing, but fails when portfolio-service calls it through Feign.
+
+### The Fix
+
+```gradle
+// portfolio/build.gradle (or any module using Feign with PATCH)
+implementation 'io.github.openfeign:feign-hc5'
+```
+
+Spring Cloud OpenFeign auto-detects feign-hc5 on the classpath and replaces the default `HttpURLConnection` transport with Apache HttpClient 5. No `@Bean`, no configuration change — just the dependency.
+
+### HTTP Client Evolution in Feign
+
+| Dependency | HTTP Client | PATCH Support | Notes |
+|-----------|-------------|:---:|---|
+| (none — default) | java.net.HttpURLConnection | ✗ | JDK built-in, ~1997 |
+| feign-httpclient | Apache HttpClient 4 | ✓ | Legacy, works fine |
+| feign-okhttp | OkHttp 3/4 | ✓ | Popular, good HTTP/2 |
+| feign-hc5 | Apache HttpClient 5 | ✓ | Current recommendation |
+| feign-java11 | java.net.http.HttpClient | ✓ | JDK 11+, modern but less battle-tested |
+
+### Interview Questions
+
+**Q: "Your PATCH endpoint works with curl but fails through Feign — what's happening?"**
+A: OpenFeign defaults to `HttpURLConnection` which predates RFC 5789 and doesn't support PATCH. The fix is adding `feign-hc5` — it replaces the transport with Apache HttpClient 5. Auto-configured by Spring Cloud OpenFeign; no code changes needed.
+
+**Q: "Should you use PUT or PATCH for updating order status?"**
+A: PATCH is semantically correct — you're modifying a single field (status), not replacing the entire resource. PUT implies sending the full resource representation. However, if your HTTP client can't handle PATCH (legacy systems), PUT is acceptable for single-field updates — pragmatism over purity.

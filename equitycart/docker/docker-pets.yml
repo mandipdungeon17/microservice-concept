@@ -4,19 +4,19 @@ services:
     image: postgres:16
     restart: always
     ports:
-      - 9432:5432
+      - 9432:5432 # Host:9432 → Container:5432 (9432 avoids conflict with org's local PostgreSQL on 5432)
     environment:
       - POSTGRES_DB=equitycart
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
-#      - POSTGRES_MULTIPLE_DATABASES="equitycart",equitycart_ledger","equitycart_notification","equitycart_order","equitycart_product","equitycart_user","equitycart_portfolio"
+    #      - POSTGRES_MULTIPLE_DATABASES="equitycart",equitycart_ledger","equitycart_notification","equitycart_order","equitycart_product","equitycart_user","equitycart_portfolio"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
   kafka:
     container_name: kafka
     image: apache/kafka:latest
-    user: "0"            #← add this line (runs Kafka process as root inside container)
+    user: "0" #← add this line (runs Kafka process as root inside container)
     ports:
       - 9092:9092
       - 29092:29092

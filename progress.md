@@ -896,16 +896,44 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 
 | # | Step | Status |
 |---|------|--------|
-| 1 | Extract JWT validation to commons (shared library) | PENDING |
-| 2 | Wire commons security into all 6 downstream services | PENDING |
-| 3 | Feign interceptor — propagate Authorization header | PENDING |
-| 4 | Gateway-level JWT pre-validation (GlobalFilter) | PENDING |
+| 1 | Extract JWT validation to commons (shared library) | COMPLETE |
+| 2 | Wire commons security into all 6 downstream services | COMPLETE |
+| 3 | Feign interceptor — propagate Authorization header | COMPLETE |
+| 4 | Gateway-level JWT pre-validation (GlobalFilter) | COMPLETE |
 | 5 | Keycloak Docker setup + realm/client/role configuration | PENDING |
 | 6 | Migrate to OAuth2 Resource Server (spring-boot-starter-oauth2-resource-server) | PENDING |
 | 7 | Gateway Token Relay (replace custom filter with Spring Security) | PENDING |
 | 8 | Rate limiting at Gateway (Redis-backed, token bucket) | PENDING |
 | 9 | OWASP security headers + secrets management (env vars) | PENDING |
 | 10 | E2E security integration tests (completes deferred Phase 7 Step 13) | PENDING |
+
+### Steps 1-4 Completion Summary (2026-06-18)
+
+**Step 1 — Commons JWT Library:** JwtTokenValidator interface + JwtTokenValidatorImpl (HMAC-SHA256 via JJWT 0.12.6). JwtAuthenticationFilter (OncePerRequestFilter, sets SecurityContext with userId as Long principal). SecurityAutoConfig with @ConditionalOnProperty("equitycart.security.enabled") gate. jwt.secret moved to shared application.yml in Config Server.
+
+**Step 2 — All Services Wired:** SecurityAutoConfig activated via `equitycart.security.enabled: true` in each service's Config Server YAML. @EnableMethodSecurity activates existing @PreAuthorize annotations. Removed explicit spring-security-core from build.gradle (comes transitively via commons).
+
+**Step 3 — Feign Auth Propagation:** FeignAuthorizationInterceptor reads Authorization from RequestContextHolder and copies to outgoing Feign request. ServiceTokenProvider fallback for non-HTTP contexts (Kafka consumers, @Scheduled) — generates short-lived JWT (subject=0, role=SERVICE, 60s expiry).
+
+**Step 4 — Gateway Pre-Validation:** JwtValidationGatewayFilter (GlobalFilter) validates JWT at API Gateway edge before routing. Invalid tokens rejected with 401 (saves network hop). Open paths (/api/auth/**, /actuator/**) skip validation. Ordered after CorrelationIdGatewayFilter.
+
+### Obstacles Encountered & Resolved
+
+| Obstacle | Root Cause | Fix |
+|----------|-----------|-----|
+| ReadOnlyHttpHeaders UnsupportedOperationException | `.then()` runs after response committed → headers sealed | ServerHttpResponseDecorator intercepts writeWith() before commit |
+| Invalid HTTP method: PATCH | HttpURLConnection (JDK default) predates RFC 5789 | Added feign-hc5 (Apache HttpClient 5) |
+| 403 on Feign from Kafka consumer | RequestContextHolder null on non-HTTP threads | ServiceTokenProvider generates machine-identity JWT |
+| ServiceToken NumberFormatException | subject="SYSTEM" → Long.parseLong() fails | Changed to subject="0" (sentinel userId) |
+| ServiceToken ClassCastException | roles="SERVICE" (String) → List cast fails | Changed to List.of("SERVICE") (JSON array) |
+| SecurityAutoConfig anyRequest() broken | Multiple anyRequest() calls — only first applies | Single anyRequest().authenticated() + @PreAuthorize for roles |
+| Sell-to-spend defaulting to transactional | Config migration gap — property not in Config Server | Added to equitycart-config/portfolio-service.yml |
+| PKIX path building failed in Docker | Zscaler TLS interception → private CA not in JVM truststore | keytool -importcert with ZscalerRootCA.pem in Dockerfile |
+| Docker COPY file not found | Build context = equitycart/, not docker/ | COPY docker/ZscalerRootCA.pem (context-relative path) |
+| .gitignore not working for cert | Pattern missing equitycart/ prefix | Used equitycart/docker/*.pem |
+| Docker PostgreSQL port conflict | Host port 5432 occupied by org setup | Mapped to 9432:5432 (host:container) |
+| JDBC URLs broken in Docker | Used host port (9432) inside container network | Changed to internal port (5432) for container-to-container |
+| StockBackRewardConsumer retry loop | Portfolio-service missing SPRING_DATA_REDIS_HOST | Added SPRING_DATA_REDIS_HOST=redis to docker-compose |
 
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -970,3 +998,4 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 - **2026-06-09**: Phase 7 Step 10 COMPLETE — OpenFeign migration. ProductFeignClient (4 methods) + BrandTickerMappingDTO + ProductDTO in commons. OrderFeignClient in portfolio module (cannot go in commons — circular dependency via order-service types). SellToSpendServiceImpl + SagaOrchestrator migrated from OrderService → OrderFeignClient. StockBackRewardConsumer migrated from ProductRepository → ProductFeignClient. Two startup errors debugged: (1) @ComponentScan("com.equitycart.order") loaded OrderServiceImpl which now requires ProductFeignClient — fix: remove order from @ComponentScan; (2) OutboxEventRepository proxy removed too aggressively — fix: keep order in @EnableJpaRepositories + @EntityScan. All 8 services UP on Eureka. Javadoc added to all uncommitted files. openfeign-guide.md created (12 sections). Q131–Q138 added to learning_log.md. Next: Step 11 — Correlation ID propagation. Same clean extraction pattern as ledger-service: `@EntityScan` for BaseEntity, no cross-module `@ComponentScan`. Key insights: product-service extraction deferred to Phase 10 (consumers must migrate to Feign first); saga strategy and timeout properties correctly omitted — `matchIfMissing=true` makes saga default-active, `@Value` inline `:30` default removes need for YAML entry. Q129–Q130 added. Next: Step 10 — OpenFeign clients.
 - **2026-06-10**: Phase 7 Step 11 COMPLETE — Correlation ID propagation. Three components: (1) MdcCorrelationFilter (OncePerRequestFilter in commons, ThreadContext put/remove lifecycle); (2) FeignCorrelationInterceptor (Feign RequestInterceptor, propagates ID to downstream Feign calls); (3) CorrelationIdGatewayFilter (GlobalFilter + Ordered in api-gateway, generates UUID at entry point, mutates immutable WebFlux exchange). Replaced org.slf4j.MDC with org.apache.logging.log4j.ThreadContext (Log4j2 native, no SLF4J bridge). Debugged: default-filters YAML approach fails (SpEL evaluated at startup + wrong direction); OrderedGatewayFilter inheritance wrong (wrapper for route-level filter, not GlobalFilter). mdc-correlation-guide.md created (line-by-line filter explanation, GlobalFilter vs default-filters, Netty vs Tomcat filter types, Correlation ID vs TraceId/SpanId). Javadoc on all 3 files + GatewayApplication updated. Next: Step 12 — Docker Compose.
 - **2026-06-12**: Phase 7 Step 12 COMPLETE — Docker Compose full stack. Two-file split: docker-pets.yml (infra) + docker-compose-services.yml (10 Spring Boot services). Start scripts with readiness polling. build-images.sh for all 10 images. Config pattern: `${ENV_VAR:local-default}` in equitycart-config works in both environments. Debugging sessions: (1) Kafka AccessDeniedException → `user: "0"`; (2) INVALID_REPLICATION_FACTOR → single-broker env vars; (3) ConfigClientFailFastException → placeholder in spring.config.import; (4) Eureka registration with Hyper-V hostname → `prefer-ip-address: true` (without explicit ip-address); (5) Git Bash MINGW64 path mangling → `sh -c '...'` wrapper; (6) Config-server DNS failure → `refresh-rate: 3600` (local cache still serves). Key learnings: spring.config.import is ADDITIVE (merges, doesn't override), config-server serves placeholders (client resolves), Docker DNS resolves service names on custom bridge networks, port mapping bridges host↔container worlds. All 10 services UP in Eureka, gateway routing verified. Next: Step 13 — End-to-end testing + re-audit.
+- **2026-06-18**: Phase 8 Steps 1-4 COMPLETE — Per-service JWT validation distributed to all services via commons SecurityAutoConfig. 13 obstacles resolved during E2E testing: ReadOnlyHttpHeaders (ServerHttpResponseDecorator), PATCH unsupported (feign-hc5), Kafka consumer 403 (ServiceTokenProvider with subject=0, role=[SERVICE], 60s expiry), anyRequest() terminal matcher bug, Zscaler TLS interception (keytool CA import in Dockerfile), Docker port mapping (9432:5432), config migration gap (sell-to-spend strategy), .gitignore path resolution. Full business flow verified end-to-end: Register → Login → Browse → Cart → Order → Deliver → Stock-Back Reward → Vest → Trade → Sell-to-Spend. All 10 services running in Docker with auth enforced. Documentation updated: security-reference.md (Sections 11-12), microservice-patterns.md (Sections 12-13), springboot-reference.md (Sections 11-13), learning_log.md (Q155-Q163). Javadoc updated on ServiceTokenProvider, ServiceTokenProviderImpl, FeignAuthorizationInterceptor, SecurityAutoConfig, CorrelationIdGatewayFilter, Dockerfile. Next: Step 5 — Keycloak Docker setup.
