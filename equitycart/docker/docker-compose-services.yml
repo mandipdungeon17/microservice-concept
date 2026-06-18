@@ -76,7 +76,8 @@ services:
       - SPRING_DATASOURCE_USERNAME=postgres
       - SPRING_DATASOURCE_PASSWORD=postgres
       - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart
+      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart_portfolio
+      - SPRING_DATA_REDIS_HOST=redis
     depends_on:
       - config-server
       - postgres
@@ -108,7 +109,7 @@ services:
       - SERVER_PORT=8085
       - CONFIG_SERVER_URL=http://config-server:8888 
       - EUREKA_URL=http://discovery:8761/eureka/
-      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart
+      - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart_marketdata
       - SPRING_DATA_REDIS_HOST=redis
     depends_on:
       - config-server

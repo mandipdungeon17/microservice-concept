@@ -73,10 +73,17 @@ public class AuthServiceImpl implements AuthService {
     User savedUser = userRepository.save(user);
     log.debug("User persisted with id: {}", savedUser.getId());
 
-    Optional<Role> role = roleRepository.findByName(UserRoles.CUSTOMER.name());
-    if (role.isEmpty()) throw new ResourceNotFoundException("Default role CUSTOMER not found");
+    String role;
+    if (request.roles() == null) {
+      role = UserRoles.CUSTOMER.name();
+    } else {
+      role = request.roles().name();
+    }
+    Optional<Role> roleOptional = roleRepository.findByName(role);
+    if (roleOptional.isEmpty())
+      throw new ResourceNotFoundException("Default role CUSTOMER not found");
 
-    UserRole userRole = UserRole.builder().user(savedUser).role(role.get()).build();
+    UserRole userRole = UserRole.builder().user(savedUser).role(roleOptional.get()).build();
     userRoleRepository.save(userRole);
     log.debug("Assigned CUSTOMER role to user id: {}", savedUser.getId());
 

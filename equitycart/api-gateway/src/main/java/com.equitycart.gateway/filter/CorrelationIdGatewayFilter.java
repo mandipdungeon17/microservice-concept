@@ -1,12 +1,17 @@
 package com.equitycart.gateway.filter;
 
+import jakarta.annotation.Nonnull;
 import java.util.UUID;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.reactivestreams.Publisher;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.http.server.reactive.ServerHttpResponseDecorator;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -41,10 +46,22 @@ import reactor.core.publisher.Mono;
  * 1. Read X-Correlation-Id from incoming request headers
  * 2. If absent or blank → generate UUID (this gateway is the request origin)
  * 3. Mutate the request to carry the header → downstream services receive it
- * 4. Forward mutated exchange to the rest of the filter chain + routed service
- * 5. After response returns (.then()), add X-Correlation-Id to response headers
+ * 4. Wrap response in ServerHttpResponseDecorator to inject header before body flush
+ * 5. Forward decorated exchange to the rest of the filter chain + routed service
+ * 6. When response body is written (writeWith/writeAndFlushWith/setComplete),
+ *    the decorator adds X-Correlation-Id to response headers BEFORE the wire flush
  *    → client receives the ID in the HTTP response (useful for frontend error correlation)
  * </pre>
+ *
+ * <p><b>Why ServerHttpResponseDecorator (not .then()):</b> In reactive Gateway, the response
+ * headers are flushed to the client as part of the first {@code writeWith()} call. After that
+ * point, headers are wrapped in {@link org.springframework.http.ReadOnlyHttpHeaders} and cannot
+ * be modified — any attempt throws {@code UnsupportedOperationException}. The previous approach
+ * of {@code chain.filter(exchange).then(Mono.fromRunnable(...))} ran AFTER the response was
+ * already committed (body fully written). The decorator pattern intercepts the write call itself,
+ * injecting the header just before bytes are flushed — while headers are still mutable. Three
+ * override points cover all response types: {@code writeWith} (normal body), {@code
+ * writeAndFlushWith} (SSE/streaming), and {@code setComplete} (empty-body 204/304/redirects).
  *
  * <p><b>Ordering:</b> {@link Ordered#HIGHEST_PRECEDENCE} ensures this filter runs before all other
  * global filters (security, rate limiting, logging) — guaranteeing the Correlation ID is available
@@ -102,14 +119,30 @@ public class CorrelationIdGatewayFilter implements GlobalFilter, Ordered {
 
     String finalCorrelationId = correlationId;
 
-    return chain
-        .filter(mutatedExchange)
-        .then(
-            Mono.fromRunnable(
-                () -> {
-                  log.info(
-                      "CorrelationIdGatewayFilter: X-Correlation-Id added to response headers");
-                  exchange.getResponse().getHeaders().add("X-Correlation-Id", finalCorrelationId);
-                }));
+ServerHttpResponse originalResponse = mutatedExchange.getResponse();
+    ServerHttpResponseDecorator decoratedResponse =
+        new ServerHttpResponseDecorator(originalResponse) {
+          @Override
+          public Mono<Void> writeWith(@Nonnull Publisher<? extends DataBuffer> body) {
+            getHeaders().add("X-Correlation-Id", finalCorrelationId);
+            log.info("X-Correlation-Id added to response: {}", finalCorrelationId);
+            return super.writeWith(body);
+          }
+
+          @Override
+          public Mono<Void> writeAndFlushWith(
+              @Nonnull Publisher<? extends Publisher<? extends DataBuffer>> body) {
+            getHeaders().add("X-Correlation-Id", finalCorrelationId);
+            return super.writeAndFlushWith(body);
+          }
+
+          @Override
+          public Mono<Void> setComplete() {
+            getHeaders().add("X-Correlation-Id", finalCorrelationId);
+            return super.setComplete();
+          }
+        };
+
+    return chain.filter(mutatedExchange.mutate().response(decoratedResponse).build());
   }
 }

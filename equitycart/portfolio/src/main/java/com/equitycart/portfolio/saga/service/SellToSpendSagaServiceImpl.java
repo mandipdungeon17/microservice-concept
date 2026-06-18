@@ -4,9 +4,9 @@ import com.equitycart.commons.exception.InvalidStatusTransitionException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
 import com.equitycart.order.dto.OrderResponse;
 import com.equitycart.order.enums.OrderStatus;
-import com.equitycart.order.service.api.OrderService;
 import com.equitycart.portfolio.dto.SellToSpendRequest;
 import com.equitycart.portfolio.dto.SellToSpendResponse;
+import com.equitycart.portfolio.feign.OrderFeignClient;
 import com.equitycart.portfolio.saga.entity.SellToSpendSaga;
 import com.equitycart.portfolio.saga.orchestrator.SellToSpendSagaOrchestrator;
 import com.equitycart.portfolio.service.api.SellToSpendService;
@@ -40,12 +40,12 @@ public class SellToSpendSagaServiceImpl implements SellToSpendService {
 
   private static final Logger logger = LogManager.getLogger(SellToSpendSagaServiceImpl.class);
 
-  private final OrderService orderService;
+  private final OrderFeignClient orderFeignClient;
   private final SellToSpendSagaOrchestrator sellToSpendSagaOrchestrator;
 
   @Override
   public SellToSpendResponse sellToSpend(Long userId, SellToSpendRequest request) {
-    OrderResponse orderResponse = orderService.getOrderById(request.orderId());
+    OrderResponse orderResponse = orderFeignClient.getOrderById(request.orderId());
     if (!orderResponse.userId().equals(userId)) {
       logger.warn(
           "Sell-to-spend rejected: userId={} does not own orderId={}", userId, request.orderId());

@@ -1,5 +1,6 @@
 package com.equitycart.user.dto;
 
+import com.equitycart.user.enums.UserRoles;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -11,4 +12,4 @@ import jakarta.validation.constraints.Size;
  * @param password the user's password (minimum 8 characters)
  */
 public record RegisterRequest(
-    @NotBlank @Email String email, @NotBlank @Size(min = 8) String password) {}
+    @NotBlank @Email String email, @NotBlank @Size(min = 8) String password, UserRoles roles) {}

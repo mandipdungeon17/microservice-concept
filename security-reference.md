@@ -933,3 +933,565 @@ Both must allow access. Configuring management alone is insufficient when Spring
 
 **EquityCart rule (applied in Phase 7):** Expose `health,metrics,info` in equitycart-config, allow `/actuator/**` in SecurityConfig for admin-only services. Public health check permitted for gateway.
 
+---
+
+## 8. Inter-Service Authentication Propagation (Phase 8)
+
+### Defense-in-Depth: Why Both Gateway AND Service Validate
+
+```
+Option A (Gateway-only — INSECURE):
+  User → Gateway (validates JWT) → strips token, passes userId header → order-service
+  
+  Attack vector: order-service calls product-service via Feign (bypasses gateway)
+  → Attacker compromises order-service → sends fake X-User-Id header to product-service
+  → product-service trusts it → privilege escalation
+
+Option B (Defense-in-depth — CORRECT):
+  User → Gateway (validates JWT, fast-fail on bad tokens) → forwards full token
+  → order-service (validates JWT independently) → Feign call with same token
+  → product-service (validates JWT independently) → no trust without proof
+  
+  Even if order-service is compromised, attacker cannot forge a valid JWT
+  (requires the secret key, which is not in memory of a compromised service)
+```
+
+### Token Propagation Pattern
+
+**Problem:** After all services enforce JWT auth, inter-service Feign calls break because Feign creates new HTTP requests without the original Authorization header.
+
+**Solution:** `FeignAuthorizationInterceptor` reads the original request's token from `RequestContextHolder` (ThreadLocal) and copies it to the outgoing Feign request.
+
+```
+User's request (with token)
+    │
+    ▼
+order-service servlet thread
+    │
+    ├── FrameworkServlet stores request in ThreadLocal
+    ├── JwtAuthenticationFilter validates token → sets SecurityContext
+    ├── OrderController.createOrder() processes business logic
+    │
+    ├── productFeignClient.getProduct(id)
+    │       │
+    │       ▼
+    │   FeignAuthorizationInterceptor.apply(template)
+    │       1. RequestContextHolder.getRequestAttributes() → reads ThreadLocal
+    │       2. getRequest().getHeader("Authorization") → "Bearer eyJ..."
+    │       3. template.header("Authorization", token) → copies to outgoing request
+    │       │
+    │       ▼
+    │   product-service receives request WITH token
+    │       1. JwtAuthenticationFilter validates → sets SecurityContext
+    │       2. @PreAuthorize checks → authorized
+    │       3. Returns product data
+    │
+    └── order-service continues with product data
+```
+
+### Token Propagation vs Token Exchange
+
+| Aspect | Propagation (Phase 8 Steps 1-4) | Exchange (Phase 8 Step 6+) |
+|--------|----------------------------------|---------------------------|
+| **How** | Copy original JWT to outgoing request | Call IdP to get new scoped-down token |
+| **Extra latency** | 0 (just header copy) | 1 HTTP call to IdP per hop |
+| **Downstream sees** | Full user identity + ALL roles | Only the permissions needed for that call |
+| **If service compromised** | Attacker gets full user token | Attacker gets limited-scope token |
+| **Implementation** | 3 lines in RequestInterceptor | OAuth2 Token Exchange grant (RFC 8693) |
+| **When to use** | Same team, same trust boundary | Cross-org, different security zones |
+
+### Thread Safety: Where Propagation Breaks
+
+| Context | RequestContextHolder | Why | Solution |
+|---------|---------------------|-----|----------|
+| Servlet request thread | Available ✓ | FrameworkServlet stores it | FeignAuthorizationInterceptor works |
+| Kafka consumer thread | NULL ✗ | No HTTP request originated this thread | Use service-account token (client-credentials) |
+| @Async child thread | NULL ✗ | Plain ThreadLocal doesn't propagate to child threads | Extract token before spawning async, or use DelegatingSecurityContextExecutor |
+| @Scheduled thread | NULL ✗ | Scheduler threads have no request | Use service-account token |
+| WebSocket handler | NULL ✗ | After initial handshake, no per-message HTTP request | Store token during handshake, inject manually |
+
+### SecurityContext vs RequestContextHolder: Two Separate Thread-Local Stores
+
+```
+┌─── Thread-42 (handling user request) ───────────────────────────┐
+│                                                                   │
+│  SecurityContextHolder (ThreadLocal):                             │
+│    Authentication = UsernamePasswordAuthenticationToken            │
+│      principal = 42L (userId)                                     │
+│      credentials = null                                           │
+│      authorities = [ROLE_CUSTOMER, ROLE_SELLER]                   │
+│                                                                   │
+│  RequestContextHolder (ThreadLocal):                              │
+│    ServletRequestAttributes                                       │
+│      request = HttpServletRequest (full original request object)  │
+│        .getHeader("Authorization") = "Bearer eyJhbG..."           │
+│        .getHeader("X-Correlation-Id") = "7f3a9c2b-..."            │
+│        .getMethod() = "POST"                                      │
+│        .getRequestURI() = "/api/orders"                           │
+│                                                                   │
+│  MDC ThreadContext (InheritableThreadLocal):                      │
+│    correlationId = "7f3a9c2b-..."                                 │
+│                                                                   │
+└───────────────────────────────────────────────────────────────────┘
+
+SecurityContextHolder → set by JwtAuthenticationFilter (extracted claims)
+RequestContextHolder → set by FrameworkServlet (raw HTTP request object)
+MDC ThreadContext    → set by MdcCorrelationFilter (correlation ID string)
+
+All three exist simultaneously on the same thread, serving different purposes:
+- SecurityContextHolder: "WHO is this user?" (for @PreAuthorize, role checks)
+- RequestContextHolder: "WHAT did they send?" (for interceptors that need raw headers)
+- MDC ThreadContext: "HOW do we trace this?" (for log correlation across services)
+```
+
+### Interview Questions
+
+**Q: "How do you propagate authentication between microservices?"**
+A: For synchronous Feign calls, a RequestInterceptor reads the Authorization header from RequestContextHolder (ThreadLocal containing the original HTTP request) and copies it to the outgoing Feign RequestTemplate. For async/event-driven flows (Kafka), use service-account tokens via OAuth2 client-credentials grant.
+
+**Q: "Should microservices trust the gateway or validate tokens independently?"**
+A: Both. Gateway validates for fast-fail (reject bad tokens early, save network hops). Each service validates independently for defense-in-depth (Feign inter-service calls bypass gateway; compromised service can't forge tokens without the signing key).
+
+**Q: "What happens to the SecurityContext when you spawn an async thread?"**
+A: By default, nothing — SecurityContextHolder uses plain ThreadLocal, which doesn't propagate. Solutions: (1) use `SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL)` globally (risky: thread pool reuse can leak context), (2) use `DelegatingSecurityContextExecutor` which wraps the executor to copy SecurityContext, (3) extract the needed info (userId, roles) before spawning async work and pass it explicitly.
+
+**Q: "Why is token propagation acceptable within a single trust boundary but not across organizations?"**
+A: Within one team's services, all services are equally trusted — if one is compromised, the attacker likely has access to the signing key anyway. Across organizations, services have different trust levels — downstream should only see what it needs (least privilege). Token exchange (RFC 8693) creates a scoped-down token per hop, limiting blast radius of a compromise.
+
+---
+
+## 9. Gateway Edge Security — Reactive JWT Pre-Validation (Phase 8 Step 4)
+
+### Why Validate at the Gateway?
+
+```
+WITHOUT gateway validation:
+  Bad token → gateway routes → order-service processes → validates → 401
+  Cost: 2 network hops + downstream thread consumed + response travel back
+
+WITH gateway validation:
+  Bad token → gateway validates → 401 immediately
+  Cost: 0 network hops beyond the gateway, instant rejection
+```
+
+The gateway acts as a **security perimeter** (edge firewall). It rejects obviously bad requests before they consume internal resources. But it does NOT replace per-service validation — it's an optimization, not a replacement.
+
+### Reactive Gateway vs Servlet Services — Two Different Worlds
+
+| Aspect | api-gateway (Reactive/WebFlux) | order-service (Servlet/MVC) |
+|--------|-------------------------------|----------------------------|
+| **Runtime** | Netty event loop | Tomcat thread pool |
+| **Threading** | ~4 event loop threads handle ALL requests | 1 thread per request (200 default) |
+| **Request object** | ServerHttpRequest (immutable) | HttpServletRequest (mutable) |
+| **Filter interface** | GlobalFilter → Mono<Void> | OncePerRequestFilter → void |
+| **Blocking allowed?** | NO — blocks event loop → all requests stall | YES — each thread is independent |
+| **Error response** | DataBuffer + writeWith(Mono.just(buffer)) | response.setStatus() + writer.write() |
+| **Security framework** | Cannot use servlet SecurityFilterChain | Uses commons SecurityAutoConfig |
+
+### Filter Execution Order at Gateway
+
+```
+Request arrives at gateway (port 8080)
+    │
+    ▼
+CorrelationIdGatewayFilter (HIGHEST_PRECEDENCE)
+    │── Assigns X-Correlation-Id (UUID) to request + response headers
+    │
+    ▼
+JwtValidationGatewayFilter (HIGHEST_PRECEDENCE + 1)
+    │── Checks: is path in open-paths list?
+    │   ├── YES → skip validation, proceed to routing
+    │   └── NO → extract Authorization header
+    │           ├── Missing/malformed → return 401 JSON (short-circuit)
+    │           └── Present → JJWT parseSignedClaims()
+    │                   ├── JwtException → return 401 JSON (short-circuit)
+    │                   └── Valid → proceed to routing
+    │
+    ▼
+Spring Cloud Gateway Route Predicates
+    │── Match request path to configured route (/api/order/** → lb://order-service)
+    │
+    ▼
+LoadBalancerClientFilter
+    │── Resolve lb://order-service → actual host:port via Eureka
+    │
+    ▼
+NettyRoutingFilter
+    │── Forward request to downstream service (Authorization header intact)
+    │
+    ▼
+Downstream service receives request (with original Bearer token)
+```
+
+### Reactive Response Writing: onUnauthorized() Explained
+
+In servlet: `response.setStatus(401); response.getWriter().write(json); return;`
+
+In reactive gateway:
+```java
+private Mono<Void> onUnauthorized(ServerWebExchange exchange, String reason) {
+    // 1. Set HTTP status on the response
+    exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED);
+    
+    // 2. Set Content-Type header
+    exchange.getResponse().getHeaders().setContentType(MediaType.APPLICATION_JSON);
+    
+    // 3. Convert JSON string to bytes → wrap in DataBuffer
+    //    DataBuffer = Netty's zero-copy byte container (avoids byte[] copying)
+    byte[] bytes = ("{\"error\":\"Unauthorized\",\"message\":\"" + reason + "\"}").getBytes();
+    DataBuffer buffer = exchange.getResponse().bufferFactory().wrap(bytes);
+    
+    // 4. writeWith(Mono.just(buffer)) → writes body and COMPLETES the response
+    //    Returning this Mono short-circuits the filter chain
+    //    No downstream filters or route handlers execute
+    return exchange.getResponse().writeWith(Mono.just(buffer));
+}
+```
+
+Key insight: returning `writeWith()` from the filter method means "I'm done, don't call anything else." The filter chain is abandoned — the response is flushed to the client.
+
+### What This Manual Filter Does NOT Handle (Fixed by OAuth2 in Step 7)
+
+| Concern | Manual filter | OAuth2 Resource Server |
+|---------|---------------|----------------------|
+| Key rotation | Must restart gateway | JWKS endpoint auto-refreshes keys |
+| Issuer validation | Not checked | Validates `iss` claim matches configured issuer |
+| Audience validation | Not checked | Validates `aud` claim matches this service |
+| Clock skew tolerance | 0 tolerance | Configurable (default 60s) |
+| Key caching | Parses key from config every request | NimbusJwtDecoder caches decoded key |
+| Multiple issuers | Not supported | Configurable multi-tenant issuers |
+
+### Interview Questions
+
+**Q: "Where do you validate tokens — gateway, service, or both?"**
+A: Both. Gateway validates for fast-fail (rejects expired/malformed before routing). Each service validates independently because Feign inter-service calls bypass the gateway. The gateway is an optimization; per-service validation is the security guarantee.
+
+**Q: "Why can't the gateway use the same SecurityFilterChain as your services?"**
+A: Spring Cloud Gateway runs on Netty (reactive/WebFlux). SecurityFilterChain is a servlet-API construct (javax.servlet.Filter). These are incompatible stacks — you cannot import servlet dependencies into a WebFlux application without class conflicts. The gateway needs its own reactive security via GlobalFilter or Spring Security's WebFlux SecurityWebFilterChain.
+
+**Q: "Is JJWT's parseSignedClaims() safe on the Netty event loop?"**
+A: Yes. HMAC-SHA256 signature verification is pure CPU computation (no I/O, no network calls, no disk access). It completes in microseconds. The Netty event loop only forbids BLOCKING operations (Thread.sleep, synchronous HTTP calls, JDBC queries). CPU-bound work under ~1ms is fine.
+
+---
+
+## 10. Security Activation Chain — From Classpath to Enforcement (Phase 8 Steps 1-4)
+
+### Complete Activation Flow Diagram
+
+This section traces the ENTIRE path from "security code exists" to "requests are actually rejected." Each step must succeed for security to be enforced. A failure at any step results in **silent degradation** — no error, just no security.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│              Security Activation Chain — Order Service Example                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  LAYER 1: DEPENDENCY (Gradle)                                                │
+│  ─────────────────────────────                                               │
+│  order/build.gradle:                                                         │
+│    implementation project(':commons')                                         │
+│         │                                                                    │
+│         │  What this does: puts commons .class files on order's classpath     │
+│         │  What this does NOT: register any class as a Spring bean            │
+│         ▼                                                                    │
+│  LAYER 2: SCANNING (@ComponentScan)                                          │
+│  ──────────────────────────────────                                          │
+│  OrderServiceApplication.java:                                               │
+│    @ComponentScan(basePackages = {"com.equitycart.order", "com.equitycart.commons"})
+│         │                                                                    │
+│         │  Spring scans com.equitycart.commons.** → finds SecurityAutoConfig │
+│         ▼                                                                    │
+│  LAYER 3: CONDITIONAL EVALUATION (@ConditionalOnProperty)                    │
+│  ─────────────────────────────────────────────────────────                   │
+│  SecurityAutoConfig.class:                                                   │
+│    @ConditionalOnProperty(name="equitycart.security.enabled", havingValue="true")
+│         │                                                                    │
+│         │  Spring checks Config Server → order-service.yml has the property  │
+│         ▼                                                                    │
+│  LAYER 4: BEAN CREATION (DI)                                                 │
+│  ────────────────────────────                                                │
+│  SecurityAutoConfig instantiated → injects JwtAuthenticationFilter           │
+│  JwtAuthenticationFilter instantiated → injects JwtTokenValidatorImpl        │
+│  JwtTokenValidatorImpl instantiated → @Value("${jwt.secret}") resolved       │
+│         │                                                                    │
+│         │  All dependencies satisfied → bean graph complete                  │
+│         ▼                                                                    │
+│  LAYER 5: FILTER CHAIN REGISTRATION                                          │
+│  ──────────────────────────────────                                          │
+│  SecurityAutoConfig.securityFilterChain(HttpSecurity):                        │
+│    .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)│
+│    .authorizeHttpRequests(auth -> auth                                        │
+│        .requestMatchers("/api/auth/**", "/actuator/**").permitAll()           │
+│        .anyRequest().authenticated())                                        │
+│         │                                                                    │
+│         │  Filter chain registered in FilterChainProxy                       │
+│         ▼                                                                    │
+│  LAYER 6: REQUEST-TIME ENFORCEMENT                                           │
+│  ──────────────────────────────────                                          │
+│  Incoming: GET /api/order/1 (no token)                                       │
+│    → DelegatingFilterProxy → FilterChainProxy → SecurityFilterChain          │
+│    → JwtAuthenticationFilter: no Bearer header → SecurityContext empty       │
+│    → AuthorizationFilter: anyRequest().authenticated() → 403 Forbidden       │
+│                                                                              │
+│  Incoming: GET /api/order/1 (with valid Bearer token)                        │
+│    → JwtAuthenticationFilter: validates → sets SecurityContext (userId=42)   │
+│    → AuthorizationFilter: authenticated ✓ → proceeds to controller           │
+│    → OrderController: (Long) auth.getPrincipal() → 42                        │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Failure Points — "Security Not Working" Debugging Checklist
+
+| Symptom | Root Cause | Layer Failed |
+|---------|-----------|--------------|
+| All requests return 200 (no auth) | @ComponentScan doesn't include `com.equitycart.commons` | Layer 2 |
+| All requests return 200 (no auth) | `equitycart.security.enabled` not set to `true` | Layer 3 |
+| Startup fails: `NoSuchBeanDefinition: JwtAuthenticationFilter` | Filter class not scanned (wrong package) | Layer 2 |
+| Startup fails: `Could not resolve placeholder 'jwt.secret'` | Config Server unreachable or property missing | Layer 4 |
+| Requests return 403 (not 401) | Token valid but missing required role for @PreAuthorize | Layer 6 |
+| Feign inter-service calls return 401 | FeignAuthorizationInterceptor not propagating token | Layer 2 (interceptor not scanned) |
+| Gateway passes, service rejects | Different jwt.secret values (split-brain config) | Layer 4 |
+
+### Two-Layer Defense-in-Depth — Complete Request Flow
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                     │
+│  CLIENT: GET /api/order/1, Authorization: Bearer eyJhbG...                          │
+│       │                                                                             │
+│       ▼                                                                             │
+│  ┌─────────────────────── API GATEWAY (port 8080) ──────────────────────┐           │
+│  │                                                                       │           │
+│  │  Filter 1: CorrelationIdGatewayFilter (HIGHEST_PRECEDENCE)            │           │
+│  │    → Assigns X-Correlation-Id: 7f3a-9c2b-...                          │           │
+│  │                                                                       │           │
+│  │  Filter 2: JwtValidationGatewayFilter (HIGHEST_PRECEDENCE + 1)        │           │
+│  │    → Checks: is /api/order/1 an open path? NO                         │           │
+│  │    → Extracts Bearer token from Authorization header                  │           │
+│  │    → JJWT: Jwts.parser().verifyWith(key).parseSignedClaims(token)     │           │
+│  │    → Valid? YES → proceed (token NOT stripped, stays in header)        │           │
+│  │    │                                                                  │           │
+│  │    │  If INVALID here → return 401 immediately (never reaches service)│           │
+│  │    │  This saves 1 network hop + service processing time              │           │
+│  │    ▼                                                                  │           │
+│  │  Route: lb://order-service → Eureka → 192.168.x.x:8088               │           │
+│  │                                                                       │           │
+│  └───────────────────────────────────────────────────────────────────────┘           │
+│       │                                                                             │
+│       │  HTTP request forwarded WITH original Authorization header                  │
+│       ▼                                                                             │
+│  ┌─────────────────── ORDER SERVICE (port 8088) ─────────────────────────┐          │
+│  │                                                                        │          │
+│  │  Servlet Filter Stack (DelegatingFilterProxy → FilterChainProxy):      │          │
+│  │                                                                        │          │
+│  │  Filter A: MdcCorrelationFilter                                        │          │
+│  │    → Reads X-Correlation-Id header → puts in MDC ThreadContext         │          │
+│  │                                                                        │          │
+│  │  Filter B: JwtAuthenticationFilter (before UsernamePasswordAuth)       │          │
+│  │    → Reads Authorization: Bearer eyJhbG...                             │          │
+│  │    → JwtTokenValidatorImpl.validateToken(token) → true                 │          │
+│  │    → extractUserId(token) → 42L                                        │          │
+│  │    → extractRoles(token) → ["CUSTOMER"]                                │          │
+│  │    → SecurityContextHolder.setAuthentication(                           │          │
+│  │        new UsernamePasswordAuthenticationToken(42L, null,              │          │
+│  │            [ROLE_CUSTOMER]))                                           │          │
+│  │                                                                        │          │
+│  │  Filter C: AuthorizationFilter                                         │          │
+│  │    → /api/order/1 requires authenticated() → SecurityContext has       │          │
+│  │      principal → PASS                                                  │          │
+│  │                                                                        │          │
+│  │  Controller: OrderController.getOrder(1)                               │          │
+│  │    → (Long) authentication.getPrincipal() → 42                         │          │
+│  │    → Returns order belonging to userId 42                              │          │
+│  │                                                                        │          │
+│  └────────────────────────────────────────────────────────────────────────┘          │
+│                                                                                     │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why Both Layers Are Needed
+
+| Scenario | Gateway only | Service only | Both (our design) |
+|----------|-------------|-------------|-------------------|
+| Bad token via browser/curl | Rejected at edge ✓ | Reaches service, rejected there | Rejected at edge (fast-fail) |
+| Feign call between services (bypasses gateway) | Not checked! | Rejected at service ✓ | Rejected at service |
+| Gateway misconfigured/bypassed | No protection! | Still protected ✓ | Still protected |
+| Valid token, expired mid-flight | Gateway may pass (clock skew) | Service rejects ✓ | Belt and suspenders |
+| DDoS with invalid tokens | Rejected at edge (saves resources) ✓ | All services waste CPU | Rejected at edge |
+
+**Key principle:** The gateway is an **optimization** (save network hops); per-service validation is the **security guarantee** (zero trust within service mesh).
+
+### Config Server Resolution in Docker Context
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│               How Services Get Security Config in Docker                     │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  docker-compose-services.yml:                                               │
+│    order-service:                                                            │
+│      environment:                                                            │
+│        - CONFIG_SERVER_URL=http://config-server:8888                          │
+│                                                                             │
+│  At startup, order-service's Spring Cloud Config client:                     │
+│    1. Connects to http://config-server:8888                                  │
+│    2. Requests: GET /order-service/default                                   │
+│    3. Config Server:                                                         │
+│       a. Clones https://github.com/mandipdungeon17/equitycart-config.git    │
+│       b. Returns MERGED config:                                              │
+│          - application.yml (shared) → jwt.secret, eureka, kafka, logging    │
+│          - order-service.yml (specific) → equitycart.security.enabled=true  │
+│    4. Spring PropertySource now contains jwt.secret + security flag          │
+│                                                                             │
+│  ⚠️  CRITICAL: Config Server pulls from REMOTE Git, not local filesystem.   │
+│     If you change equitycart-config/ locally but don't push → Docker gets   │
+│     the OLD config → security flags missing → SecurityAutoConfig skipped    │
+│     silently → all requests pass through without authentication.            │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Interview Questions
+
+**Q: "You say defense-in-depth — isn't validating twice wasteful?"**
+A: The gateway validation costs ~50μs (HMAC-SHA256 is CPU-only). That's negligible compared to the network hop saved when rejecting a bad token. The service-level validation is mandatory because not all traffic enters through the gateway — Feign inter-service calls bypass it entirely. The cost of double-validation on the happy path (valid token) is negligible; the cost of NOT validating at the service (compromised gateway = total breach) is catastrophic.
+
+**Q: "How would you debug 'security is not working' in a multi-module Spring Boot app?"**
+A: Systematic layer check: (1) Verify @ComponentScan includes commons package — check startup log for "Enabling JWT-based security" message. (2) Verify property: `actuator/env` endpoint → search for `equitycart.security.enabled`. (3) Verify filter chain: `actuator/beans` → search for `securityFilterChain`. (4) Enable condition report: add `--debug` flag → Spring prints all @Conditional match/no-match decisions. Most common root cause: @EntityScan was added (for BaseEntity) but @ComponentScan was not — they are independent mechanisms.
+
+**Q: "Should the gateway strip the token after validation?"**
+A: No. In defense-in-depth, downstream services must validate independently. Stripping the token means services trust the gateway blindly — if the gateway is compromised or misconfigured, there's no second line of defense. The token flows through unchanged; each service performs its own validation. This is zero-trust networking applied to JWT authentication.
+
+---
+
+## Section 11: Phase 8 Obstacles — Service-to-Service Authentication in Async Contexts
+
+### The Problem: 403 on Feign Calls from Kafka Consumers
+
+After all services enforced JWT authentication (Phase 8 Step 2), inter-service Feign calls from Kafka consumer threads failed with HTTP 403. Root cause: `RequestContextHolder.getRequestAttributes()` returns null on non-HTTP threads.
+
+**Why null?** `RequestContextHolder` uses `ThreadLocal` storage. When Tomcat's `DispatcherServlet` receives an HTTP request, it stores the `HttpServletRequest` in the current thread's ThreadLocal. Kafka consumer threads are managed by Spring Kafka's `ConcurrentMessageListenerContainer` — they never pass through `DispatcherServlet`, so no request attributes exist.
+
+**Affected flows:**
+- `StockBackRewardConsumer` (order-delivered event) → calls `ProductFeignClient.getProductById()` 
+- Any `@Scheduled` or `@Async` task that uses Feign clients
+
+### The Solution: ServiceTokenProvider Pattern
+
+```
+Non-HTTP Thread → FeignAuthorizationInterceptor → no RequestContext?
+    ├── YES (Kafka/Scheduled) → ServiceTokenProvider.getServiceToken() → "Bearer <service-jwt>"
+    └── NO  (normal HTTP)     → propagate original Authorization header
+```
+
+**Key Design Constraints (discovered through trial and error):**
+
+| Constraint | Why | What Breaks Otherwise |
+|-----------|-----|----------------------|
+| Subject must be numeric ("0") | `JwtTokenValidatorImpl.extractUserId()` does `Long.parseLong(subject)` | NumberFormatException on "SYSTEM" |
+| Roles must be `List<String>` | `extractRoles()` casts claim to `List<String>` | ClassCastException on plain String "SERVICE" |
+| Expiry is mandatory | `JwtAuthenticationFilter` calls `isTokenExpired()` — returns true for no-expiry tokens in JJWT 0.12.6 | Token rejected as expired |
+| Same signing key | Downstream validates with shared `jwt.secret` | SignatureException |
+
+**Why subject="0"?** Auto-increment IDs start at 1. Using 0 as a sentinel means it can never collide with a real user, and the `Long.parseLong()` contract is satisfied. Any controller that does `@PreAuthorize("hasRole('CUSTOMER')")` naturally excludes service tokens (role=SERVICE), while `anyRequest().authenticated()` permits them.
+
+### SecurityAutoConfig: `anyRequest()` is Terminal
+
+**Bug:** An earlier implementation attempted multiple authorization chains:
+```java
+auth.requestMatchers("/api/auth/**").permitAll()
+    .anyRequest().hasRole("SERVICE")  // First anyRequest() — catches ALL remaining
+    .anyRequest().authenticated();    // Second anyRequest() — NEVER reached
+```
+
+**Root cause:** In Spring Security's `AuthorizeHttpRequestsConfigurer`, `anyRequest()` registers a universal matcher (matches every URL). Once registered, the framework throws `IllegalStateException` if you try to add more matchers after it. The second `anyRequest()` above is silently ignored (pre-6.x) or throws an error (6.x+).
+
+**Fix:** Single `anyRequest().authenticated()` — accepts ANY valid JWT. Role-based access control is delegated to method-level `@PreAuthorize` annotations.
+
+### JWT Claims Type Compatibility
+
+JJWT's serialization/deserialization preserves Java types through JSON:
+- `List.of("SERVICE")` → serialized as JSON `["SERVICE"]` → deserialized as `ArrayList<String>` ✓
+- `"SERVICE"` (plain String) → serialized as JSON `"SERVICE"` → deserialized as `String` ✗ (cast to List fails)
+
+This matters because `JwtTokenValidatorImpl.extractRoles()` does:
+```java
+return claims.get("roles", List.class);  // ClassCastException if stored as String
+```
+
+### Interview Questions
+
+**Q: "How do you handle authentication for service-to-service calls in non-HTTP contexts?"**
+A: Three options in increasing maturity: (1) ServiceTokenProvider — generate a short-lived JWT with a sentinel identity (subject=0, role=SERVICE), signed with the shared secret. Simple, no external deps. (2) Client-credentials OAuth2 flow — the calling service authenticates to the IdP with its own clientId/secret and receives a token scoped to its needs. Requires Keycloak/IdP. (3) mTLS — mutual TLS at the network level; no application-layer token needed. Most secure but complex to manage certificates.
+
+**Q: "What is the risk of using a shared HMAC secret for service tokens?"**
+A: Any service that holds the jwt.secret can FORGE tokens for ANY identity — including admin users. If one service is compromised, the attacker can impersonate any user across all services. This is the fundamental weakness of symmetric (HS256) signing in microservices. The mitigation: migrate to RS256 (asymmetric) where services hold only the PUBLIC key for validation — they cannot sign new tokens. Only the IdP (Keycloak) holds the private key.
+
+**Q: "Why not cache the service token?"**
+A: HMAC signing is ~0.1ms (CPU-only, no I/O). The 60-second TTL means any cached token is valid for at most 60s — caching saves negligible time while introducing expiry-management complexity (what if the cached token has 1s remaining?). Fresh tokens per call are simple and safe.
+
+---
+
+## Section 12: Corporate Proxy TLS Interception in Docker Containers
+
+### The Problem: PKIX Path Building Failed
+
+All HTTPS calls from Docker containers (Alpha Vantage API, Spring Cloud Config pulling from GitHub) failed with:
+```
+javax.net.ssl.SSLHandshakeException: PKIX path building failed:
+sun.security.provider.certpath.SunCertPathBuilderException:
+unable to find valid certification path to requested target
+```
+
+### Root Cause: Zscaler TLS Interception
+
+Corporate networks often use a forward proxy (Zscaler, Symantec BlueCoat, Palo Alto) that performs **TLS interception** (also called "SSL inspection" or "break-and-inspect"):
+
+1. Container initiates TLS to `api.alphavantage.co`
+2. Zscaler proxy intercepts, terminates the original TLS connection
+3. Proxy inspects the plaintext HTTP request/response (for DLP, malware scanning)
+4. Proxy creates a NEW TLS connection to the container, signed by **Zscaler's private root CA**
+5. Container receives a certificate chain ending in Zscaler Root CA — NOT DigiCert/Let's Encrypt
+
+The JVM's default `cacerts` truststore contains only publicly-trusted CAs. Zscaler's CA is private (only your corporation trusts it). Result: PKIX path building fails because the chain cannot be validated.
+
+### The Fix: Import CA into JVM Truststore
+
+```dockerfile
+COPY docker/ZscalerRootCA.pem /tmp/ZscalerRootCA.pem
+RUN keytool -importcert -cacerts -storepass changeit -noprompt \
+      -alias zscaler-root-ca -file /tmp/ZscalerRootCA.pem \
+    && rm /tmp/ZscalerRootCA.pem
+```
+
+**Why this works:**
+- `keytool -importcert -cacerts` adds the certificate to the JVM's trusted CA store
+- `-storepass changeit` is the default password for Java's cacerts keystore (unchanged since JDK 1.2)
+- After import, the JVM trusts certificate chains signed by Zscaler — HTTPS connections succeed
+
+**Alpine-specific detail:** On `eclipse-temurin:21-jre-alpine`, `cacerts` is a regular file at `/opt/java/openjdk/lib/security/cacerts` (NOT symlinked to system `/etc/ssl/certs/java/cacerts` as on Debian). The `-cacerts` flag handles this automatically by reading `java.home`.
+
+### Docker Build Context Paths
+
+The build context determines COPY source resolution. In this project:
+- `docker build -f docker/Dockerfile .` runs from `equitycart/` (the `-f` path is relative to CWD)
+- Build context = `equitycart/` → COPY paths are relative to `equitycart/`
+- `COPY docker/ZscalerRootCA.pem` resolves to `equitycart/docker/ZscalerRootCA.pem` ✓
+- `COPY ZscalerRootCA.pem` resolves to `equitycart/ZscalerRootCA.pem` ✗ (file doesn't exist there)
+
+This is NOT relative to the Dockerfile's location — it's relative to the build context root.
+
+### .gitignore Path Resolution
+
+`.gitignore` patterns are relative to the file's location in the repository:
+- `.gitignore` at repo root: patterns match from repo root
+- File at `equitycart/docker/ZscalerRootCA.pem` → pattern must be `equitycart/docker/ZscalerRootCA.pem` or `*.pem`
+- Pattern `docker/ZscalerRootCA.pem` (without `equitycart/` prefix) → NO MATCH
+
+### Interview Questions
+
+**Q: "Your Docker containers can't reach external HTTPS APIs — what's your debugging approach?"**
+A: (1) Check if the same URL works from the host machine. If yes → container-specific TLS issue. (2) Inspect the certificate chain: `openssl s_client -connect api.example.com:443 -proxy proxy.corp.com:9480` — look at the issuer of the leaf certificate. If it's a corporate CA (Zscaler, Symantec), that's TLS interception. (3) Import the corporate root CA into the JVM truststore via `keytool -importcert -cacerts`. (4) For non-JVM containers (Python, Node), update the system CA bundle (`update-ca-certificates` on Debian/Alpine).
+
+**Q: "Is it safe to commit the corporate root CA certificate to the repository?"**
+A: The root CA certificate is a PUBLIC key — it can only VERIFY signatures, not create them. Committing it is no more dangerous than committing DigiCert's root certificate. However, it's organization-specific and unnecessary for external contributors, so it's common practice to .gitignore it and add it during CI/CD pipeline builds from a secrets vault.

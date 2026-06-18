@@ -7,6 +7,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
 import org.springframework.cloud.openfeign.EnableFeignClients;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FilterType;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
@@ -71,11 +73,14 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * configured, setting {@code cdc} profile disables the poller and outbox events will never reach
  * Kafka.
  *
- * <p><b>Security Note (Phase 7 interim state):</b> No HTTP security filter chain is active. {@code
+ * <p><b>Security (Phase 8 Step 2):</b> Commons {@code SecurityAutoConfig} is active ({@code
+ * equitycart.security.enabled=true} in order-service.yml). {@code JwtAuthenticationFilter}
+ * validates every request except {@code /api/auth/**} and {@code /actuator/**}. {@code
  * CartController} and {@code OrderController} extract {@code userId} from {@code
- * SecurityContextHolder} — which is {@code null} because no JWT filter processes the incoming
- * token. All endpoints effectively require direct port access (bypass gateway auth check) until
- * Phase 8 adds OAuth2 Resource Server per service.
+ * SecurityContextHolder.getContext().getAuthentication().getPrincipal()} — which is now correctly
+ * populated as a {@code Long} by the filter. {@code FeignAuthorizationInterceptor} propagates the
+ * Authorization header on outgoing Feign calls to product-service. Phase 8 Steps 5-7 will migrate
+ * to OAuth2 Resource Server with Keycloak RS256 tokens.
  *
  * <p><b>Verify After Startup:</b>
  *
@@ -95,6 +100,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * @see com.equitycart.order.event.OutboxPoller
  */
 @SpringBootApplication
+@ComponentScan(
+    basePackages = {"com.equitycart.order", "com.equitycart.commons"},
+    excludeFilters =
+        @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
 @EntityScan(basePackages = {"com.equitycart.order", "com.equitycart.commons"})
 @EnableDiscoveryClient
 @EnableScheduling

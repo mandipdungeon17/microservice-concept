@@ -1393,3 +1393,566 @@ When `eureka.instance.prefer-ip-address: true`, Spring calls `InetUtils.findFirs
 
 Let Spring auto-detect the container IP. The Docker DNS resolver handles the rest.
   // quantity is a single int -> @RequestParam (maps to ?quantity=5 in the URL)
+
+---
+
+## 18. RequestContextHolder — Spring's ThreadLocal Request Storage
+
+### What It Is
+
+`RequestContextHolder` is Spring's mechanism for storing the current `HttpServletRequest` in a `ThreadLocal` variable, making it accessible anywhere on the same thread without passing it as a method parameter.
+
+### Internal Architecture
+
+```java
+// From org.springframework.web.context.request.RequestContextHolder:
+
+private static final ThreadLocal<RequestAttributes> requestAttributesHolder =
+    new NamedThreadLocal<>("Request attributes");
+
+private static final ThreadLocal<RequestAttributes> inheritableRequestAttributesHolder =
+    new NamedInheritableThreadLocal<>("Request context");
+```
+
+Two ThreadLocal fields:
+- `requestAttributesHolder` — plain ThreadLocal (default, thread-confined)
+- `inheritableRequestAttributesHolder` — InheritableThreadLocal (propagates to child threads, disabled by default)
+
+### Lifecycle: Who Sets and Clears It
+
+```
+Request arrives at Tomcat → Thread-N assigned from pool
+    │
+    ▼
+FrameworkServlet.processRequest(request, response)
+    │
+    ├── previousAttributes = RequestContextHolder.getRequestAttributes()  // save old (usually null)
+    ├── requestAttributes = new ServletRequestAttributes(request, response)
+    ├── RequestContextHolder.setRequestAttributes(requestAttributes)      // ★ STORE IN ThreadLocal
+    │
+    ├── try {
+    │       doService(request, response)  →  DispatcherServlet.doDispatch()
+    │           → HandlerMapping → HandlerAdapter → YourController.method()
+    │           → [entire request processing happens here, ThreadLocal available]
+    │   }
+    │
+    └── finally {
+            RequestContextHolder.setRequestAttributes(previousAttributes)  // ★ RESTORE/CLEAR
+            requestAttributes.requestCompleted()                           // signal lifecycle end
+        }
+    │
+    ▼
+Thread-N returns to Tomcat pool (ThreadLocal is now null/previous)
+```
+
+### Key Method: getRequestAttributes()
+
+```java
+public static RequestAttributes getRequestAttributes() {
+    RequestAttributes attributes = requestAttributesHolder.get();      // check plain ThreadLocal first
+    if (attributes == null) {
+        attributes = inheritableRequestAttributesHolder.get();         // fallback to inheritable
+    }
+    return attributes;  // null if current thread has no HTTP request context
+}
+```
+
+Returns `null` when called from:
+- Kafka consumer threads (started by Kafka poller, no HTTP request)
+- @Scheduled threads (started by Spring's TaskScheduler)
+- @Async child threads (new thread from executor, ThreadLocal not inherited by default)
+- Thread pool workers (CompletableFuture.supplyAsync())
+
+### Why Plain ThreadLocal (Not InheritableThreadLocal)?
+
+Spring defaults to `threadContextInheritable = false` in FrameworkServlet for safety:
+
+| Risk | Explanation |
+|------|-------------|
+| Memory leak | Child thread holds reference to HttpServletRequest object → prevents GC → request/response buffers retained long after response sent |
+| Security leak | Parent thread gets reused from pool for new user → child thread still references OLD user's request → accessing stale auth data |
+| Stale data | Request completed and response committed, but child thread still reads from the request object → undefined behavior |
+
+MDC (Log4j ThreadContext) uses InheritableThreadLocal safely because it stores lightweight String values that don't reference heavy objects or sensitive data.
+
+### Usage Pattern in EquityCart
+
+```
+FeignAuthorizationInterceptor:
+    ServletRequestAttributes attrs = 
+        (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+    // Safe: Feign calls execute synchronously on the same servlet thread
+    // The ThreadLocal is guaranteed to contain the original request
+
+MdcCorrelationFilter:
+    // Does NOT use RequestContextHolder — uses its own MDC ThreadContext
+    // MDC is InheritableThreadLocal, so correlationId propagates to child threads
+```
+
+### Comparison with Other Spring ThreadLocal Mechanisms
+
+| Mechanism | Stores | ThreadLocal Type | Cleanup By |
+|-----------|--------|-----------------|------------|
+| RequestContextHolder | HttpServletRequest + Response | Plain (default) | FrameworkServlet finally block |
+| SecurityContextHolder | Authentication object | Configurable (MODE_THREADLOCAL default) | SecurityContextPersistenceFilter |
+| MDC / ThreadContext | Key-value String pairs | InheritableThreadLocal | MdcCorrelationFilter finally block |
+| LocaleContextHolder | Locale + TimeZone | Plain (default) | FrameworkServlet finally block |
+
+---
+
+## 19. Reactive Web Stack — GlobalFilter, Mono, and ServerWebExchange
+
+### Why Spring Cloud Gateway Cannot Use Servlet APIs
+
+Spring Boot offers two web stacks (mutually exclusive per application):
+
+| Stack | Dependency | Threading Model | APIs |
+|-------|-----------|----------------|------|
+| **Servlet (MVC)** | `spring-boot-starter-web` | 1 thread per request (Tomcat pool, 200 default) | HttpServletRequest, FilterChain, @Controller |
+| **Reactive (WebFlux)** | `spring-boot-starter-webflux` | Event loop (Netty, ~4 threads for ALL requests) | ServerWebExchange, Mono/Flux, @RestController |
+
+Spring Cloud Gateway uses **WebFlux** because a gateway handles thousands of concurrent connections (mostly waiting for downstream responses) — event loop model is far more efficient than blocking one thread per connection.
+
+### GlobalFilter Interface
+
+```java
+public interface GlobalFilter {
+    Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain);
+}
+```
+
+- `ServerWebExchange`: contains both request (`getRequest()`) and response (`getResponse()`)
+- `GatewayFilterChain`: call `chain.filter(exchange)` to proceed, or return a Mono that writes a response to short-circuit
+- `Mono<Void>`: represents an asynchronous computation that completes without a value (equivalent to `void` in async world)
+
+### Mono<Void> — What It Means
+
+```
+Mono<Void> = "a signal that something will complete in the future, producing no value"
+
+chain.filter(exchange)     → "proceed to next filter, return when entire chain completes"
+response.writeWith(mono)   → "write body bytes, return when write completes"
+Mono.empty()               → "do nothing, complete immediately"
+```
+
+### ServerWebExchange vs HttpServletRequest
+
+| Operation | Servlet | Reactive |
+|-----------|---------|----------|
+| Get header | `request.getHeader("X")` | `exchange.getRequest().getHeaders().getFirst("X")` |
+| Get path | `request.getRequestURI()` | `exchange.getRequest().getPath().value()` |
+| Set status | `response.setStatus(401)` | `exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED)` |
+| Write body | `response.getWriter().write(json)` | `exchange.getResponse().writeWith(Mono.just(buffer))` |
+| Mutate request | Not standard (wrapper) | `exchange.mutate().request(mutatedRequest).build()` |
+
+### Ordered Interface for Filter Ordering
+
+```java
+public interface Ordered {
+    int HIGHEST_PRECEDENCE = Integer.MIN_VALUE;  // runs FIRST
+    int LOWEST_PRECEDENCE = Integer.MAX_VALUE;   // runs LAST
+    int getOrder();
+}
+```
+
+EquityCart gateway filter order:
+```
+HIGHEST_PRECEDENCE     → CorrelationIdGatewayFilter (assign trace ID)
+HIGHEST_PRECEDENCE + 1 → JwtValidationGatewayFilter (reject bad tokens)
+(default order)        → Spring Cloud Gateway routing filters
+```
+
+### Blocking on the Event Loop — The Cardinal Sin
+
+```
+Netty event loop (4 threads handling thousands of connections):
+
+Thread-1: request A → JJWT parse (CPU, 50μs) ✓ → route to downstream → waiting...
+Thread-2: request B → JJWT parse (CPU, 50μs) ✓ → route to downstream → waiting...
+Thread-3: request C → Thread.sleep(5000) ✗ → ALL requests on Thread-3 STALL for 5 seconds
+Thread-4: request D → JDBC query (blocking I/O) ✗ → ALL requests on Thread-4 STALL
+
+Rule: NEVER block on event loop threads.
+- CPU work < 1ms: OK (JJWT parsing, AntPathMatcher matching)
+- Blocking I/O: FORBIDDEN (JDBC, synchronous HTTP, file reads)
+- Thread.sleep(): FORBIDDEN
+- Locks that wait: FORBIDDEN
+```
+
+If you need blocking I/O in a reactive context, use `Mono.fromCallable(() -> blockingCall).subscribeOn(Schedulers.boundedElastic())` to offload to a dedicated thread pool.
+
+---
+
+## 20. @ComponentScan vs @EntityScan — Bean Registration Mechanics (Phase 8)
+
+### The Problem: Classes on Classpath ≠ Spring Beans
+
+This is the single most common multi-module Spring Boot misconception:
+
+```
+Gradle dependency:  implementation project(':commons')
+
+What it DOES:     Makes all .class files from commons available at compile time and runtime
+What it does NOT: Register ANY class as a Spring-managed bean
+
+Result: DTOs, entities, exceptions → work (no Spring needed)
+        @Component, @Configuration, @Service → NOT instantiated (need scanning)
+```
+
+### How @SpringBootApplication Scanning Works Internally
+
+```
+@SpringBootApplication on OrderServiceApplication.java (package: com.equitycart.order)
+    │
+    │── internally composed of:
+    │   @SpringBootConfiguration
+    │   @EnableAutoConfiguration
+    │   @ComponentScan   ← THIS is what matters
+    │
+    └── @ComponentScan with NO explicit basePackages
+        │
+        │── Spring resolves default: "scan the package of the annotated class"
+        │   Source: ComponentScanAnnotationParser.parse()
+        │     if (basePackages.isEmpty()) {
+        │         basePackages.add(ClassUtils.getPackageName(declaringClass));
+        │     }
+        │
+        │── Resolved: basePackages = ["com.equitycart.order"]
+        │
+        └── Spring scans ONLY com.equitycart.order.** for:
+            @Component, @Service, @Repository, @Controller, @Configuration, @RestController
+
+            DOES NOT SCAN: com.equitycart.commons.** (different package tree!)
+```
+
+### The Three Scanning Mechanisms — They Are Independent
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                    Spring Boot Scanning Mechanisms                       │
+├──────────────────────┬─────────────────────┬───────────────────────────┤
+│   @ComponentScan     │    @EntityScan      │  @EnableJpaRepositories   │
+├──────────────────────┼─────────────────────┼───────────────────────────┤
+│ Finds:               │ Finds:              │ Finds:                    │
+│  @Component          │  @Entity            │  interfaces extending     │
+│  @Configuration      │  @MappedSuperclass  │    JpaRepository          │
+│  @Service            │  @Embeddable        │    CrudRepository         │
+│  @Repository (bean)  │  @Converter         │    etc.                   │
+│  @Controller         │                     │                           │
+│  @RestController     │                     │                           │
+├──────────────────────┼─────────────────────┼───────────────────────────┤
+│ Registers as:        │ Registers with:     │ Generates:                │
+│  Spring beans in     │  Hibernate's        │  Proxy implementations    │
+│  ApplicationContext  │  MetadataFactory    │  of repository interfaces │
+├──────────────────────┼─────────────────────┼───────────────────────────┤
+│ Without it:          │ Without it:         │ Without it:               │
+│  Bean not created    │  Table not created  │  NoSuchBeanDefinition     │
+│  No injection        │  Column mapping     │  for repository           │
+│  Silent failure!     │  errors             │                           │
+├──────────────────────┼─────────────────────┼───────────────────────────┤
+│ Default scope:       │ Default scope:      │ Default scope:            │
+│  Package of @SBA     │  Package of @SBA    │  Package of @SBA          │
+│  class + subpkgs     │  class + subpkgs    │  class + subpkgs          │
+└──────────────────────┴─────────────────────┴───────────────────────────┘
+
+CRITICAL: @EntityScan does NOT trigger @ComponentScan and vice versa.
+Having @EntityScan(basePackages = "com.equitycart.commons") means:
+  ✅ BaseEntity (@MappedSuperclass) is registered with Hibernate
+  ❌ SecurityAutoConfig (@Configuration) is NOT a Spring bean
+  ❌ GlobalExceptionHandler (@RestControllerAdvice) is NOT a Spring bean
+  ❌ MdcCorrelationFilter (@Component) is NOT a Spring bean
+```
+
+### Debug Trace: Bean Discovery at Startup
+
+```
+APPLICATION STARTUP — OrderServiceApplication
+═══════════════════════════════════════════════
+
+1. ConfigurationClassPostProcessor.processConfigBeanDefinitions()
+   │
+   │── Reads @ComponentScan metadata from OrderServiceApplication.class
+   │   basePackages = ["com.equitycart.order", "com.equitycart.commons"]  ← after fix
+   │   excludeFilters = [@SpringBootApplication annotation]
+   │
+   2. ClassPathBeanDefinitionScanner.doScan(basePackages)
+      │
+      ├── Scan package: com.equitycart.order.**
+      │   Found: OrderController, OrderServiceImpl, CartServiceImpl, ...
+      │
+      ├── Scan package: com.equitycart.commons.**
+      │   Found candidates:
+      │     com.equitycart.commons.config.SecurityAutoConfig     → @Configuration ✓
+      │     com.equitycart.commons.config.KafkaConsumerConfig    → @Configuration ✓
+      │     com.equitycart.commons.filter.JwtAuthenticationFilter → @Component ✓
+      │     com.equitycart.commons.filter.MdcCorrelationFilter   → @Component ✓
+      │     com.equitycart.commons.handler.GlobalExceptionHandler → @RestControllerAdvice ✓
+      │     com.equitycart.commons.feign.FeignCorrelationInterceptor → @Component ✓
+      │     com.equitycart.commons.feign.FeignAuthorizationInterceptor → @Component ✓
+      │     com.equitycart.commons.security.impl.JwtTokenValidatorImpl → @Component ✓
+      │
+      │   Apply excludeFilter:
+      │     com.equitycart.commons.SomeApplication → @SpringBootApplication → EXCLUDED
+      │     (prevents scanning other modules' main classes from multi-module classpath)
+      │
+      3. For SecurityAutoConfig specifically:
+         │
+         │── ConditionEvaluator.shouldSkip(SecurityAutoConfig)
+         │   Evaluates: @ConditionalOnProperty(name="equitycart.security.enabled", havingValue="true")
+         │
+         │── PropertyResolver.getProperty("equitycart.security.enabled")
+         │   Checks (in order):
+         │     a) System properties (-D flag) → not found
+         │     b) Environment variables (EQUITYCART_SECURITY_ENABLED) → not found
+         │     c) application.yml (from Config Server) → not found
+         │     d) order-service.yml (from Config Server) → FOUND: "true"
+         │
+         │── havingValue="true" matches "true" → condition PASSES
+         │── Bean definition registered: SecurityAutoConfig
+         │
+         4. SecurityAutoConfig bean creation:
+            │── @RequiredArgsConstructor injects JwtAuthenticationFilter
+            │── @Bean securityFilterChain(HttpSecurity) → creates SecurityFilterChain
+            │── @EnableMethodSecurity → registers MethodSecurityInterceptor
+            │── log.info("Enabling JWT-based security auto-configuration...")
+```
+
+### Why @ComponentScan.excludeFilters Is Required
+
+```java
+@ComponentScan(
+    basePackages = {"com.equitycart.order", "com.equitycart.commons"},
+    excludeFilters =
+        @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
+```
+
+**Scenario without excludeFilter:**
+
+In a multi-module Gradle project, all modules' compiled .class files can end up on the classpath during builds.
+If `PortfolioServiceApplication.class` (annotated with @SpringBootApplication) is reachable from
+order-service's classpath:
+
+```
+Without excludeFilter:
+  Scanner finds PortfolioServiceApplication.class in com.equitycart.portfolio
+  → @SpringBootApplication is meta-annotated with @Configuration
+  → Spring tries to process it as a configuration class
+  → Cascading @ComponentScan from THAT class triggers scanning of com.equitycart.portfolio.**
+  → Pulls in portfolio-service beans into order-service context
+  → CHAOS: wrong repositories, wrong service implementations, conflicting bean names
+```
+
+The `excludeFilters` says: "If you find a class annotated with @SpringBootApplication, do NOT register it as a bean." This is a defensive measure for multi-module builds.
+
+### @ConditionalOnProperty — The Activation Gate
+
+```
+Spring's @ConditionalOnProperty evaluation flow:
+═══════════════════════════════════════════════
+
+@ConditionalOnProperty(name = "equitycart.security.enabled", havingValue = "true")
+
+Step 1: Spring finds SecurityAutoConfig as a candidate during scanning
+Step 2: Before creating the bean, Spring evaluates ALL @Conditional annotations
+Step 3: OnPropertyCondition.getMatchOutcome() runs:
+        │
+        │── Calls environment.getProperty("equitycart.security.enabled")
+        │
+        │── Property resolution order (Spring Cloud Config client):
+        │   1. JVM -D system properties
+        │   2. OS environment variables (EQUITYCART_SECURITY_ENABLED)
+        │   3. bootstrap.yml / application.yml (local)
+        │   4. Config Server: application.yml (shared across all services)
+        │   5. Config Server: {service-name}.yml (service-specific)
+        │   6. Config Server: {service-name}-{profile}.yml
+        │
+        │── Resolution: found in order-service.yml → value = "true"
+        │
+        │── Compare: value.equalsIgnoreCase(havingValue) → "true" == "true" → MATCH
+        │
+        └── Outcome: MATCH → bean is created
+
+        If property missing and matchIfMissing NOT set (default false):
+        │
+        └── Outcome: NO MATCH → bean definition SKIPPED silently
+            No error, no warning, no log line. The class exists but is never instantiated.
+            This is why "security not working" is hard to debug — it fails silently.
+```
+
+### Diagnostic: How to Confirm Beans Are Loaded
+
+```bash
+# Method 1: Actuator beans endpoint (if available)
+GET http://localhost:8088/actuator/beans
+# Search for "securityAutoConfig" in the JSON response
+
+# Method 2: Startup logs (with DEBUG logging)
+# In order-service.yml:
+logging:
+  level:
+    org.springframework.context.annotation: DEBUG
+    org.springframework.boot.autoconfigure.condition: DEBUG
+
+# Look for:
+#   "SecurityAutoConfig matched" (bean created)
+#   "SecurityAutoConfig did not match" (condition failed — property missing!)
+
+# Method 3: Add a log statement to SecurityAutoConfig's @Bean method
+# If you see "Enabling JWT-based security auto-configuration" at startup → it's working
+```
+
+### Interview Questions
+
+**Q: "What is the difference between @ComponentScan and @EntityScan?"**
+A: They serve completely different Spring subsystems. @ComponentScan finds @Component/@Configuration/@Service beans and registers them in the ApplicationContext for dependency injection. @EntityScan finds @Entity/@MappedSuperclass classes and registers them with Hibernate's MetamodelFactory for ORM mapping. Having one does NOT imply the other. A class annotated @Entity will NOT become a Spring bean via @EntityScan.
+
+**Q: "Your commons module has @Component classes. Why don't they load automatically when another service depends on it?"**
+A: Gradle `implementation project(':commons')` only puts .class files on the classpath. Spring's @ComponentScan (from @SpringBootApplication) defaults to scanning only the main class's package tree. If the main class is in `com.equitycart.order`, Spring will never look at `com.equitycart.commons` unless explicitly told to. The classes are available (you can `new` them) but are never Spring-managed (no DI, no proxies, no lifecycle).
+
+**Q: "How do Spring Boot starters get their configuration loaded without @ComponentScan?"**
+A: Via `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`. Spring Boot's auto-configuration mechanism reads this file at startup and processes the listed classes regardless of package structure. This is separate from @ComponentScan — it's how `spring-boot-starter-data-jpa` registers HibernateJpaAutoConfiguration without you scanning `org.springframework.boot.**`. Custom modules can use the same mechanism (Option B in our design), but explicit @ComponentScan (Option A) is simpler for learning projects.
+
+**Q: "What happens if @ConditionalOnProperty's property is missing and matchIfMissing is not set?"**
+A: The condition evaluates to NO MATCH. The bean definition is silently skipped — no error, no warning, no log message at INFO level. The class exists on the classpath but is never instantiated. This is the most common cause of "my configuration isn't applying" bugs in Spring Boot. Enable DEBUG logging on `org.springframework.boot.autoconfigure.condition` to see match/no-match decisions.
+
+---
+
+## Section 11: Reactive Response Lifecycle — ReadOnlyHttpHeaders and ServerHttpResponseDecorator
+
+### The Problem: UnsupportedOperationException on Response Headers
+
+In Spring Cloud Gateway (WebFlux/Netty), a common pattern for modifying response headers is:
+```java
+chain.filter(exchange).then(Mono.fromRunnable(() -> {
+    exchange.getResponse().getHeaders().add("X-Correlation-Id", correlationId);
+}));
+```
+
+This throws `UnsupportedOperationException` at runtime. The response headers work fine for requests that return small bodies but ALWAYS fail.
+
+### Root Cause: Response Commit Lifecycle
+
+In reactive Netty (unlike Servlet/Tomcat), response headers are flushed to the network wire as part of the FIRST `writeWith()` call — the moment the first byte of the response body is written:
+
+```
+1. Gateway receives downstream response
+2. First body chunk arrives → writeWith(Publisher<DataBuffer>) called
+3. Headers are serialized and flushed to client (HTTP/1.1 headers come before body)
+4. Headers become ReadOnlyHttpHeaders (wrapper that throws on mutation)
+5. Body chunks continue streaming
+6. .then() runs AFTER the entire body is written → headers are already ReadOnly → BOOM
+```
+
+The `.then(Mono.fromRunnable(...))` callback executes after the response Mono completes — meaning the ENTIRE body has been written. By that point, headers were sealed in step 4.
+
+### The Fix: ServerHttpResponseDecorator
+
+```java
+ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(originalResponse) {
+    @Override
+    public Mono<Void> writeWith(Publisher<? extends DataBuffer> body) {
+        getHeaders().add("X-Correlation-Id", correlationId);  // Headers still mutable here
+        return super.writeWith(body);                          // THEN flush to wire
+    }
+};
+```
+
+The decorator intercepts the write call BEFORE it happens. At the point `writeWith()` is called, headers have NOT been committed yet — they're still mutable. The decorator adds the header, then delegates to the real `writeWith()` which commits headers + streams the body.
+
+**Three override points cover all response types:**
+- `writeWith()` — normal responses with a body (200 with JSON)
+- `writeAndFlushWith()` — SSE/streaming responses (Server-Sent Events)
+- `setComplete()` — empty-body responses (204 No Content, 304 Not Modified, redirects)
+
+### Servlet vs Reactive Response Models
+
+| Aspect | Servlet (Tomcat) | Reactive (Netty) |
+|--------|-----------------|-------------------|
+| Response type | `HttpServletResponse` | `ServerHttpResponse` |
+| Header mutability | Mutable until `response.flushBuffer()` or `writer.flush()` | Mutable until first `writeWith()` call |
+| Lifecycle hook | `HandlerInterceptor.afterCompletion()` | `chain.filter().then()` (too late!) |
+| Correct interception | `OncePerRequestFilter` (headers still open in doFilter) | `ServerHttpResponseDecorator` |
+| Headers after commit | Silently ignored (Tomcat) | `UnsupportedOperationException` (Netty) |
+
+### Interview Questions
+
+**Q: "You're adding a response header in Spring Cloud Gateway but getting UnsupportedOperationException. What's happening?"**
+A: The response headers have already been committed (flushed to the wire). In WebFlux/Netty, headers become read-only after the first byte of the body is written. Using `.then()` or `doOnSuccess()` runs AFTER the response is complete — too late. The fix is `ServerHttpResponseDecorator`: override `writeWith()` to inject the header BEFORE delegating to the real write, while headers are still mutable.
+
+**Q: "What's the difference between OncePerRequestFilter and ServerHttpResponseDecorator?"**
+A: They solve the same problem (modifying responses) in different programming models. `OncePerRequestFilter` is Servlet API — it wraps the synchronous request/response lifecycle, headers are available after `chain.doFilter()` returns (response not yet committed in most cases). `ServerHttpResponseDecorator` is WebFlux — it wraps the reactive response publisher, intercepting the moment bytes are about to be written. You cannot mix them: Gateway runs on Netty (no Servlet), downstream services run on Tomcat (no reactive decorators).
+
+---
+
+## Section 12: HttpURLConnection PATCH Limitation and feign-hc5
+
+### The Problem: Invalid HTTP method: PATCH
+
+When a Feign client declares a `@PatchMapping` method and the default HTTP transport is used, the call fails with:
+```
+java.net.ProtocolException: Invalid HTTP method: PATCH
+```
+
+### Root Cause: HttpURLConnection (JDK Default)
+
+OpenFeign's default HTTP client is `java.net.HttpURLConnection` — a class written in the late 1990s (JDK 1.1). It only supports the methods defined in HTTP/1.0 + original RFC 2068:
+- GET, POST, PUT, DELETE, HEAD, OPTIONS, TRACE
+
+The PATCH method was defined in RFC 5789 (2010). Sun/Oracle never updated `HttpURLConnection` to support it. The method validation is a hardcoded `switch` statement that rejects any unrecognized verb.
+
+### The Fix: feign-hc5 (Apache HttpClient 5)
+
+```gradle
+implementation 'io.github.openfeign:feign-hc5'
+```
+
+This replaces OpenFeign's HTTP transport with Apache HttpClient 5, which supports all standard HTTP methods including PATCH. Spring Cloud OpenFeign auto-detects `feign-hc5` on the classpath and configures it automatically (no @Bean needed).
+
+**Historical progression of Feign HTTP clients:**
+- `feign-httpclient` (Apache HttpClient 4) — legacy, works but older API
+- `feign-okhttp` (OkHttp 3/4) — popular, good HTTP/2 support
+- `feign-hc5` (Apache HttpClient 5) — current recommendation, modern async API
+
+### Interview Questions
+
+**Q: "Your PATCH endpoint works with Postman but fails through Feign. What's the issue?"**
+A: OpenFeign defaults to `java.net.HttpURLConnection`, which predates RFC 5789 and doesn't support PATCH. Postman uses its own HTTP stack (Chromium's). Fix: add `feign-hc5` dependency — it replaces the transport with Apache HttpClient 5 which handles all standard methods. No code changes needed; auto-configured by Spring Cloud OpenFeign.
+
+---
+
+## Section 13: Kafka Consumer Thread Authentication Context
+
+### The Problem
+
+Spring Security's `SecurityContextHolder` uses `ThreadLocal` (MODE_THREADLOCAL by default). When a Kafka consumer thread processes a message:
+- No `DispatcherServlet` involved → no `RequestContextHolder` attributes
+- No `JwtAuthenticationFilter` ran → no `SecurityContext` set
+- Any `@PreAuthorize` check returns false → 403
+- Any Feign call through `FeignAuthorizationInterceptor` has no token to propagate
+
+### Thread Context Availability Matrix
+
+| Thread Type | RequestContextHolder | SecurityContextHolder | MDC (Log4j) |
+|-------------|---------------------|----------------------|-------------|
+| Tomcat HTTP thread | ✓ (set by DispatcherServlet) | ✓ (set by JwtAuthFilter) | ✓ (set by MdcFilter) |
+| Kafka consumer thread | ✗ (null) | ✗ (empty) | ✗ (must set manually) |
+| @Async thread | ✗ (not inherited) | ✗ (not inherited by default) | ✗ (not inherited) |
+| @Scheduled thread | ✗ (null) | ✗ (empty) | ✗ (must set manually) |
+| CompletableFuture.runAsync | ✗ (null) | ✗ (not inherited) | ✗ (not inherited) |
+
+### Solutions by Context
+
+| Need | Solution |
+|------|----------|
+| Feign calls from Kafka | `ServiceTokenProvider` (generates fresh JWT) |
+| SecurityContext in @Async | `SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL)` or `DelegatingSecurityContextExecutorService` |
+| MDC in Kafka | Manually set `ThreadContext.put("correlationId", ...)` from message header |
+| RequestContextHolder in @Async | Pass extracted values before spawning async task |
+
+### Interview Questions
+
+**Q: "A Kafka consumer calls a Feign client to another service. The call fails with 403. Why?"**
+A: Kafka consumer threads are managed by Spring Kafka's `ConcurrentMessageListenerContainer`, not by Tomcat's `DispatcherServlet`. They never pass through the servlet filter chain, so `RequestContextHolder` is null and `SecurityContextHolder` is empty. The `FeignAuthorizationInterceptor` finds no Authorization header to propagate → downstream service receives unauthenticated request → 403. Fix: detect the missing context in the interceptor and fall back to a `ServiceTokenProvider` that generates a machine-identity token.
+
+**Q: "Why does SecurityContextHolder use ThreadLocal instead of something that works across threads?"**
+A: ThreadLocal provides thread-safety without synchronization — each thread's context is isolated. Using InheritableThreadLocal would propagate to child threads but creates a security risk: if a thread pool reuses a thread with stale security context, a request could execute with another user's identity. The framework chooses safety over convenience, requiring explicit propagation where needed (`DelegatingSecurityContextExecutor`).

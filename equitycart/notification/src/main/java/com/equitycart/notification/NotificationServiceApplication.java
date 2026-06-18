@@ -6,6 +6,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FilterType;
 
 /**
  * Standalone entry point for the Notification Service microservice.
@@ -21,11 +23,16 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  *   <li>Exposes {@code GET /api/notifications} — notification history for authenticated users
  * </ul>
  *
- * <p><b>Scanning simplicity:</b> Like ledger-service, all beans ({@code NotificationConsumer},
- * channel strategies, {@code NotificationDispatcherImpl}, {@code NotificationLogRepository}, {@code
- * NotificationLog}) live entirely within {@code com.equitycart.notification.*}. The default
- * {@code @SpringBootApplication} scan covers all of them. No {@code @ComponentScan} expansion, no
- * {@code @EnableJpaRepositories}, no {@code @EnableMongoRepositories} is required.
+ * <p><b>Why {@code @ComponentScan} IS required here (Phase 8 addition):</b> All
+ * notification-specific beans ({@code NotificationConsumer}, channel strategies, {@code
+ * NotificationDispatcherImpl}, {@code NotificationLogRepository}) live within {@code
+ * com.equitycart.notification.*} and are covered by default scanning. However, cross-cutting
+ * infrastructure beans from {@code com.equitycart.commons} (SecurityAutoConfig,
+ * JwtAuthenticationFilter, GlobalExceptionHandler, MdcCorrelationFilter, KafkaConsumerConfig) must
+ * also be registered. {@code @SpringBootApplication} only scans its own package — it does NOT scan
+ * {@code com.equitycart.commons.*} unless explicitly told to via {@code @ComponentScan}. Note:
+ * {@code @EntityScan} handles JPA entity discovery (e.g., BaseEntity) but has NO effect on
+ * {@code @Component}/{@code @Configuration} bean registration.
  *
  * <p><b>Why {@code @EntityScan} is required:</b> {@code NotificationLog extends BaseEntity} — the
  * {@code @MappedSuperclass} lives at {@code com.equitycart.commons.entity}, outside the default
@@ -66,10 +73,13 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  *       consumer)
  * </ul>
  *
- * <p><b>Security Note (Phase 7 interim state):</b> No HTTP security filter chain is active. {@code
- * NotificationController} extracts {@code userId} from {@code SecurityContextHolder} — which is
- * {@code null} because no JWT filter processes the incoming token. Direct port access required
- * until Phase 8 adds OAuth2 Resource Server per service.
+ * <p><b>Security (Phase 8 Step 2):</b> Commons {@code SecurityAutoConfig} is active ({@code
+ * equitycart.security.enabled=true} in notification-service.yml). {@code JwtAuthenticationFilter}
+ * validates every request except {@code /api/auth/**} and {@code /actuator/**}. {@code
+ * NotificationController} now correctly extracts {@code userId} from {@code
+ * SecurityContextHolder.getContext().getAuthentication().getPrincipal()} — which is populated by
+ * the filter as a {@code Long}. Phase 8 Steps 5-7 will migrate to OAuth2 Resource Server with
+ * Keycloak RS256 tokens.
  *
  * <p><b>Verify After Startup:</b>
  *
@@ -88,6 +98,10 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  */
 @SpringBootApplication
 @EnableDiscoveryClient
+@ComponentScan(
+    basePackages = {"com.equitycart.notification", "com.equitycart.commons"},
+    excludeFilters =
+        @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
 @EntityScan(basePackages = {"com.equitycart.notification", "com.equitycart.commons"})
 public class NotificationServiceApplication {
 

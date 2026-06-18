@@ -6,6 +6,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FilterType;
 
 /**
  * Standalone entry point for the Ledger Service microservice.
@@ -38,12 +40,18 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  * {@code @EnableJpaRepositories} is only needed when a repository lives in a package tree
  * <em>outside</em> the main class's package. Here, it is inside, so the default covers it.
  *
- * <p><b>Why {@code @ComponentScan} is NOT required here</b> (contrast with portfolio-service):
- * Ledger-service injects no beans from another module's service layer. {@code LedgerServiceImpl} is
- * at {@code com.equitycart.ledger.service.impl} — covered by the default component scan. No foreign
- * {@code @Service} or {@code @Configuration} classes are needed, so no explicit
- * {@code @ComponentScan} expansion is required. This also means no transitive classpath
- * contamination side effects (no Spring Batch triggers, no foreign {@code @Value} requirements).
+ * <p><b>Why {@code @ComponentScan} IS required here (Phase 8 addition):</b> Ledger-service injects
+ * no beans from another module's <em>service layer</em> — however, cross-cutting infrastructure
+ * beans in {@code com.equitycart.commons} (SecurityAutoConfig, JwtAuthenticationFilter,
+ * GlobalExceptionHandler, MdcCorrelationFilter, FeignCorrelationInterceptor,
+ * FeignAuthorizationInterceptor, KafkaConsumerConfig) must be registered as Spring beans. Without
+ * {@code @ComponentScan} including {@code com.equitycart.commons}, these classes exist on the
+ * classpath (via Gradle {@code implementation project(':commons')}) but are never instantiated —
+ * {@code @SpringBootApplication} only scans its own package tree ({@code com.equitycart.ledger.*}).
+ * {@code @EntityScan} only discovers JPA {@code @Entity}/{@code @MappedSuperclass} classes, NOT
+ * {@code @Component}/{@code @Configuration} beans. The {@code excludeFilters} prevents scanning
+ * other modules' {@code @SpringBootApplication} classes that may appear on the classpath during
+ * multi-module builds.
  *
  * <p><b>Startup Flow:</b>
  *
@@ -61,8 +69,11 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  *   <li><b>PostgreSQL</b> ({@code equitycart_ledger}) — {@code ledger_entries} table only
  * </ul>
  *
- * <p><b>Security Note (Phase 7 interim state):</b> No HTTP security filter chain is active. All
- * actuator and future REST endpoints are open. Phase 8 will add OAuth2 Resource Server.
+ * <p><b>Security (Phase 8 Step 2):</b> Commons {@code SecurityAutoConfig} is active ({@code
+ * equitycart.security.enabled=true} in ledger-service.yml). {@code JwtAuthenticationFilter}
+ * validates every request except {@code /api/auth/**} and {@code /actuator/**}. All other endpoints
+ * require a valid JWT with HMAC-SHA256 signature. Phase 8 Steps 5-7 will migrate to OAuth2 Resource
+ * Server with Keycloak RS256 tokens.
  *
  * <p><b>No REST controllers in Phase 7:</b> Ledger-service currently exposes no endpoints. Other
  * services (portfolio-service) still call {@code LedgerService} directly via the library JAR. The
@@ -86,6 +97,10 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  */
 @SpringBootApplication
 @EnableDiscoveryClient
+@ComponentScan(
+    basePackages = {"com.equitycart.ledger", "com.equitycart.commons"},
+    excludeFilters =
+        @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
 @EntityScan(basePackages = {"com.equitycart.ledger", "com.equitycart.commons"})
 public class LedgerServiceApplication {
 

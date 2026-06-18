@@ -1960,3 +1960,723 @@ equitycart:
 
 The dispatcher uses Spring's `Map<String, NotificationChannelStrategy>` auto-injection (bean name → bean instance) to resolve the active channel at runtime. New channels can be added by implementing the interface and annotating with `@Component("newChannel")` — zero changes to existing code.
 - The Outbox Pattern (already implemented for order events) ensures event delivery is durable even if the broker is temporarily down
+
+---
+
+## 10. Token Propagation Pattern — RequestContextHolder Deep Dive
+
+### The Problem
+
+After Phase 8 Step 2, every service enforces JWT authentication. But consider this scenario:
+
+```
+User (Browser)                    order-service                    product-service
+     │                                 │                                 │
+     │── POST /api/orders ────────────→│                                 │
+     │   Authorization: Bearer eyJ...  │                                 │
+     │                                 │── GET /api/products/123 ───────→│
+     │                                 │   (NO Authorization header!)     │
+     │                                 │                                 │
+     │                                 │←─── 401 Unauthorized ───────────│
+     │←── 500 Internal Error ─────────│                                 │
+```
+
+The user's token arrives at order-service, but when order-service calls product-service via Feign, it creates a **brand new HTTP request** — the original headers are not copied automatically. Product-service sees no token → rejects with 401.
+
+### The Solution: FeignAuthorizationInterceptor
+
+```
+User (Browser)                    order-service                    product-service
+     │                                 │                                 │
+     │── POST /api/orders ────────────→│                                 │
+     │   Authorization: Bearer eyJ...  │                                 │
+     │                                 │  [FeignAuthorizationInterceptor]│
+     │                                 │  reads original request header   │
+     │                                 │  copies to Feign RequestTemplate │
+     │                                 │                                 │
+     │                                 │── GET /api/products/123 ───────→│
+     │                                 │   Authorization: Bearer eyJ...  │
+     │                                 │                                 │
+     │                                 │←─── 200 OK (product data) ──────│
+     │←── 201 Created ────────────────│                                 │
+```
+
+---
+
+### Spring Internals: How RequestContextHolder Works
+
+#### What is ThreadLocal?
+
+Java's `ThreadLocal<T>` is a variable where each thread has its own independent copy. Think of it as a per-thread HashMap:
+
+```
+Thread Pool (Tomcat default: 200 threads)
+┌─────────────────────────────────────────────────┐
+│ Thread-1: ThreadLocal → { requestAttributes: req_A }  │  ← handling User A's request
+│ Thread-2: ThreadLocal → { requestAttributes: req_B }  │  ← handling User B's request
+│ Thread-3: ThreadLocal → { requestAttributes: null  }  │  ← idle thread
+│ ...                                                     │
+│ Thread-200: ThreadLocal → { requestAttributes: req_C }│  ← handling User C's request
+└─────────────────────────────────────────────────┘
+```
+
+No synchronization needed — each thread reads/writes only its own copy. Thread-1 can NEVER see Thread-2's data.
+
+#### The Full Request Lifecycle (Debug Mode)
+
+Here's EXACTLY what happens when a request arrives, traced through Spring source code:
+
+```
+STEP 1: HTTP request arrives at Tomcat
+─────────────────────────────────────────
+Tomcat assigns Thread-42 from its pool to handle this request.
+
+STEP 2: FrameworkServlet.service() (Spring MVC entry point)
+─────────────────────────────────────────
+Class: org.springframework.web.servlet.FrameworkServlet
+Method: service(HttpServletRequest req, HttpServletResponse res)
+
+  Internally calls → processRequest(request, response)
+
+STEP 3: FrameworkServlet.processRequest() — THE KEY METHOD
+─────────────────────────────────────────
+This is where RequestContextHolder gets populated:
+
+  // Spring source (simplified):
+  RequestAttributes previousAttributes = RequestContextHolder.getRequestAttributes();
+  ServletRequestAttributes requestAttributes = new ServletRequestAttributes(request, response);
+  
+  // ★ THIS IS THE LINE THAT STORES THE REQUEST IN ThreadLocal ★
+  RequestContextHolder.setRequestAttributes(requestAttributes, this.threadContextInheritable);
+  
+  try {
+      doService(request, response);  // → DispatcherServlet.doService()
+  } finally {
+      // ★ CLEANUP: removes request from ThreadLocal after response is sent ★
+      RequestContextHolder.resetRequestAttributes();
+      requestAttributes.requestCompleted();
+  }
+
+STEP 4: RequestContextHolder internal storage
+─────────────────────────────────────────
+Class: org.springframework.web.context.request.RequestContextHolder
+
+  // The actual ThreadLocal fields:
+  private static final ThreadLocal<RequestAttributes> requestAttributesHolder =
+      new NamedThreadLocal<>("Request attributes");
+  
+  private static final ThreadLocal<RequestAttributes> inheritableRequestAttributesHolder =
+      new NamedInheritableThreadLocal<>("Request context");
+
+  public static void setRequestAttributes(RequestAttributes attributes, boolean inheritable) {
+      if (inheritable) {
+          inheritableRequestAttributesHolder.set(attributes);  // propagates to child threads
+      } else {
+          requestAttributesHolder.set(attributes);  // default: thread-local only
+      }
+  }
+
+  public static RequestAttributes getRequestAttributes() {
+      RequestAttributes attributes = requestAttributesHolder.get();
+      if (attributes == null) {
+          attributes = inheritableRequestAttributesHolder.get();
+      }
+      return attributes;  // returns null if neither is set (non-HTTP thread)
+  }
+
+STEP 5: DispatcherServlet routes to your Controller
+─────────────────────────────────────────
+doService() → doDispatch() → HandlerAdapter → YourController.method()
+
+  At this point, Thread-42's ThreadLocal contains:
+  requestAttributesHolder = ServletRequestAttributes(originalRequest)
+
+STEP 6: Controller calls Feign client
+─────────────────────────────────────────
+Class: com.equitycart.order.controller.OrderController
+Method: createOrder(...)
+
+  // Inside your controller code:
+  ProductResponse product = productFeignClient.getProduct(productId);
+  
+  // This triggers Feign's internal pipeline...
+
+STEP 7: Feign builds the outgoing request
+─────────────────────────────────────────
+Class: feign.SynchronousMethodHandler
+Method: executeAndDecode(RequestTemplate template, Options options)
+
+  // Feign calls ALL registered RequestInterceptor beans:
+  for (RequestInterceptor interceptor : requestInterceptors) {
+      interceptor.apply(template);  // ← YOUR interceptor runs here
+  }
+
+STEP 8: FeignAuthorizationInterceptor.apply() — YOUR CODE
+─────────────────────────────────────────
+  // Still on Thread-42! Same thread that received the original request.
+  
+  ServletRequestAttributes attrs = 
+      (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+  // ↑ reads Thread-42's ThreadLocal → finds the original HttpServletRequest
+  
+  String header = attrs.getRequest().getHeader("Authorization");
+  // ↑ extracts "Bearer eyJhbGciOiJIUzI1NiJ9..." from original request
+  
+  template.header("Authorization", header);
+  // ↑ copies it to the outgoing Feign request
+
+STEP 9: Feign sends the HTTP request to product-service
+─────────────────────────────────────────
+  The outgoing request now carries:
+  GET /api/products/123 HTTP/1.1
+  Host: product-service:8089
+  Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
+  X-Correlation-Id: 7f3a9c2b-...  (added by FeignCorrelationInterceptor)
+
+STEP 10: product-service receives the request
+─────────────────────────────────────────
+  product-service's JwtAuthenticationFilter validates the token
+  → extracts userId + roles → sets SecurityContext
+  → @PreAuthorize("hasRole('ADMIN')") can now evaluate correctly
+  → Returns product data
+
+STEP 11: Response flows back
+─────────────────────────────────────────
+  product-service → order-service (Feign decodes response) → user (HTTP response)
+
+STEP 12: Cleanup (back in FrameworkServlet.processRequest)
+─────────────────────────────────────────
+  finally {
+      RequestContextHolder.resetRequestAttributes();
+      // Thread-42's ThreadLocal is now empty
+      // Thread-42 returns to Tomcat's pool, ready for next request
+  }
+```
+
+---
+
+### Visual Flow: Complete Request Chain with ThreadLocal State
+
+```
+┌──────────────────────────────── Thread-42 ────────────────────────────────┐
+│                                                                            │
+│  [Tomcat receives request]                                                 │
+│       │                                                                    │
+│       ▼                                                                    │
+│  FrameworkServlet.processRequest()                                          │
+│       │                                                                    │
+│       │── RequestContextHolder.setRequestAttributes(req) ─┐                │
+│       │                                                    │                │
+│       │         ┌─────────────────────────────────┐        │                │
+│       │         │     ThreadLocal<RequestAttrs>   │        │                │
+│       │         │  ┌───────────────────────────┐  │        │                │
+│       │         │  │ HttpServletRequest object  │  │◀───────┘                │
+│       │         │  │  .getHeader("Authorization")│ │                        │
+│       │         │  │  = "Bearer eyJ..."         │  │                        │
+│       │         │  └───────────────────────────┘  │                        │
+│       │         └─────────────────────────────────┘                        │
+│       ▼                            ▲                                        │
+│  DispatcherServlet.doDispatch()    │ reads                                  │
+│       │                            │                                        │
+│       ▼                            │                                        │
+│  OrderController.createOrder()     │                                        │
+│       │                            │                                        │
+│       ▼                            │                                        │
+│  productFeignClient.getProduct()   │                                        │
+│       │                            │                                        │
+│       ▼                            │                                        │
+│  SynchronousMethodHandler          │                                        │
+│       │                            │                                        │
+│       ├── FeignCorrelationInterceptor.apply()                               │
+│       │       reads MDC ThreadContext → adds X-Correlation-Id header        │
+│       │                            │                                        │
+│       ├── FeignAuthorizationInterceptor.apply() ──────────┘                 │
+│       │       reads RequestContextHolder → adds Authorization header        │
+│       │                                                                    │
+│       ▼                                                                    │
+│  [HTTP call to product-service with both headers]                          │
+│       │                                                                    │
+│       ▼                                                                    │
+│  [Response received, decoded, returned to controller]                      │
+│       │                                                                    │
+│       ▼                                                                    │
+│  FrameworkServlet finally block                                             │
+│       │── RequestContextHolder.resetRequestAttributes() ──→ ThreadLocal=null│
+│       │                                                                    │
+│       ▼                                                                    │
+│  [Thread-42 returns to Tomcat pool]                                        │
+│                                                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Where This BREAKS: Non-HTTP Threads
+
+#### Case 1: Kafka Consumer
+
+```
+┌──────────────────── KafkaListenerThread-1 ───────────────────────┐
+│                                                                    │
+│  [Kafka poll() returns message]                                    │
+│       │                                                            │
+│       ▼                                                            │
+│  @KafkaListener OrderEventConsumer.handleOrderCreated()            │
+│       │                                                            │
+│       │  ThreadLocal<RequestAttrs> = null                          │
+│       │  (no HTTP request started this thread!)                    │
+│       │                                                            │
+│       ▼                                                            │
+│  portfolioFeignClient.createHolding()                              │
+│       │                                                            │
+│       ▼                                                            │
+│  FeignAuthorizationInterceptor.apply()                             │
+│       │                                                            │
+│       │── RequestContextHolder.getRequestAttributes() → null       │
+│       │── if(requestAttributes != null) → FALSE                    │
+│       │── SKIPS propagation (no crash, but no token sent)          │
+│       │                                                            │
+│       ▼                                                            │
+│  [Feign call to portfolio-service WITHOUT Authorization header]    │
+│       │                                                            │
+│       ▼                                                            │
+│  portfolio-service → 401 Unauthorized                              │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+
+SOLUTION: For Kafka-triggered Feign calls, use a service-account token:
+  - OAuth2 Client Credentials flow (Phase 8 Step 6)
+  - Or: the event payload includes a "serviceToken" field generated by the producer
+```
+
+#### Case 2: @Async / CompletableFuture
+
+```
+┌──────── Thread-42 (original) ─────────┐     ┌──── AsyncThread-7 ────────────┐
+│                                         │     │                               │
+│  OrderController.createOrder()          │     │                               │
+│       │                                 │     │                               │
+│       │── CompletableFuture.supplyAsync │────→│  notificationService.send()   │
+│       │     (() -> sendNotification())  │     │       │                       │
+│       │                                 │     │       ▼                       │
+│  ThreadLocal = ServletRequestAttributes │     │  ThreadLocal = null           │
+│  (still has original request)           │     │  (child thread, NOT inherited)│
+│                                         │     │                               │
+└─────────────────────────────────────────┘     └───────────────────────────────┘
+
+WHY: Java's ThreadLocal does NOT propagate to child threads by default.
+     InheritableThreadLocal DOES propagate, but Spring uses plain ThreadLocal
+     unless threadContextInheritable=true (disabled by default for safety).
+
+SAFETY CONCERN: If Spring used InheritableThreadLocal by default, a long-lived
+     child thread could hold a reference to a completed request object (memory leak)
+     or access stale request data from a previous user (security vulnerability).
+```
+
+#### Case 3: @Scheduled (cron/fixedRate)
+
+```
+┌──────── ScheduledThread-1 ────────────────────┐
+│                                                 │
+│  @Scheduled(fixedRate = 60000)                  │
+│  marketDataService.refreshPrices()              │
+│       │                                         │
+│       │  ThreadLocal = null                     │
+│       │  (scheduler thread, never had a request)│
+│       │                                         │
+│       ▼                                         │
+│  alphaVantageFeignClient.getQuote("AAPL")       │
+│       │                                         │
+│       │  No Authorization needed here           │
+│       │  (external API uses API key, not JWT)   │
+│       │                                         │
+└─────────────────────────────────────────────────┘
+
+NOTE: This case is fine — Alpha Vantage uses an API key in the URL parameter,
+not an Authorization header. But if a @Scheduled method tried to call another
+internal service via Feign, it would hit the same 401 problem as Kafka.
+```
+
+---
+
+### RequestContextHolder vs MDC ThreadContext — Comparison
+
+| Aspect | RequestContextHolder | MDC / ThreadContext |
+|--------|---------------------|---------------------|
+| **What it stores** | Full HttpServletRequest object | Key-value string pairs (correlationId) |
+| **Managed by** | FrameworkServlet (set) → Spring MVC lifecycle | MdcCorrelationFilter (set) → your filter code |
+| **ThreadLocal type** | NamedThreadLocal (non-inheritable default) | InheritableThreadLocal (Log4j2 default) |
+| **Available in child threads** | NO (unless inheritable mode enabled) | YES (Log4j2 uses InheritableThreadLocal) |
+| **Available in Kafka thread** | NO (no HTTP request) | YES if Kafka message carries correlationId and filter re-populates MDC |
+| **Cleanup** | FrameworkServlet finally block (automatic) | MdcCorrelationFilter finally block (manual) |
+| **Used by** | FeignAuthorizationInterceptor | FeignCorrelationInterceptor |
+
+Key insight: **Correlation ID survives across threads** (because MDC uses InheritableThreadLocal), but **Authorization header does NOT** (because RequestContextHolder uses plain ThreadLocal). This is by design — security context should not leak to unrelated threads.
+
+---
+
+### Token Propagation vs Token Exchange
+
+| Aspect | Token Propagation (our approach) | Token Exchange (OAuth2 standard) |
+|--------|----------------------------------|----------------------------------|
+| **Mechanism** | Copy original token to outgoing request | Call IdP to exchange token for new scoped token |
+| **Network calls** | 0 extra (just header copy) | 1 extra per hop (to IdP token endpoint) |
+| **Downstream sees** | Full user identity + ALL roles | Reduced-scope token (e.g., only "read:products") |
+| **Security** | If product-service is compromised, attacker has full user token | If compromised, attacker has limited-scope token |
+| **Complexity** | Simple (3 lines of code) | Requires IdP support + token exchange grant type |
+| **When to use** | Internal trusted network, same trust boundary | Cross-organizational, microservices with different trust levels |
+| **Standard** | Ad-hoc pattern (widely used) | RFC 8693 (OAuth 2.0 Token Exchange) |
+
+**Our current approach (Propagation)** is correct for Phase 8 Steps 1-4 because all services are in the same trust boundary and owned by the same team. Phase 8 Step 6 (Keycloak) enables Token Exchange as an option for production.
+
+---
+
+### Interview Questions This Pattern Answers
+
+1. **"How do you propagate authentication context between microservices?"**
+   → FeignAuthorizationInterceptor reads from RequestContextHolder ThreadLocal, copies to outgoing request.
+
+2. **"What happens to SecurityContext in async threads?"**
+   → ThreadLocal does not propagate to child threads. Use SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL) or extract the token before spawning async work.
+
+3. **"How does Feign know about all your interceptors?"**
+   → Spring auto-discovers all @Component beans implementing RequestInterceptor and registers them into the Feign builder. No explicit wiring per client.
+
+4. **"What is the difference between token propagation and token exchange?"**
+   → Propagation = same token forwarded (simple, less secure). Exchange = new scoped token from IdP (complex, least-privilege). Choose based on trust boundary.
+
+5. **"Can a Kafka consumer propagate user context to downstream services?"**
+   → No, because Kafka threads have no RequestContextHolder. Solutions: include token in event payload, use service-account via client-credentials, or implement a custom SecurityContext propagation mechanism.
+
+6. **"Why does Spring use plain ThreadLocal for request attributes instead of InheritableThreadLocal?"**
+   → Safety. InheritableThreadLocal would leak request references to long-lived child threads, causing memory leaks (request objects held past their lifecycle) and security vulnerabilities (child thread accessing stale user data from a previous request that reused the parent thread from the pool).
+
+---
+
+## 11. Cross-Cutting Concerns Distribution Pattern — Commons Module as Custom Starter (Phase 8)
+
+### Problem Statement
+
+In a microservice architecture, certain concerns apply to ALL services identically:
+- JWT authentication filter
+- Correlation ID propagation
+- Global exception handling
+- Feign interceptors (auth + correlation)
+- Kafka consumer configuration
+
+Without a shared mechanism, each service copy-pastes these (~500 lines × 7 services = 3500 duplicated lines). A bug fix requires updating 7 files. A new interceptor requires touching 7 modules.
+
+### The Commons Module Pattern
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                        Commons Module Architecture                               │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  commons/                                                                       │
+│  ├── build.gradle                    ← uses 'java-library' plugin (NOT 'application')
+│  │                                      api scope → transitive to all consumers │
+│  ├── src/main/java/com/equitycart/commons/                                      │
+│  │   ├── config/                                                                │
+│  │   │   ├── SecurityAutoConfig.java      @Configuration @ConditionalOnProperty │
+│  │   │   └── KafkaConsumerConfig.java     @Configuration                        │
+│  │   ├── filter/                                                                │
+│  │   │   ├── JwtAuthenticationFilter.java @Component (OncePerRequestFilter)     │
+│  │   │   └── MdcCorrelationFilter.java    @Component (OncePerRequestFilter)     │
+│  │   ├── feign/                                                                 │
+│  │   │   ├── FeignCorrelationInterceptor.java  @Component (RequestInterceptor)  │
+│  │   │   ├── FeignAuthorizationInterceptor.java @Component (RequestInterceptor) │
+│  │   │   └── ProductFeignClient.java      @FeignClient interface                │
+│  │   ├── handler/                                                               │
+│  │   │   └── GlobalExceptionHandler.java  @RestControllerAdvice                 │
+│  │   ├── security/                                                              │
+│  │   │   ├── api/JwtTokenValidator.java   interface (abstraction)               │
+│  │   │   └── impl/JwtTokenValidatorImpl.java @Component (HMAC-SHA256)           │
+│  │   ├── dto/                             ← plain POJOs (no Spring needed)      │
+│  │   ├── entity/                          ← @MappedSuperclass (JPA, not Spring) │
+│  │   └── exception/                       ← plain exceptions (no Spring needed) │
+│  │                                                                              │
+│  └── No main class, no @SpringBootApplication (library, not application)        │
+│                                                                                 │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Gradle Dependency Scopes in java-library Plugin
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│   commons/build.gradle — scope determines what consumers inherit           │
+├──────────────────┬──────────────────────────────────────────────────────────┤
+│ Scope            │ Effect on consumers (e.g., order-service)                │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ api              │ Available at COMPILE + RUNTIME for consumers             │
+│                  │ Consumer can directly use classes from this dependency    │
+│                  │ Example: api 'spring-boot-starter-security'              │
+│                  │ → order-service can import SecurityFilterChain           │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ implementation   │ Available at RUNTIME for consumers (NOT compile time)    │
+│                  │ Consumer cannot directly import classes                  │
+│                  │ Example: implementation 'spring-kafka'                   │
+│                  │ → order-service cannot import KafkaTemplate from here    │
+│                  │   (but if order-service declares its own kafka dep, OK)  │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ runtimeOnly      │ Available at RUNTIME for consumers (propagated)          │
+│                  │ Example: runtimeOnly 'jjwt-impl:0.12.6'                  │
+│                  │ → JAR is in the classpath at runtime; ServiceLoader      │
+│                  │   finds it; consumer never imports from it directly      │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ compileOnly      │ NOT available to consumers at all                        │
+│                  │ Only for this module's compilation                       │
+└──────────────────┴──────────────────────────────────────────────────────────┘
+
+Key insight for JJWT:
+  api 'jjwt-api:0.12.6'         → consumers compile against the API interfaces
+  runtimeOnly 'jjwt-impl:0.12.6' → implementation loaded at runtime via ServiceLoader
+  runtimeOnly 'jjwt-jackson:0.12.6' → JSON serializer loaded at runtime
+
+  This separation ensures consumers code to the API, not the implementation (Clean Architecture).
+```
+
+### Two Approaches to Load Commons Beans
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│  OPTION A: Explicit @ComponentScan (our choice)                             │
+│  ──────────────────────────────────────────────                             │
+│                                                                             │
+│  @SpringBootApplication                                                     │
+│  @ComponentScan(                                                            │
+│      basePackages = {"com.equitycart.order", "com.equitycart.commons"},     │
+│      excludeFilters = @Filter(type=ANNOTATION, classes=SpringBootApp.class))│
+│                                                                             │
+│  ✅ Explicit — developer sees what packages are scanned                     │
+│  ✅ Proven — portfolio-service already uses this pattern                    │
+│  ✅ Debuggable — @ComponentScan in the main class, easy to find             │
+│  ❌ Repetitive — each service must add the same annotation                  │
+│  ❌ Forgettable — new services might miss it (fails silently)               │
+│                                                                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  OPTION B: META-INF Auto-Configuration (Spring Boot starter pattern)        │
+│  ────────────────────────────────────────────────────────────────           │
+│                                                                             │
+│  File: commons/src/main/resources/META-INF/spring/                          │
+│        org.springframework.boot.autoconfigure.AutoConfiguration.imports     │
+│  Content:                                                                   │
+│    com.equitycart.commons.config.SecurityAutoConfig                         │
+│    com.equitycart.commons.config.KafkaConsumerConfig                        │
+│    com.equitycart.commons.handler.GlobalExceptionHandler                    │
+│                                                                             │
+│  ✅ Zero configuration per service — just add Gradle dependency             │
+│  ✅ Official Spring Boot pattern (how starters like spring-data-jpa work)   │
+│  ❌ "Magic" — not obvious where configuration comes from                    │
+│  ❌ Debugging: must know to check META-INF files                            │
+│  ❌ Cannot selectively exclude beans per service without extra conditions    │
+│                                                                             │
+│  How it works internally:                                                   │
+│  1. SpringApplication.run() → AutoConfigurationImportSelector               │
+│  2. Reads ALL META-INF/.../AutoConfiguration.imports from classpath JARs    │
+│  3. Processes listed classes as @Configuration                              │
+│  4. @Conditional annotations still apply (filter based on properties)       │
+│                                                                             │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  WHY WE CHOSE OPTION A:                                                     │
+│  - Learning project: explicit > implicit (understand what's happening)      │
+│  - portfolio-service already established the pattern                        │
+│  - Debugging: look at main class, see all scanned packages immediately      │
+│  - When something doesn't work: question is "did I add @ComponentScan?"     │
+│    not "is META-INF file structured correctly?"                             │
+│                                                                             │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### What Loads vs What Doesn't — Complete Matrix
+
+After @ComponentScan fix, here's what each service gets from commons:
+
+| Commons Bean | Mechanism | Loads? | Why/Why Not |
+|-------------|-----------|--------|-------------|
+| SecurityAutoConfig | @ComponentScan + @ConditionalOnProperty | ✅ (if property=true) | Scanned AND property satisfied |
+| JwtAuthenticationFilter | @ComponentScan | ✅ | @Component in scanned package |
+| JwtTokenValidatorImpl | @ComponentScan | ✅ | @Component in scanned package |
+| GlobalExceptionHandler | @ComponentScan | ✅ | @RestControllerAdvice in scanned package |
+| MdcCorrelationFilter | @ComponentScan | ✅ | @Component in scanned package |
+| FeignCorrelationInterceptor | @ComponentScan | ✅ | @Component in scanned package |
+| FeignAuthorizationInterceptor | @ComponentScan | ✅ | @Component in scanned package |
+| KafkaConsumerConfig | @ComponentScan | ✅ | @Configuration in scanned package |
+| BaseEntity | @EntityScan | ✅ | @MappedSuperclass, separate mechanism |
+| ProductDTO, OrderEvent | None needed | ✅ | Plain POJOs — no Spring scanning required |
+| ProductFeignClient | @EnableFeignClients | ✅ (if declared) | @FeignClient interface, separate mechanism |
+
+**Three independent discovery mechanisms, each with its own scope:**
+1. @ComponentScan → Spring beans (DI container)
+2. @EntityScan → JPA entities (Hibernate metamodel)
+3. @EnableFeignClients → Feign client interfaces (proxy generation)
+
+### The Silent Failure Problem
+
+The most dangerous aspect of this pattern: when @ComponentScan is missing, services start successfully with NO errors. They just silently degrade:
+
+```
+Without @ComponentScan for commons:
+  ❌ No JwtAuthenticationFilter → all requests pass without auth (security hole)
+  ❌ No GlobalExceptionHandler → raw stack traces in responses (info leak)
+  ❌ No MdcCorrelationFilter → correlationId not in MDC (broken distributed tracing)
+  ❌ No FeignAuthorizationInterceptor → inter-service calls lack token (401s in chain)
+  ❌ No KafkaConsumerConfig → default deserialization (may crash on complex events)
+
+  But service starts! Actuator shows healthy! Eureka shows registered!
+  Only functional testing reveals the missing behavior.
+```
+
+This is why Phase 8 Step 2 was a critical fix — these beans were NEVER loading in order, product, notification, ledger services throughout all of Phase 7.
+
+### Interview Questions
+
+1. **"How do you share cross-cutting concerns across microservices without coupling them?"**
+   → Extract to a commons module with `java-library` plugin + `api` scope. Use @ConditionalOnProperty to gate features (services opt-in). Each service adds @ComponentScan for the commons package. This is effectively a custom Spring Boot starter without the META-INF auto-configuration.
+
+2. **"What is the difference between api and implementation scope in Gradle java-library?"**
+   → `api` = transitive to consumers at compile AND runtime (they can import your classes). `implementation` = NOT visible at compile time to consumers (they can't import), but IS on runtime classpath (ServiceLoader, reflection). Use `api` for types that appear in your public API (method signatures, return types). Use `implementation` for internal dependencies.
+
+3. **"Your services were running fine without loading GlobalExceptionHandler — how?"**
+   → Spring Boot's default error handling (BasicErrorController) catches unhandled exceptions and returns a generic JSON error. Without GlobalExceptionHandler, services use this default — functional but less informative (no structured error codes, no domain-specific messages). The service doesn't crash; it just provides inferior error responses.
+
+4. **"How would you prevent a commons module from accidentally loading in config-server or discovery-server?"**
+   → Two mechanisms: (1) Don't add @ComponentScan for commons in those services. (2) Use @ConditionalOnProperty on configuration classes — set `equitycart.security.enabled=false` (or don't set it at all) in those services' configs. The conditional gate ensures the bean is skipped even if scanned.
+
+---
+
+## Section 12: Service-to-Service Authentication Pattern (ServiceTokenProvider)
+
+### Problem Statement
+
+In a microservices architecture, some inter-service calls originate from non-HTTP contexts:
+- **Kafka consumers** processing domain events (order-delivered → reward calculation)
+- **@Scheduled tasks** (periodic data sync, cleanup jobs)
+- **@Async threads** (fire-and-forget operations)
+
+These threads have no incoming HTTP request, so `RequestContextHolder.getRequestAttributes()` returns null. The standard token propagation pattern (copy Authorization header from incoming request) fails completely.
+
+### Pattern: Machine-Identity Token Generation
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ HTTP Request Thread                                                   │
+│                                                                       │
+│  Client → Gateway → Service A → FeignInterceptor                     │
+│                                    │                                  │
+│                     RequestContextHolder has request?                 │
+│                          ├── YES → propagate original token           │
+│                          └── NO  → ??? (before: 401/403)             │
+├─────────────────────────────────────────────────────────────────────┤
+│ Non-HTTP Thread (Kafka, @Scheduled)                                  │
+│                                                                       │
+│  KafkaListener → Business Logic → FeignClient → FeignInterceptor    │
+│                                                    │                  │
+│                          RequestContextHolder has request?            │
+│                               └── NO → ServiceTokenProvider          │
+│                                         generates fresh JWT          │
+│                                         (subject=0, role=SERVICE)    │
+│                                         attaches as "Bearer <token>" │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Design Principles
+
+1. **Sentinel Identity:** Use a non-colliding identifier (userId=0) that satisfies existing parsing contracts (`Long.parseLong()`) without requiring schema changes or special-case handling in the validation filter.
+
+2. **Dedicated Role:** The SERVICE role is distinct from user roles (CUSTOMER, SELLER, ADMIN). This allows `@PreAuthorize` rules to distinguish between user-initiated and service-initiated requests when needed.
+
+3. **Short-Lived Tokens:** 60-second expiry limits blast radius. Each Feign call generates fresh — no caching, no revocation needed.
+
+4. **Transparent to Downstream:** The downstream service's `JwtAuthenticationFilter` processes service tokens identically to user tokens — extract subject, extract roles, set SecurityContext. No code branching in the filter.
+
+### Comparison: Token Propagation vs Token Generation vs Client Credentials
+
+| Approach | When to Use | Pros | Cons |
+|----------|------------|------|------|
+| **Propagation** (forward user token) | HTTP thread with incoming request | Simple, preserves user identity | Fails in non-HTTP contexts |
+| **Generation** (ServiceTokenProvider) | Non-HTTP threads, symmetric signing | No external deps, fast (~0.1ms) | Shared secret = any service can forge |
+| **Client Credentials** (OAuth2) | Production with Keycloak/IdP | Proper identity per service, audit trail | Requires IdP, network call for token |
+
+### Config Migration Gap Pattern
+
+**Problem discovered:** Properties defined in the monolith's `application.yml` (inside the `app/` module) do NOT automatically migrate to Config Server when you extract services.
+
+**Example:** `equitycart.sell-to-spend.strategy=saga` was set in `app/src/main/resources/application.yml`. After microservice extraction, portfolio-service reads from Config Server's `portfolio-service.yml` — which didn't have the property. The strategy silently defaulted to `transactional` because `@ConditionalOnProperty(matchIfMissing=true)` activated the wrong implementation.
+
+**Prevention checklist:**
+1. Grep the monolith's application.yml for every `@Value` and `@ConditionalOnProperty` used by the extracted service
+2. Copy those properties to the service's Config Server YAML
+3. Push Config Server changes to Git BEFORE testing the extracted service
+4. Never use `matchIfMissing=true` with a property that selects between implementations — it creates an invisible default
+
+---
+
+## Section 13: Docker Networking — Host vs Container Port Mapping
+
+### The Mental Model
+
+```
+┌─────────── HOST (your laptop) ──────────────┐
+│                                               │
+│  DBeaver connects to → localhost:9432         │
+│  Browser connects to → localhost:8080         │
+│                           │                   │
+│  ┌────── Docker Network (bridge) ──────────┐ │
+│  │                                          │ │
+│  │  postgres:5432 ←── order-service:5432    │ │
+│  │  redis:6379    ←── portfolio-svc:6379    │ │
+│  │  gateway:8080  (exposed to host:8080)    │ │
+│  │                                          │ │
+│  │  Host:9432 → postgres:5432 (port map)    │ │
+│  └──────────────────────────────────────────┘ │
+└───────────────────────────────────────────────┘
+```
+
+**Key rule:** Containers in the same Docker network communicate using the SERVICE NAME and INTERNAL PORT. The host port mapping (left side of `ports: "9432:5432"`) is ONLY for host-to-container access.
+
+### Common Mistake
+
+```yaml
+# docker-pets.yml (infrastructure)
+postgres:
+  ports:
+    - "9432:5432"  # Host:9432 → Container:5432
+
+# docker-compose-services.yml (application services)
+order-service:
+  environment:
+    # WRONG: Using host port inside Docker network
+    SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:9432/orderdb
+    
+    # CORRECT: Containers use internal port
+    SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orderdb
+```
+
+**Why 9432 on host?** The developer's machine already runs PostgreSQL on port 5432 (organizational setup). Mapping to 9432 avoids conflict while leaving the container's internal port unchanged.
+
+### Port Mapping Quick Reference (EquityCart)
+
+| Service | Host Port | Container Port | Who Uses Host Port | Who Uses Container Port |
+|---------|-----------|---------------|-------------------|------------------------|
+| PostgreSQL | 9432 | 5432 | DBeaver, IDE | order-svc, user-svc, portfolio-svc |
+| Redis | 6379 | 6379 | RedisInsight | market-data-svc, portfolio-svc |
+| MongoDB | 27017 | 27017 | Compass | market-data-svc |
+| API Gateway | 8080 | 8080 | Browser, Postman | (entry point) |
+| Config Server | 8888 | 8888 | Browser (debug) | All services |
+| Eureka | 8761 | 8761 | Browser (dashboard) | All services |
+
+### Interview Questions
+
+1. **"A service inside Docker can't connect to the database, but you can connect from your laptop. What's wrong?"**
+   → Almost always a port mismatch: the service is using the HOST port (mapped side) instead of the container's INTERNAL port. Inside Docker's bridge network, services resolve each other by service name and communicate on internal ports. Host port mappings don't exist inside the network.
+
+2. **"Why would you map PostgreSQL to a non-standard port?"**
+   → Port conflict on the developer's machine. The standard port (5432) is occupied by a local/organizational PostgreSQL instance. Docker maps to an alternate host port (9432) to avoid conflict. Inside the container network, PostgreSQL still listens on 5432 — only the host-facing "door" changes.
+
+3. **"Can two containers in the same network use the same internal port?"**
+   → Yes. Port isolation is per-container. `postgres:5432` and `mysql:3306` in the same network don't conflict. Even two PostgreSQL instances can both listen on 5432 internally — they're distinguished by service name (DNS), not port. Conflicts only arise if you map both to the same HOST port.

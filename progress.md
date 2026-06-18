@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 7 - Microservices Decomposition (COMPLETE)
+## Status: Phase 8 - Security Hardening (IN PROGRESS)
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -887,6 +887,26 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 
 **Target state (post Phase 10):** Each service's `build.gradle` contains ONLY `implementation project(':commons')` — no other service modules. All cross-service communication via HTTP (Feign) or messaging (Kafka).
 
+## Phase 8: Security Hardening — IN PROGRESS (started 2026-06-12)
+
+### Approach: Incremental (Custom JWT → OAuth2/Keycloak)
+Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT validation to all services (unblocks E2E testing immediately), then migrate to Keycloak + OAuth2 Resource Server (production-grade, asymmetric keys, JWKS). Dual-mode: custom auth stays alongside Keycloak for flexibility.
+
+### Step Plan
+
+| # | Step | Status |
+|---|------|--------|
+| 1 | Extract JWT validation to commons (shared library) | PENDING |
+| 2 | Wire commons security into all 6 downstream services | PENDING |
+| 3 | Feign interceptor — propagate Authorization header | PENDING |
+| 4 | Gateway-level JWT pre-validation (GlobalFilter) | PENDING |
+| 5 | Keycloak Docker setup + realm/client/role configuration | PENDING |
+| 6 | Migrate to OAuth2 Resource Server (spring-boot-starter-oauth2-resource-server) | PENDING |
+| 7 | Gateway Token Relay (replace custom filter with Spring Security) | PENDING |
+| 8 | Rate limiting at Gateway (Redis-backed, token bucket) | PENDING |
+| 9 | OWASP security headers + secrets management (env vars) | PENDING |
+| 10 | E2E security integration tests (completes deferred Phase 7 Step 13) | PENDING |
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -896,7 +916,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — FUNCTIONAL COMPLETE (reward grant deferred to Phase 6)
 - [x] Phase 6: Event-Driven Architecture (Weeks 13-15) — COMPLETE
 - [x] Phase 7: Microservices Decomposition (Weeks 16-18) — COMPLETE (E2E testing deferred to Phase 8)
-- [ ] Phase 8: Security Hardening (Weeks 19-20)
+- [ ] Phase 8: Security Hardening (Weeks 19-20) — IN PROGRESS
 - [ ] Phase 9: Observability (Weeks 21-22)
 - [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
 

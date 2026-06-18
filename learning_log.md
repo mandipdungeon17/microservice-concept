@@ -4553,3 +4553,109 @@ A: Gradle `implementation project(':service-B')` means A and B share a classload
 4. **Technology heterogeneity** prevented — both locked to same JVM version and framework
 
 The correct pattern is: A depends only on `project(':commons')` (shared DTOs, exceptions), and calls B via **Feign/REST** or **Kafka events**. The network boundary is the contract — not the classpath.
+
+**Q145: "How does the Authorization header get propagated between microservices in synchronous Feign calls?" (2026-06-15)**
+
+A: `FeignAuthorizationInterceptor` (implements `feign.RequestInterceptor`) reads the original request's Authorization header from `RequestContextHolder.getRequestAttributes()` — which is a ThreadLocal storing the current HttpServletRequest — and copies it to the outgoing Feign `RequestTemplate`. This works because Feign calls execute on the same thread that received the original HTTP request.
+
+Fails when: Kafka consumer threads, @Scheduled threads, @Async child threads — all have null RequestContextHolder because no HTTP request started them.
+
+**Q146: "What is the difference between token propagation and token exchange?" (2026-06-15)**
+
+A: Propagation = forward the same JWT unchanged to downstream services (simple, zero extra network calls, but downstream sees full user identity). Exchange = call the IdP to swap the token for a new scoped-down token (more secure, least-privilege, but adds latency per hop and requires IdP support like Keycloak's token exchange endpoint per RFC 8693). Use propagation within a single trust boundary; use exchange across organizational boundaries or when downstream services should have limited access.
+
+**Q147: "Why does Spring use plain ThreadLocal for RequestContextHolder instead of InheritableThreadLocal?" (2026-06-15)**
+
+A: Safety. InheritableThreadLocal propagates to child threads — but in a thread-pool model (Tomcat), threads are reused. A long-lived child thread could hold references to completed request objects (memory leak) or access stale user data from a previous request that happened to run on the same parent thread (security vulnerability). MDC uses InheritableThreadLocal because correlationId strings are lightweight and non-sensitive; HttpServletRequest objects are heavy and contain auth data.
+
+**Q148: "Why can't Spring Cloud Gateway use the same SecurityFilterChain as servlet-based services?" (2026-06-15)**
+
+A: Spring Cloud Gateway runs on Netty's event loop (WebFlux). SecurityFilterChain is a javax.servlet.Filter construct — it requires HttpServletRequest, HttpServletResponse, and FilterChain which don't exist in the reactive stack. WebFlux uses ServerWebExchange, GlobalFilter, and Mono<Void>. These are mutually exclusive web stacks — you cannot mix servlet and reactive APIs in the same application.
+
+**Q148: "Is JJWT's parseSignedClaims() safe on Netty's event loop thread?" (2026-06-15)**
+
+A: Yes. HMAC-SHA256 signature verification is pure CPU (no I/O, no network, no disk). Completes in ~50 microseconds. Netty's event loop forbids BLOCKING operations (Thread.sleep, synchronous HTTP, JDBC) — but fast CPU work is fine. The danger is blocking I/O that would stall all other requests sharing that event loop thread.
+
+**Q149: "What is the difference between Mono<Void> and void?" (2026-06-15)**
+
+A: `void` means "do it now, synchronously." `Mono<Void>` means "something will complete in the future, asynchronously, producing no value." In reactive gateway filters, returning `chain.filter(exchange)` means "proceed to the next filter and signal when the entire chain completes." Returning `response.writeWith(Mono.just(buffer))` means "write these bytes and signal when the write completes" — this short-circuits the chain (no downstream filters execute).
+
+---
+
+## Phase 8 Steps 1-4: Security Hardening — Custom JWT Distribution (2026-06-15)
+
+**Objective:** Distribute JWT validation from user-service to ALL downstream services + gateway edge validation.
+
+**Key Deliverables:**
+- Commons: JwtTokenValidator interface + HMAC-SHA256 impl, JwtAuthenticationFilter, SecurityAutoConfig (@ConditionalOnProperty gated)
+- Commons: FeignAuthorizationInterceptor (propagates Authorization header via RequestContextHolder ThreadLocal)
+- Gateway: JwtValidationGatewayFilter (reactive GlobalFilter, validates before routing, defense-in-depth)
+- All services: @ComponentScan for commons, `equitycart.security.enabled=true` in Config Server YAMLs
+
+**Critical Discovery:** @ComponentScan was missing from order, product, notification, ledger services. All commons @Component beans (including GlobalExceptionHandler, MdcCorrelationFilter, KafkaConsumerConfig) were NEVER loading throughout Phase 7. @EntityScan (which was present) only discovers JPA entities — it does NOT register @Component/@Configuration beans. Services started fine because Spring Boot's defaults handle basic cases; the missing commons beans caused silent degradation (no structured errors, no correlation propagation, no security).
+
+**Architecture:**
+- Gateway: fast-fail for invalid tokens (saves 1 network hop for bad requests)
+- Each service: independent validation via SecurityAutoConfig (zero-trust, Feign calls bypass gateway)
+- Both layers use same jwt.secret from shared application.yml via Config Server
+- Token NOT stripped at gateway → passes through for service-level validation
+
+**Q150: "What is the difference between @ComponentScan and @EntityScan?" (2026-06-15)**
+
+A: Completely independent mechanisms serving different Spring subsystems. @ComponentScan finds @Component/@Configuration/@Service classes and registers them as Spring beans in the ApplicationContext (for DI). @EntityScan finds @Entity/@MappedSuperclass classes and registers them with Hibernate's MetamodelFactory (for ORM). Having `@EntityScan(basePackages = "com.equitycart.commons")` loads BaseEntity for schema generation but does NOT load SecurityAutoConfig or any other @Component bean from that package.
+
+**Q151: "implementation project(':commons') makes classes available — why do I still need @ComponentScan?" (2026-06-15)**
+
+A: Gradle puts .class files on the classpath (you can `new SecurityAutoConfig()` manually). But Spring beans require SCANNING — Spring must discover the class, evaluate its annotations, and register it in the ApplicationContext with lifecycle management, proxying, and DI. @SpringBootApplication's implicit @ComponentScan only scans its own package tree (e.g., `com.equitycart.order.**`). Classes in `com.equitycart.commons.**` are on the classpath but invisible to Spring's scanner without explicit @ComponentScan expansion.
+
+**Q152: "What happens when @ConditionalOnProperty's target property is missing?" (2026-06-15)**
+
+A: If `matchIfMissing` is not set (default = false), the condition evaluates to NO MATCH. The bean is silently skipped — no error, no warning at INFO level. The @Configuration class exists on the classpath, Spring even found it during scanning, but never instantiates it. This is the most common "my security isn't working" bug: property not in Config Server + no error message = hours of debugging. Fix: enable DEBUG on `org.springframework.boot.autoconfigure.condition` to see match decisions.
+
+**Q153: "Why does @ComponentScan need excludeFilters for @SpringBootApplication?" (2026-06-15)**
+
+A: In a multi-module Gradle project, all modules' .class files can appear on the classpath during compilation. If @ComponentScan scans `com.equitycart.commons` and another module's @SpringBootApplication class is on that classpath, Spring would try to process it as a @Configuration (because @SpringBootApplication is meta-annotated with @Configuration). This cascades: that class's @ComponentScan triggers scanning of its package tree, pulling in foreign beans. The excludeFilter says "skip any class annotated with @SpringBootApplication" — preventing this cascade.
+
+**Q154: "In Docker, Config Server pulls from remote Git. What happens if you don't push config changes?" (2026-06-15)**
+
+A: Config Server at http://config-server:8888 clones `equitycart-config.git` from GitHub. If local changes (like `equitycart.security.enabled: true`) aren't pushed, Docker services get the OLD config. SecurityAutoConfig's @ConditionalOnProperty finds no property → bean skipped silently → no security. Worse: the gateway's `@Value("${equitycart.gateway.security.open-paths}")` would cause a hard startup failure (IllegalArgumentException: Could not resolve placeholder) if that property was never pushed.
+
+---
+
+### Phase 8: Security Hardening — Obstacles & Learnings (2026-06-18)
+
+**Q155: "ServerHttpResponseDecorator — why does .then() fail for response headers in Spring Cloud Gateway?" (2026-06-18)**
+
+A: In WebFlux/Netty, response headers are flushed to the wire during the FIRST `writeWith()` call — before the body completes. After that, headers become `ReadOnlyHttpHeaders` (throws `UnsupportedOperationException` on mutation). The `.then(Mono.fromRunnable(...))` callback executes AFTER the entire response body is written — long after headers were sealed. Fix: `ServerHttpResponseDecorator` overrides `writeWith()` to inject the header BEFORE delegating to the real write. Three override points: `writeWith()` (normal body), `writeAndFlushWith()` (SSE/streaming), `setComplete()` (empty-body 204/304/redirects).
+
+**Q156: "Why does HttpURLConnection not support PATCH, and what's the fix for Feign?" (2026-06-18)**
+
+A: `java.net.HttpURLConnection` was written in JDK 1.1 (late 1990s) and hardcodes supported methods as: GET, POST, PUT, DELETE, HEAD, OPTIONS, TRACE. PATCH (RFC 5789, 2010) was never added. OpenFeign's default transport is HttpURLConnection, so `@PatchMapping` on a Feign interface throws `ProtocolException: Invalid HTTP method: PATCH`. Fix: add `feign-hc5` (Apache HttpClient 5) dependency — Spring Cloud OpenFeign auto-detects it and switches the HTTP transport. No code changes needed.
+
+**Q157: "Feign calls from Kafka consumer threads return 403 — why?" (2026-06-18)**
+
+A: Kafka consumer threads are managed by `ConcurrentMessageListenerContainer`, not Tomcat. They never pass through `DispatcherServlet`, so `RequestContextHolder.getRequestAttributes()` returns null. The `FeignAuthorizationInterceptor` finds no incoming HTTP request → no Authorization header to propagate → downstream service receives unauthenticated request → 403. Fix: `ServiceTokenProvider` generates a short-lived machine-identity JWT (subject=0, role=SERVICE, 60s expiry) as a fallback when no request context exists.
+
+**Q158: "Why must the ServiceTokenProvider use subject='0' and roles=List.of('SERVICE')?" (2026-06-18)**
+
+A: Three type-compatibility constraints: (1) `JwtTokenValidatorImpl.extractUserId()` calls `Long.parseLong(subject)` — a non-numeric subject like "SYSTEM" throws NumberFormatException. Using "0" satisfies Long parsing (0 can't collide with auto-increment IDs starting at 1). (2) `extractRoles()` casts the "roles" claim to `List<String>` — a plain String "SERVICE" causes ClassCastException. JJWT serializes `List.of("SERVICE")` as JSON array `["SERVICE"]`, which deserializes back to List. (3) Expiry is mandatory — JJWT 0.12.6's `isTokenExpired()` treats missing `exp` claim as expired.
+
+**Q159: "SecurityAutoConfig — why can't you call anyRequest() twice?" (2026-06-18)**
+
+A: In Spring Security's `AuthorizeHttpRequestsConfigurer`, `anyRequest()` registers a universal matcher (matches all URLs). Once registered, the framework throws `IllegalStateException` ("Can't configure anyRequest after itself") if you try to add more matchers. The correct pattern: specific matchers FIRST (`requestMatchers("/api/auth/**").permitAll()`), then `anyRequest().authenticated()` LAST as the catch-all. Role-based restrictions use method-level `@PreAuthorize` rather than URL-pattern matchers.
+
+**Q160: "Docker containers fail HTTPS with PKIX path building failed — what's causing it?" (2026-06-18)**
+
+A: Corporate proxy (Zscaler) performs TLS interception: it terminates the original TLS connection, inspects traffic, then re-encrypts with its own private root CA. The JVM's `cacerts` keystore only contains public CAs (DigiCert, Let's Encrypt, etc.) — Zscaler's private CA is absent. Fix: import the corporate root CA into the JVM truststore inside the Docker image using `keytool -importcert -cacerts -storepass changeit -noprompt -alias zscaler-root-ca -file /tmp/ZscalerRootCA.pem`. On Alpine JRE (`eclipse-temurin:21-jre-alpine`), cacerts is at `/opt/java/openjdk/lib/security/cacerts`.
+
+**Q161: "Docker COPY can't find a file that exists in the docker/ folder — why?" (2026-06-18)**
+
+A: COPY paths are relative to the build CONTEXT, not the Dockerfile location. The build command `docker build -f docker/Dockerfile .` (run from `equitycart/`) sets context to `equitycart/`. A file at `equitycart/docker/ZscalerRootCA.pem` must be referenced as `COPY docker/ZscalerRootCA.pem` (not just `COPY ZscalerRootCA.pem`). The Dockerfile's location (`docker/Dockerfile`) is irrelevant to COPY resolution — only the final `.` argument (context root) matters.
+
+**Q162: "In Docker Compose, should services use the host port or container port to connect to each other?" (2026-06-18)**
+
+A: Always the INTERNAL (container) port. `ports: "9432:5432"` maps host:9432 → container:5432. Within the Docker bridge network, containers resolve each other by service name (DNS) and connect on internal ports. `jdbc:postgresql://postgres:5432/orderdb` (correct inside Docker), `jdbc:postgresql://localhost:9432/orderdb` (correct from host/DBeaver). A common bug after changing host port to avoid conflicts: updating JDBC URLs inside docker-compose-services.yml to use the new host port, which breaks container-to-container communication.
+
+**Q163: "Config migration gap — why did sell-to-spend default to transactional instead of saga?" (2026-06-18)**
+
+A: When extracting from monolith to microservices, the property `equitycart.sell-to-spend.strategy=saga` lived in `app/src/main/resources/application.yml`. After extraction, portfolio-service reads from Config Server's `portfolio-service.yml` — which never received this property. The implementation used `@ConditionalOnProperty(name="equitycart.sell-to-spend.strategy", havingValue="saga", matchIfMissing=true)` for the transactional bean — so missing property activated the WRONG implementation silently. Fix: add the property to Config Server YAML, push to Git. Prevention: never use `matchIfMissing=true` on a property that selects between competing implementations.

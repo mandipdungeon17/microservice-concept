@@ -82,6 +82,27 @@ RUN ./gradlew :${MODULE_NAME}:bootJar --no-daemon -x test
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
+# Import corporate Zscaler Root CA into JVM truststore (required for HTTPS through corporate proxy)
+#
+# WHY: Zscaler (corporate proxy) performs TLS interception — it terminates the original TLS connection
+# from the container, inspects traffic, then re-encrypts with its own private CA certificate.
+# The JVM's default cacerts bundle only contains public CAs (DigiCert, Let's Encrypt, etc.) and does
+# NOT include Zscaler's private root CA. Without this import, any HTTPS call (e.g., Alpha Vantage API,
+# Spring Cloud Config Server) throws: javax.net.ssl.SSLHandshakeException: PKIX path building failed.
+#
+# HOW: keytool -importcert adds the certificate to the JVM's cacerts keystore located at
+# /opt/java/openjdk/lib/security/cacerts (Alpine JRE). Unlike Debian-based images where cacerts is
+# symlinked to /etc/ssl/certs/java/cacerts, Alpine's Eclipse Temurin stores it as a regular file
+# directly in the JDK tree. The -cacerts flag targets this file automatically.
+#
+# BUILD CONTEXT NOTE: The build context is equitycart/ (parent of docker/), so COPY paths are
+# relative to equitycart/, not to the Dockerfile's location. Hence: docker/ZscalerRootCA.pem
+# (not just ZscalerRootCA.pem).
+COPY docker/ZscalerRootCA.pem /tmp/ZscalerRootCA.pem
+RUN keytool -importcert -cacerts -storepass changeit -noprompt \
+  -alias zscaler-root-ca -file /tmp/ZscalerRootCA.pem \
+  && rm /tmp/ZscalerRootCA.pem
+
 # ARG values reset after every FROM — must re-declare what Stage 2 needs.
 # MODULE_NAME is not needed here; only MODULE_DIR (to locate the JAR).
 ARG MODULE_DIR

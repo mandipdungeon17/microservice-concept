@@ -521,3 +521,82 @@ Commons cannot depend on order-service (order-service depends on commons — mak
 
 **Q: What happens if the target service (lb://PRODUCT-SERVICE) is not registered in Eureka when a Feign call is made?**
 FeignBlockingLoadBalancerClient finds no instances → throws IllegalStateException: No instances available for PRODUCT-SERVICE → wraps in RetryableException → if retries configured, retried → if exhausted, FeignException propagates to calling code.
+
+---
+
+## 13. Feign Interceptor Pipeline — Authorization Propagation (Phase 8)
+
+### How Feign Interceptors Are Auto-Registered
+
+Any `@Component` implementing `feign.RequestInterceptor` is automatically discovered by Spring and injected into **every** `@FeignClient` in the application context. No per-client wiring needed.
+
+```
+Spring Context Initialization:
+  1. ComponentScan finds all @Component RequestInterceptor beans
+  2. FeignClientFactoryBean collects them into List<RequestInterceptor>
+  3. Feign.Builder.requestInterceptors(list) registers all interceptors
+  4. Every @FeignClient proxy gets the same interceptor chain
+```
+
+### Invocation Order in Feign Pipeline
+
+```
+Your code calls: productFeignClient.getProduct(123)
+    │
+    ▼
+JDK Dynamic Proxy → FeignInvocationHandler.invoke()
+    │
+    ▼
+SynchronousMethodHandler.executeAndDecode()
+    │
+    ├── Build RequestTemplate from method annotations
+    │
+    ├── for (RequestInterceptor interceptor : requestInterceptors) {
+    │       interceptor.apply(template);  // EACH interceptor modifies the template
+    │   }
+    │
+    │   Order of execution (EquityCart):
+    │   1. FeignCorrelationInterceptor → adds X-Correlation-Id header from MDC
+    │   2. FeignAuthorizationInterceptor → adds Authorization header from RequestContextHolder
+    │
+    ├── FeignBlockingLoadBalancerClient resolves lb://SERVICE-NAME → actual host:port
+    │
+    ├── HTTP request fires with ALL headers set by interceptors
+    │
+    └── Response decoded → returned to calling code
+```
+
+### FeignAuthorizationInterceptor — RequestContextHolder Mechanism
+
+**Problem:** When order-service calls product-service via Feign, it creates a brand-new HTTP request. The user's original Authorization header is NOT automatically copied.
+
+**Solution:** Read the header from the original request stored in `RequestContextHolder` (ThreadLocal):
+
+```
+Original HTTP request arrives → FrameworkServlet stores in ThreadLocal
+    │
+    │  [same thread continues through controller → feign call]
+    │
+    ▼
+FeignAuthorizationInterceptor.apply(template):
+    1. RequestContextHolder.getRequestAttributes()  → reads ThreadLocal
+    2. Cast to ServletRequestAttributes
+    3. .getRequest().getHeader("Authorization")     → extracts Bearer token
+    4. template.header("Authorization", value)      → copies to outgoing request
+```
+
+**Critical constraint:** This ONLY works when the Feign call executes on the same thread that received the original HTTP request (synchronous servlet model). Breaks in:
+- Kafka consumer threads (no originating HTTP request → RequestContextHolder returns null)
+- @Async child threads (ThreadLocal does not propagate to new threads)
+- @Scheduled threads (no originating HTTP request)
+
+In all null cases, the interceptor skips silently — no crash, but no Authorization header sent.
+
+### Two Interceptors, Two Concerns
+
+| Interceptor | Reads from | Writes to | Survives across threads? |
+|-------------|-----------|-----------|--------------------------|
+| FeignCorrelationInterceptor | MDC ThreadContext (InheritableThreadLocal) | X-Correlation-Id header | YES — InheritableThreadLocal |
+| FeignAuthorizationInterceptor | RequestContextHolder (plain ThreadLocal) | Authorization header | NO — plain ThreadLocal |
+
+This difference is intentional: correlation IDs are lightweight tracing data safe to propagate anywhere; auth tokens are sensitive and should NOT leak to unrelated threads.

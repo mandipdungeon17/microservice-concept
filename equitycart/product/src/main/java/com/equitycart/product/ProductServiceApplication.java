@@ -6,6 +6,8 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
 import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FilterType;
 
 /**
  * Standalone entry point for the Product Service microservice.
@@ -35,10 +37,14 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  * the superclass definition. Explicit {@code @EntityScan} covering both packages ensures Hibernate
  * registers the full class hierarchy correctly.
  *
- * <p><b>No {@code @ComponentScan} or {@code @EnableJpaRepositories} overrides needed:</b> All
- * repository interfaces ({@code ProductRepository}, {@code BrandRepository}, etc.) and service
- * beans ({@code ProductServiceImpl}, etc.) live within {@code com.equitycart.product.*}, already
- * covered by the default {@code @SpringBootApplication} scan.
+ * <p><b>Why {@code @ComponentScan} IS required here (Phase 8 addition):</b> All product-specific
+ * repository interfaces and service beans live within {@code com.equitycart.product.*}, covered by
+ * default scanning. However, cross-cutting infrastructure beans from {@code com.equitycart.commons}
+ * (SecurityAutoConfig, JwtAuthenticationFilter, GlobalExceptionHandler, MdcCorrelationFilter) must
+ * also be registered. {@code @SpringBootApplication} only scans its own package tree — without
+ * explicit {@code @ComponentScan} including {@code com.equitycart.commons}, these classes exist on
+ * the classpath but are never instantiated as Spring beans. The {@code excludeFilters} prevents
+ * scanning other modules' {@code @SpringBootApplication} classes.
  *
  * <p><b>Startup Flow:</b>
  *
@@ -74,9 +80,13 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  *       (called by portfolio-service during stock-back reward calculation)
  * </ul>
  *
- * <p><b>Security Note (Phase 7 interim state):</b> Stock deduction and restoration endpoints carry
- * no {@code @PreAuthorize} guards — they rely on network-level isolation (only gateway-routed
- * traffic reaches port 8089). Phase 8 will add service-to-service OAuth2 client credentials.
+ * <p><b>Security (Phase 8 Step 2):</b> Commons {@code SecurityAutoConfig} is active ({@code
+ * equitycart.security.enabled=true} in product-service.yml). {@code JwtAuthenticationFilter}
+ * validates every request except {@code /api/auth/**} and {@code /actuator/**}. Stock deduction and
+ * restoration endpoints are now protected — only authenticated services with a valid JWT can call
+ * them. {@code @PreAuthorize} annotations (if present) are enforced via
+ * {@code @EnableMethodSecurity} in SecurityAutoConfig. Phase 8 Steps 5-7 will migrate to OAuth2
+ * Resource Server with Keycloak RS256 tokens.
  *
  * <p><b>Verify After Startup:</b>
  *
@@ -95,6 +105,10 @@ import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
  */
 @SpringBootApplication
 @EnableDiscoveryClient
+@ComponentScan(
+    basePackages = {"com.equitycart.product", "com.equitycart.commons"},
+    excludeFilters =
+        @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
 @EntityScan(basePackages = {"com.equitycart.product", "com.equitycart.commons"})
 public class ProductServiceApplication {
 
