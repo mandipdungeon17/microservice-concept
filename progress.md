@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 8 - Security Hardening (IN PROGRESS)
+## Status: Phase 8 - Security Hardening (COMPLETE) → Phase 9 Next
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -887,7 +887,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 
 **Target state (post Phase 10):** Each service's `build.gradle` contains ONLY `implementation project(':commons')` — no other service modules. All cross-service communication via HTTP (Feign) or messaging (Kafka).
 
-## Phase 8: Security Hardening — IN PROGRESS (started 2026-06-12)
+## Phase 8: Security Hardening — COMPLETE (started 2026-06-12)
 
 ### Approach: Incremental (Custom JWT → OAuth2/Keycloak)
 Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT validation to all services (unblocks E2E testing immediately), then migrate to Keycloak + OAuth2 Resource Server (production-grade, asymmetric keys, JWKS). Dual-mode: custom auth stays alongside Keycloak for flexibility.
@@ -900,12 +900,12 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 | 2 | Wire commons security into all 6 downstream services | COMPLETE |
 | 3 | Feign interceptor — propagate Authorization header | COMPLETE |
 | 4 | Gateway-level JWT pre-validation (GlobalFilter) | COMPLETE |
-| 5 | Keycloak Docker setup + realm/client/role configuration | PENDING |
-| 6 | Migrate to OAuth2 Resource Server (spring-boot-starter-oauth2-resource-server) | PENDING |
-| 7 | Gateway Token Relay (replace custom filter with Spring Security) | PENDING |
-| 8 | Rate limiting at Gateway (Redis-backed, token bucket) | PENDING |
-| 9 | OWASP security headers + secrets management (env vars) | PENDING |
-| 10 | E2E security integration tests (completes deferred Phase 7 Step 13) | PENDING |
+| 5 | Keycloak Docker setup + realm/client/role configuration | COMPLETE |
+| 6 | Migrate to OAuth2 Resource Server (spring-boot-starter-oauth2-resource-server) | COMPLETE |
+| 7 | Gateway Token Relay (replace custom filter with Spring Security) | COMPLETE |
+| 8 | Rate limiting at Gateway (Redis-backed, token bucket) | COMPLETE |
+| 9 | OWASP security headers + secrets management (env vars) | COMPLETE |
+| 10 | E2E security integration tests (completes deferred Phase 7 Step 13) | DEFERRED |
 
 ### Steps 1-4 Completion Summary (2026-06-18)
 
@@ -935,6 +935,102 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 | JDBC URLs broken in Docker | Used host port (9432) inside container network | Changed to internal port (5432) for container-to-container |
 | StockBackRewardConsumer retry loop | Portfolio-service missing SPRING_DATA_REDIS_HOST | Added SPRING_DATA_REDIS_HOST=redis to docker-compose |
 
+### Step 5 Completion Summary (2026-06-23)
+
+**Step 5 — Keycloak Docker Setup + Realm Configuration:**
+- Keycloak 26.0 (quay.io/keycloak/keycloak:26.0) added to docker-pets.yml, sharing PostgreSQL container (keycloak database)
+- equitycart-realm.json created: auto-imported via `--import-realm` on first boot
+  - 4 realm roles: CUSTOMER (default on registration), SELLER, ADMIN, SERVICE
+  - 3 clients: equitycart-gateway (confidential, auth-code + ROPC), equitycart-frontend (public, PKCE S256), equitycart-services (client-credentials)
+  - 2 protocol mappers per client: roles-mapper (flattens realm_access.roles → top-level `roles` claim), userId-mapper (user attribute → token claim)
+  - 3 test users: customer1/seller1/admin1 with pre-assigned roles and userId attributes mapping to database IDs 1/2/3
+  - Service account user: service-account-equitycart-services (gets SERVICE role for machine-to-machine tokens)
+- init-db.sh: added `CREATE DATABASE keycloak;`
+- start-pets.sh: OIDC discovery endpoint readiness check (replaces /health/ready which is on management port 9000)
+- Dual-mode architecture: Custom HS256 auth endpoints remain alongside Keycloak RS256 — services will accept EITHER issuer after Step 6
+
+**Obstacles:**
+- /health/ready not accessible on main port (8180) — Keycloak 24+ serves health on management port 9000; fixed by polling OIDC discovery endpoint instead
+- KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD deprecated in 26.x — replaced with KC_BOOTSTRAP_ADMIN_USERNAME/KC_BOOTSTRAP_ADMIN_PASSWORD
+- --import-realm only imports if realm doesn't exist (common gotcha: editing JSON and restarting does nothing)
+
+### Step 6 Completion Summary (2026-06-26)
+
+**Step 6 — OAuth2 Resource Server Migration (product-service first):**
+- Added `spring-boot-starter-oauth2-resource-server` to commons/build.gradle (api scope — transitive to all services)
+- Created `KeycloakJwtAuthenticationConverter` in security/impl/ — converts Spring's Jwt object to UsernamePasswordAuthenticationToken(Long userId, null, authorities), maintaining backward compat with `(Long) authentication.getPrincipal()`
+- Created `OAuth2ResourceServerConfig` in config/ — @ConditionalOnProperty(mode=oauth2), registers converter via `.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt.jwtAuthenticationConverter(...)))`
+- Modified `SecurityAutoConfig` condition from `enabled=true` to `mode=custom`
+- All service configs migrated: `equitycart.security.enabled: true` → `equitycart.security.mode: custom` (or `oauth2` for product-service)
+- application.yml: added `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` with env var override for Docker
+- docker-compose-services.yml: added `KEYCLOAK_JWKS_URI` env var for product-service pointing to Keycloak JWKS certs endpoint
+
+**Key design decisions:**
+- Used `jwk-set-uri` (not `issuer-uri`) to avoid issuer mismatch between Docker DNS (keycloak:8080) and token's iss claim (localhost:8180)
+- Dual-mode via @ConditionalOnProperty: services can be individually switched from custom→oauth2
+- Converter uses @Component (not defined as @Bean in config) for simplicity of dependency injection
+
+**Obstacles:**
+- Wrong Converter interface imported (Jackson's Converter vs Spring's Converter) — Jackson has getInputType/getOutputType; Spring's has single convert() method
+- Wrong JWT type imported (Nimbus JWT vs Spring Security Jwt) — Spring's Jwt is the decoded/validated token object
+- Tried registering converter as servlet Filter (.addFilterBefore) — converter is not a Filter, it's wired inside .oauth2ResourceServer() config
+- Duplicate `security:` key in YAML causing wrong property path (spring.security.security.oauth2... instead of spring.security.oauth2...)
+- issuer-uri vs jwk-set-uri confusion — issuer-uri validates iss claim (fails when Docker hostname differs from token's issuer); jwk-set-uri just fetches keys
+
+### Step 7 Completion Summary (2026-06-28)
+
+**Step 7 — Gateway Reactive OAuth2 (replace HS256 filter with Spring Security WebFlux):**
+- Created `api-gateway/.../config/SecurityConfig.java` — `@EnableWebFluxSecurity`, `SecurityWebFilterChain` with `oauth2ResourceServer()` reactive DSL; private `keycloakReactiveConverter()` returning `Mono<AbstractAuthenticationToken>` (required by WebFlux `flatMap` composition)
+- Gateway now validates RS256 tokens via `NimbusReactiveJwtDecoder` auto-configured from `jwk-set-uri` in api-gateway.yml
+- Token forwarded unchanged via `ProxyExchange` to downstream services (defense in depth — services validate independently)
+
+**Bugs resolved**:
+- `JwtValidationGatewayFilter @Component`: HS256 filter ran before `SecurityWebFilterChain`, rejected all RS256 tokens → fix: commented out `@Component` (line 65)
+- `JwtAuthenticationFilter @Component`: Spring Boot's `FilterRegistrationBean` auto-registered it as standalone servlet filter in all services → double-validation in oauth2 mode → fix: commented out `@Component` (line 57)
+
+**Key concepts**: `SecurityWebFilterChain` (reactive) vs `SecurityFilterChain` (servlet) — completely separate infrastructure; `ReactiveSecurityContextHolder` uses Reactor Context (not ThreadLocal — event loop thread serves many requests)
+
+### Step 8 Completion Summary (2026-06-29)
+
+**Step 8 — Rate Limiting at Gateway (Redis token bucket):**
+- Created `api-gateway/.../config/RateLimiterConfig.java` — `@Bean KeyResolver userKeyResolver()`; extracts userId from `ReactiveSecurityContextHolder` for authenticated; `.defaultIfEmpty(remoteAddress)` falls back to IP for anonymous requests (brute-force protection on login endpoint)
+- api-gateway.yml: `RequestRateLimiter` default-filter — `replenishRate: 10`, `burstCapacity: 20`, `key-resolver: "#{@userKeyResolver}"` (SpEL bean reference)
+- Redis Lua script: atomic check-and-decrement prevents race condition across multiple gateway instances
+
+### Step 9 Completion Summary (2026-06-30)
+
+**Step 9 — OWASP Security Headers:**
+- Created `api-gateway/.../filter/SecurityHeadersGlobalFilter.java` — `@Component GlobalFilter` at `LOWEST_PRECEDENCE`; `chain.filter(exchange).then(Mono.fromRunnable(...))` sets 6 OWASP headers after downstream response arrives but before Netty flushes
+- Headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Strict-Transport-Security: max-age=31536000`, `Content-Security-Policy: default-src 'self'`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`
+- Bug found and fixed: missing `@Component` → `GatewayAutoConfiguration` never collected the bean → headers never sent
+
+### Phase 8 Complete — Architecture
+
+```
+Browser / Postman (Authorization: Bearer <Keycloak RS256 token>)
+    │
+    ▼
+API Gateway (port 8080, Netty/WebFlux)
+    ├── SecurityWebFilterChain (@EnableWebFluxSecurity)
+    │   ├── NimbusReactiveJwtDecoder → JWKS → RS256 validation → userId + roles
+    │   └── AuthorizationWebFilter → /api/auth/** permit, rest authenticated
+    ├── RequestRateLimiter → Redis token bucket (10 req/sec per userId, per IP anon)
+    ├── SecurityHeadersGlobalFilter → 6 OWASP headers on every response
+    └── ProxyExchange → downstream (Authorization: Bearer forwarded unchanged)
+        │
+        ▼
+    Service (port 8081-8087, Tomcat/Servlet)
+        ├── mode=oauth2: BearerTokenAuthenticationFilter + NimbusJwtDecoder (servlet)
+        │   └── KeycloakJwtAuthenticationConverter → SecurityContextHolder
+        ├── mode=custom: JwtAuthenticationFilter (JJWT HS256) → SecurityContextHolder
+        ├── FeignAuthorizationInterceptor → propagates token to Feign calls
+        └── @PreAuthorize → RBAC (requires @EnableMethodSecurity)
+```
+
+### Phase 8 Remaining
+- [ ] Unit + Integration tests with Testcontainers (deferred to Phase 9+ maintenance period)
+- [ ] ServiceTokenProvider → Keycloak Client Credentials migration (latent: HS256 service tokens fail on oauth2-mode services when called from Kafka consumer → Feign fallback path)
+
 ## Phase Checklist
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
@@ -944,7 +1040,7 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 - [~] Phase 5: Portfolio & Stock-Back Engine (Weeks 10-12) — FUNCTIONAL COMPLETE (reward grant deferred to Phase 6)
 - [x] Phase 6: Event-Driven Architecture (Weeks 13-15) — COMPLETE
 - [x] Phase 7: Microservices Decomposition (Weeks 16-18) — COMPLETE (E2E testing deferred to Phase 8)
-- [ ] Phase 8: Security Hardening (Weeks 19-20) — IN PROGRESS
+- [x] Phase 8: Security Hardening (Weeks 19-20) — COMPLETE (E2E integration tests deferred)
 - [ ] Phase 9: Observability (Weeks 21-22)
 - [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
 
@@ -998,4 +1094,5 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 - **2026-06-09**: Phase 7 Step 10 COMPLETE — OpenFeign migration. ProductFeignClient (4 methods) + BrandTickerMappingDTO + ProductDTO in commons. OrderFeignClient in portfolio module (cannot go in commons — circular dependency via order-service types). SellToSpendServiceImpl + SagaOrchestrator migrated from OrderService → OrderFeignClient. StockBackRewardConsumer migrated from ProductRepository → ProductFeignClient. Two startup errors debugged: (1) @ComponentScan("com.equitycart.order") loaded OrderServiceImpl which now requires ProductFeignClient — fix: remove order from @ComponentScan; (2) OutboxEventRepository proxy removed too aggressively — fix: keep order in @EnableJpaRepositories + @EntityScan. All 8 services UP on Eureka. Javadoc added to all uncommitted files. openfeign-guide.md created (12 sections). Q131–Q138 added to learning_log.md. Next: Step 11 — Correlation ID propagation. Same clean extraction pattern as ledger-service: `@EntityScan` for BaseEntity, no cross-module `@ComponentScan`. Key insights: product-service extraction deferred to Phase 10 (consumers must migrate to Feign first); saga strategy and timeout properties correctly omitted — `matchIfMissing=true` makes saga default-active, `@Value` inline `:30` default removes need for YAML entry. Q129–Q130 added. Next: Step 10 — OpenFeign clients.
 - **2026-06-10**: Phase 7 Step 11 COMPLETE — Correlation ID propagation. Three components: (1) MdcCorrelationFilter (OncePerRequestFilter in commons, ThreadContext put/remove lifecycle); (2) FeignCorrelationInterceptor (Feign RequestInterceptor, propagates ID to downstream Feign calls); (3) CorrelationIdGatewayFilter (GlobalFilter + Ordered in api-gateway, generates UUID at entry point, mutates immutable WebFlux exchange). Replaced org.slf4j.MDC with org.apache.logging.log4j.ThreadContext (Log4j2 native, no SLF4J bridge). Debugged: default-filters YAML approach fails (SpEL evaluated at startup + wrong direction); OrderedGatewayFilter inheritance wrong (wrapper for route-level filter, not GlobalFilter). mdc-correlation-guide.md created (line-by-line filter explanation, GlobalFilter vs default-filters, Netty vs Tomcat filter types, Correlation ID vs TraceId/SpanId). Javadoc on all 3 files + GatewayApplication updated. Next: Step 12 — Docker Compose.
 - **2026-06-12**: Phase 7 Step 12 COMPLETE — Docker Compose full stack. Two-file split: docker-pets.yml (infra) + docker-compose-services.yml (10 Spring Boot services). Start scripts with readiness polling. build-images.sh for all 10 images. Config pattern: `${ENV_VAR:local-default}` in equitycart-config works in both environments. Debugging sessions: (1) Kafka AccessDeniedException → `user: "0"`; (2) INVALID_REPLICATION_FACTOR → single-broker env vars; (3) ConfigClientFailFastException → placeholder in spring.config.import; (4) Eureka registration with Hyper-V hostname → `prefer-ip-address: true` (without explicit ip-address); (5) Git Bash MINGW64 path mangling → `sh -c '...'` wrapper; (6) Config-server DNS failure → `refresh-rate: 3600` (local cache still serves). Key learnings: spring.config.import is ADDITIVE (merges, doesn't override), config-server serves placeholders (client resolves), Docker DNS resolves service names on custom bridge networks, port mapping bridges host↔container worlds. All 10 services UP in Eureka, gateway routing verified. Next: Step 13 — End-to-end testing + re-audit.
+- **2026-06-23**: Phase 8 Step 5 COMPLETE — Keycloak Docker setup. Added Keycloak 26.0 (quay.io) to docker-pets.yml sharing existing PostgreSQL container. Created equitycart-realm.json: 4 realm roles (CUSTOMER/SELLER/ADMIN/SERVICE), 3 OAuth2 clients (equitycart-gateway confidential, equitycart-frontend public+PKCE, equitycart-services client-credentials), protocol mappers (roles flattener + userId attribute for backward compat), 3 test users with pre-assigned roles. Updated init-db.sh (+keycloak DB), start-pets.sh (OIDC discovery readiness check). Obstacles: (1) /health/ready on separate management port 9000, fixed by checking OIDC discovery endpoint instead; (2) KEYCLOAK_ADMIN deprecated in 26.x, replaced with KC_BOOTSTRAP_ADMIN_USERNAME; (3) --import-realm only runs on first boot (realm doesn't exist yet). Keycloak admin console accessible at http://localhost:8180. Token acquisition verified via ROPC flow. Conceptual foundation written to security-reference.md Section 13 (OAuth2/OIDC/Keycloak history, flows, RS256, JWKS, competitors). Next: Step 6 — OAuth2 Resource Server migration.
 - **2026-06-18**: Phase 8 Steps 1-4 COMPLETE — Per-service JWT validation distributed to all services via commons SecurityAutoConfig. 13 obstacles resolved during E2E testing: ReadOnlyHttpHeaders (ServerHttpResponseDecorator), PATCH unsupported (feign-hc5), Kafka consumer 403 (ServiceTokenProvider with subject=0, role=[SERVICE], 60s expiry), anyRequest() terminal matcher bug, Zscaler TLS interception (keytool CA import in Dockerfile), Docker port mapping (9432:5432), config migration gap (sell-to-spend strategy), .gitignore path resolution. Full business flow verified end-to-end: Register → Login → Browse → Cart → Order → Deliver → Stock-Back Reward → Vest → Trade → Sell-to-Spend. All 10 services running in Docker with auth enforced. Documentation updated: security-reference.md (Sections 11-12), microservice-patterns.md (Sections 12-13), springboot-reference.md (Sections 11-13), learning_log.md (Q155-Q163). Javadoc updated on ServiceTokenProvider, ServiceTokenProviderImpl, FeignAuthorizationInterceptor, SecurityAutoConfig, CorrelationIdGatewayFilter, Dockerfile. Next: Step 5 — Keycloak Docker setup.

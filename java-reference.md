@@ -741,21 +741,60 @@ The interface LOOKS like a collection (`findBy...`, `save()`, `delete()`), but u
 
 ---
 
-### 2.12 Pattern Summary Table
+### 2.12 Chain of Responsibility Pattern — Security Filter Chains
 
-| Pattern         | Category   | Where Used                         | Key Benefit                       |
-| --------------- | ---------- | ---------------------------------- | --------------------------------- |
-| Strategy        | Behavioral | Notification channels              | Runtime algorithm swap            |
-| Observer        | Behavioral | Kafka Pub/Sub notifications        | Decoupled event reactions         |
-| Facade          | Structural | PortfolioFacade                    | Simplified controller interface   |
-| Builder         | Creational | Entity/DTO construction (@Builder) | Readable multi-field construction |
-| State           | Behavioral | OrderStatus, SagaStatus enums      | Enforced valid transitions        |
-| Decorator       | Structural | Resilience4j annotation stacking   | Layered cross-cutting concerns    |
-| Template Method | Behavioral | Spring Batch chunk processing      | Framework controls skeleton       |
-| Repository      | Domain     | Spring Data JPA interfaces         | Collection-like data access       |
-| Singleton       | Creational | All Spring beans (default scope)   | One instance, DI-managed          |
-| Saga            | Enterprise | SellToSpendSagaOrchestrator        | Distributed transaction recovery  |
-| Outbox          | Enterprise | OutboxEvent + OutboxPoller         | Reliable event publishing         |
+**Intent (GoF):** Pass a request along a chain of handlers. Each handler decides whether to process the request or pass it to the next handler.
+
+**EquityCart implementation (Phase 8):**
+
+Both the Servlet and WebFlux stacks implement Chain of Responsibility for security processing:
+
+```
+Servlet SecurityFilterChain (each service — order, product, etc.):
+    Request
+      → CorrelationIdFilter       (sets MDC)
+      → JwtAuthenticationFilter   (validates HS256 / OR)
+      → BearerTokenAuthFilter     (validates RS256 via JWKS)
+      → AuthorizationFilter       (checks roles)
+      → DispatcherServlet         (controller)
+    Each filter: process own concern → call chain.doFilter() to pass forward
+    OR: set response + return WITHOUT calling chain.doFilter() to SHORT-CIRCUIT
+
+WebFlux SecurityWebFilterChain (API Gateway):
+    Request
+      → NettyRoutingFilter        (reactive routing)
+      → WebFilterChainProxy       (Spring Security entry point)
+        → AuthenticationWebFilter (validates RS256 token via JWKS)
+        → AuthorizationWebFilter  (checks authenticated)
+        → GatewayFilterAdapter    (route-specific filters)
+    Each WebFilter: process → return chain.filter(exchange) to continue
+    OR: return Mono.error(new ResponseStatusException(401)) to SHORT-CIRCUIT
+```
+
+**Key difference from GoF:** In GoF's original pattern, each handler EITHER processes OR passes (not both). In Spring's filter chains, each handler BOTH processes (e.g., sets MDC) AND passes (calls `chain.doFilter()`). Security filters additionally SHORT-CIRCUIT by NOT calling the next handler.
+
+**Why it matters for security:** The ordering within the chain is critical. If authentication runs after authorization, authorization always fails (no identity yet). If the custom HS256 filter runs before `BearerTokenAuthenticationFilter`, RS256 tokens are rejected before they can be validated by the correct handler. Order determines correctness.
+
+**Best Practice:** In Spring Security, do not guess filter order. Use `http.addFilterBefore()` / `http.addFilterAfter()` / `http.addFilterAt()` with explicit reference to known filter positions (e.g., `UsernamePasswordAuthenticationFilter.class`). Never rely on `@Order` alone for security filters within the SecurityFilterChain.
+
+---
+
+### 2.13 Pattern Summary Table
+
+| Pattern               | Category   | Where Used                                              | Key Benefit                            |
+| --------------------- | ---------- | ------------------------------------------------------- | -------------------------------------- |
+| Strategy              | Behavioral | Notification channels                                   | Runtime algorithm swap                 |
+| Observer              | Behavioral | Kafka Pub/Sub notifications                             | Decoupled event reactions              |
+| Facade                | Structural | PortfolioFacade                                         | Simplified controller interface        |
+| Builder               | Creational | Entity/DTO construction (@Builder)                      | Readable multi-field construction      |
+| State                 | Behavioral | OrderStatus, SagaStatus enums                           | Enforced valid transitions             |
+| Decorator             | Structural | Resilience4j stacking, ServerHttpResponseDecorator      | Layered cross-cutting concerns         |
+| Template Method       | Behavioral | Spring Batch chunk processing                           | Framework controls skeleton            |
+| Repository            | Domain     | Spring Data JPA interfaces                              | Collection-like data access            |
+| Singleton             | Creational | All Spring beans (default scope)                        | One instance, DI-managed               |
+| Saga                  | Enterprise | SellToSpendSagaOrchestrator                             | Distributed transaction recovery       |
+| Outbox                | Enterprise | OutboxEvent + OutboxPoller                              | Reliable event publishing              |
+| Chain of Responsibility | Behavioral | SecurityFilterChain, SecurityWebFilterChain (Phase 8) | Ordered security processing, short-circuit on auth failure |
 
 ---
 

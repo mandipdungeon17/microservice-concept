@@ -4659,3 +4659,139 @@ A: Always the INTERNAL (container) port. `ports: "9432:5432"` maps host:9432 →
 **Q163: "Config migration gap — why did sell-to-spend default to transactional instead of saga?" (2026-06-18)**
 
 A: When extracting from monolith to microservices, the property `equitycart.sell-to-spend.strategy=saga` lived in `app/src/main/resources/application.yml`. After extraction, portfolio-service reads from Config Server's `portfolio-service.yml` — which never received this property. The implementation used `@ConditionalOnProperty(name="equitycart.sell-to-spend.strategy", havingValue="saga", matchIfMissing=true)` for the transactional bean — so missing property activated the WRONG implementation silently. Fix: add the property to Config Server YAML, push to Git. Prevention: never use `matchIfMissing=true` on a property that selects between competing implementations.
+
+---
+
+### Phase 8 Step 5: Keycloak Docker Setup — Learnings (2026-06-23)
+
+**Objective:** Run Keycloak 26.0 as Identity Provider in Docker, configure equitycart realm with roles, clients, protocol mappers, and test users for upcoming OAuth2 Resource Server migration.
+
+**Key Deliverables:**
+- docker-pets.yml: Keycloak container (quay.io, port 8180, shared PostgreSQL, realm import volume mount)
+- init-db.sh: keycloak database added
+- equitycart-realm.json: complete realm export (roles, 3 clients, mappers, test users)
+- start-pets.sh: OIDC discovery readiness polling
+
+**Q164: "Why does Keycloak's /health/ready not work on the main HTTP port (8180)?" (2026-06-23)**
+
+A: Starting from Keycloak 24.x, health/metrics/readiness endpoints are served on a separate **management interface** (default port 9000). This is a security design: internal observability endpoints should not be exposed on the same port that serves user-facing login pages and token endpoints. Even with `KC_HEALTH_ENABLED=true`, health lives on port 9000 inside the container. Workaround for readiness checks: poll the OIDC discovery endpoint (`/realms/equitycart/.well-known/openid-configuration`) on the main port — it only responds after Keycloak is fully started AND the realm was imported successfully.
+
+**Q165: "KEYCLOAK_ADMIN is deprecated in Keycloak 26.x — what replaced it and why?" (2026-06-23)**
+
+A: Keycloak 26.x unified all environment variables under the `KC_` prefix for consistency. `KEYCLOAK_ADMIN` → `KC_BOOTSTRAP_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD` → `KC_BOOTSTRAP_ADMIN_PASSWORD`. The word "bootstrap" clarifies that this is a **first-boot-only** admin. Once Keycloak's database has persistent state, this env var is ignored (admin credentials live in the database). Old vars still work (backward compat) but emit deprecation warnings.
+
+**Q166: "--import-realm only runs on first boot — how do you update realm config after changes?" (2026-06-23)**
+
+A: `--import-realm` reads from `/opt/keycloak/data/import/` and imports ONLY if the realm doesn't already exist in the database. After the first successful import, the database is the source of truth. To re-import after JSON changes: (1) Delete realm via admin console (safest), (2) Drop and recreate the keycloak database (`DROP DATABASE keycloak; CREATE DATABASE keycloak;` then restart container), or (3) `docker compose down -v` (nuclear — wipes all volumes). The JSON file is a seed script, not a live config source.
+
+**Q167: "What is the difference between a Confidential client and a Public client in OAuth2?" (2026-06-23)**
+
+A: The distinction is about **where the client code runs** and whether it can keep a secret: (1) **Confidential** (server-side apps like api-gateway): can securely store a client_secret in server memory. Proves identity to Keycloak using clientId + secret. (2) **Public** (browser SPAs, mobile apps): runs in an environment users control — anyone can decompile/View Source and extract secrets. Gets NO secret. Uses PKCE (Proof Key for Code Exchange) instead — a per-request cryptographic challenge that proves the same instance that started auth is finishing it, without a stored secret.
+
+**Q168: "Why do protocol mappers exist — can't services just read Keycloak's default token structure?" (2026-06-23)**
+
+A: Keycloak's default token structure nests roles inside `realm_access.roles` (object) and uses UUID as `sub` (subject). But existing code reads `claims.get("roles", List.class)` (top-level array) and `Long.parseLong(claims.getSubject())` (numeric sub). Without mappers, roles return null and sub parsing throws NumberFormatException. Protocol mappers transform token structure at issuance time: the `oidc-usermodel-realm-role-mapper` flattens roles to top-level, and `oidc-usermodel-attribute-mapper` injects a custom `userId` claim from user attributes. This enables zero-code-change migration — controllers don't need to know whether the token came from custom auth or Keycloak.
+
+**Q169: "What is the defaultRole mechanism in Keycloak and when does it apply?" (2026-06-23)**
+
+A: Keycloak's `defaultRole` is a composite role (a role containing other roles) that is automatically assigned to every NEW user at registration time. In the realm JSON, `"defaultRole": {"name": "default-roles-equitycart", "composites": {"realm": ["CUSTOMER"]}}` means every self-registered user gets CUSTOMER automatically. It does NOT retroactively modify existing users or override explicit role assignments. Users who need SELLER or ADMIN must be promoted by an administrator (via admin console or Admin REST API). This implements principle of least privilege — start with minimal access, elevate intentionally.
+
+**Q170: "serviceAccountRealmRoles on the client object — why doesn't it work?" (2026-06-23)**
+
+A: `serviceAccountRealmRoles` is NOT a field in Keycloak's `ClientRepresentation` schema. Keycloak silently ignores unknown JSON fields during import. The correct way to assign roles to a service account: define the service account USER in the `users` array with `"serviceAccountClientId": "equitycart-services"` and `"realmRoles": ["SERVICE"]`. When Keycloak sees `serviceAccountClientId` on a user, it links that user as the service account backing that client. The username must follow the pattern `service-account-<clientId>`.
+
+---
+
+### Phase 8 Step 6: OAuth2 Resource Server Migration (2026-06-26)
+
+**Concepts covered:** spring-boot-starter-oauth2-resource-server, NimbusJwtDecoder, JwtAuthenticationConverter, jwk-set-uri vs issuer-uri, BearerTokenAuthenticationFilter, dual-mode security config, @ConditionalOnProperty switching.
+
+**Files created/modified:**
+- commons/build.gradle: added `api 'spring-boot-starter-oauth2-resource-server'`
+- commons/.../security/impl/KeycloakJwtAuthenticationConverter.java: Converter<Jwt, AbstractAuthenticationToken>
+- commons/.../config/OAuth2ResourceServerConfig.java: @ConditionalOnProperty(mode=oauth2) SecurityFilterChain
+- commons/.../config/SecurityAutoConfig.java: condition changed to mode=custom
+- equitycart-config/application.yml: jwk-set-uri added
+- equitycart-config/product-service.yml: mode=oauth2 (first service migrated)
+- All other service configs: enabled=true → mode=custom
+- docker-compose-services.yml: KEYCLOAK_JWKS_URI env var for product-service
+
+**Q171: "What is the difference between issuer-uri and jwk-set-uri in Spring OAuth2 Resource Server?" (2026-06-26)**
+
+A: `issuer-uri` = the realm base URL (e.g., `http://keycloak:8080/realms/equitycart`). Spring fetches `{issuer-uri}/.well-known/openid-configuration`, auto-discovers the JWKS endpoint, AND validates that every token's `iss` claim matches this URL exactly. `jwk-set-uri` = the direct JWKS certs URL (e.g., `.../protocol/openid-connect/certs`). Spring fetches keys from there directly — no auto-discovery, no issuer validation. Use `jwk-set-uri` in dev when the issuer URL differs between Docker internal DNS and the token's actual `iss` value. Use `issuer-uri` in production for the extra security of issuer validation.
+
+**Q172: "Why did importing com.fasterxml.jackson.databind.util.Converter break the authentication converter?" (2026-06-26)**
+
+A: There are multiple `Converter` interfaces on the classpath. Jackson's Converter requires `getInputType()` and `getOutputType()` (for JSON type conversion) — it's for data serialization. Spring's `org.springframework.core.convert.converter.Converter<S,T>` has a single `T convert(S source)` method — it's for object transformation. Spring Security's BearerTokenAuthenticationFilter expects `Converter<Jwt, AbstractAuthenticationToken>` (Spring Core's interface). Using Jackson's Converter compiles but produces a class that Spring Security's infrastructure can't invoke correctly.
+
+**Q173: "Why can't you register the JwtAuthenticationConverter as a servlet Filter?" (2026-06-26)**
+
+A: A Converter transforms data (Jwt → Authentication). A Filter intercepts HTTP requests. They serve different roles in the processing pipeline. Spring's `BearerTokenAuthenticationFilter` is the actual Filter — it (1) extracts the Bearer token, (2) delegates to JwtDecoder for validation, (3) calls YOUR converter to build the Authentication, (4) sets SecurityContext. The converter is called INSIDE the filter, not alongside it. `.addFilterBefore(converter, ...)` fails because Converter doesn't implement `jakarta.servlet.Filter`.
+
+**Q174: "What does NimbusJwtDecoder do internally when it receives a token?" (2026-06-26)**
+
+A: (1) Parse the JWT header (base64 decode first segment) → extract `alg` (RS256) and `kid` (key ID). (2) Look up `kid` in its in-memory JWKS cache. If not found → fetch keys from jwk-set-uri endpoint, update cache, retry lookup. (3) Use the RSA public key to validate the signature: decrypt signature bytes with public key → compare with SHA-256 hash of `header.payload`. Match = token was signed by the private key holder (Keycloak). (4) Validate `exp` claim (with 60s clock skew tolerance). (5) Return Spring's `Jwt` object containing all decoded claims.
+
+**Q175: "What happens if Keycloak is down when a service starts vs when a service validates a token?" (2026-06-26)**
+
+A: At startup with `issuer-uri`: service fails to start (BeanCreationException — can't fetch OIDC discovery). With `jwk-set-uri`: service starts successfully (JwtDecoder bean is created with the URL configured, but doesn't fetch keys until first token arrives). At validation time with warm cache: tokens with known `kid` validate fine (no network call needed — keys are cached). With cold cache or unknown `kid`: validation fails with JwtException → 401 returned. Keycloak downtime doesn't break validation of tokens signed with already-cached keys.
+
+**Q176: "How does key rotation work with NimbusJwtDecoder's caching?" (2026-06-26)**
+
+A: Keycloak generates new RSA key pair → new tokens get `kid: "newKey123"` in header → service receives new token → NimbusJwtDecoder looks up "newKey123" in cache → NOT FOUND → fetches JWKS endpoint → new keys now in cache alongside old keys → validates new token. Old tokens (with old kid) still validate because the old key remains in JWKS and cache. Zero-downtime, zero-restart, zero-config-change rotation. The service auto-heals by re-fetching on unknown kid.
+
+**Q177: "Your converter returns UsernamePasswordAuthenticationToken — why not a custom token type?" (2026-06-26)**
+
+A: All existing controller code does `(Long) authentication.getPrincipal()`. `UsernamePasswordAuthenticationToken` accepts any Object as principal (first constructor arg). A custom token type would require changing the cast in every controller. The 3-arg constructor (principal, credentials, authorities) automatically marks `isAuthenticated()=true`. It's the same token type the custom JwtAuthenticationFilter already creates — zero controller changes.
+
+**Q178: "Both KeycloakJwtAuthenticationConverter (@Component) and JwtAuthenticationFilter (@Component) exist as beans simultaneously — isn't that a conflict?" (2026-06-26)**
+
+A: No. `@Component` creates the bean in the ApplicationContext regardless of which security mode is active. But the `@ConditionalOnProperty` on the CONFIG classes controls which SecurityFilterChain is built. In `mode=custom`: SecurityAutoConfig creates a filter chain that uses JwtAuthenticationFilter. KeycloakJwtAuthenticationConverter exists as an unused bean — it's never called. In `mode=oauth2`: OAuth2ResourceServerConfig creates a filter chain that uses the converter. JwtAuthenticationFilter exists unused. Orphan beans with no side effects are harmless.
+
+---
+
+## Phase 8 Steps 7-9 — Gateway Reactive OAuth2, Rate Limiting, OWASP Headers (2026-07-01)
+
+**Q179: "Why can't you use `SecurityFilterChain` and `HttpSecurity` in the API Gateway?"**
+
+A: The API Gateway runs on Netty (non-blocking I/O) via Spring WebFlux, not on Tomcat (blocking, thread-per-request). `SecurityFilterChain` is a servlet abstraction — it depends on `javax.servlet.Filter`. Netty has no servlet container, so there's no servlet lifecycle to attach a `Filter` to. The WebFlux equivalent is `SecurityWebFilterChain` (built with `ServerHttpSecurity`). Trying to inject `HttpSecurity` in a WebFlux app results in `NoSuchBeanDefinitionException` at startup because no `HttpSecurity` bean is auto-configured without a servlet container.
+
+**Q180: "What is the difference between SecurityContextHolder and ReactiveSecurityContextHolder?"**
+
+A: `SecurityContextHolder` stores the `SecurityContext` in a `ThreadLocal`. Each request runs on its own dedicated thread; the context is available anywhere on that thread by calling `SecurityContextHolder.getContext()`. In a reactive app, a single request can be processed by many different threads (one for JWKS fetch, another for downstream HTTP, another for the response). ThreadLocal would be empty on every thread except the one that set it. `ReactiveSecurityContextHolder` stores the context in Reactor's `Context` — a key-value map that is automatically propagated through the reactive pipeline (via `Mono.contextWrite` / `Mono.deferContextual`), regardless of which thread each operator runs on.
+
+**Q181: "Why does the gateway's JWT converter return `Mono<AbstractAuthenticationToken>` while the service converter returns `AbstractAuthenticationToken`?"**
+
+A: Spring Security's WebFlux `AuthenticationWebFilter` is built for reactive pipelines. Internally it calls `.flatMap(converter::convert)` — `flatMap` requires a `Mono` return type to chain with the next reactive step. If you returned a raw `AbstractAuthenticationToken`, there's no `Mono` to `flatMap` on. The conversion itself is synchronous (no I/O), but the reactive contract requires wrapping in `Mono.just(...)`. The servlet equivalent (`BearerTokenAuthenticationFilter`) is synchronous throughout — no `Mono` needed.
+
+**Q182: "What is `@EnableWebFluxSecurity` and what does it activate?"**
+
+A: `@EnableWebFluxSecurity` is the trigger annotation for Spring Security's WebFlux infrastructure. It activates: `WebFilterChainProxy` (the reactive entry point — collects all `SecurityWebFilterChain` beans and delegates each `ServerWebExchange` to the matching chain), `ReactiveAuthenticationManager` infrastructure, and `ReactiveSecurityContextHolder` context propagation. Without it, no `SecurityWebFilterChain` bean is registered, and all requests bypass authentication. `@EnableMethodSecurity` is NOT used at the gateway — the gateway has no controllers with `@PreAuthorize` annotations.
+
+**Q183: "How does the token bucket rate limiting algorithm compare to a fixed window counter?"**
+
+A: A fixed window counter resets to 0 at hard time boundaries (e.g., every 60 seconds). An attacker can exploit the boundary: 1000 requests at t=59s then 1000 more at t=61s — both windows allow 1000 each, so 2000 requests hit in 2 seconds. Token bucket refills continuously at `replenishRate` tokens/second. You can only ever consume `burstCapacity` tokens at once regardless of timing — no boundary exploitation. Redis stores tokens and timestamp; the Lua script computes elapsed time, calculates tokens to add (`elapsed * replenishRate`), caps at `burstCapacity`, then subtracts the requested tokens atomically.
+
+**Q184: "Why does the rate limiter use a Redis Lua script instead of two separate Redis commands?"**
+
+A: Two separate commands (GET tokens + SET tokens - 1) create a race condition in a distributed system. Thread A reads tokens=1, allows the request. Before A decrements, Thread B also reads tokens=1, also allows. Both decrement: tokens goes to -1. Two requests were served when only one token was available. A Redis Lua script runs entirely on the Redis server atomically — no other command executes between the read and write. Even with multiple gateway instances, the Lua script is the single source of truth. Redis guarantees single-threaded execution of each Lua script call.
+
+**Q185: "What happens to rate limiting when the authenticated user's SecurityContext isn't populated yet?"**
+
+A: `RequestRateLimiter` runs AFTER `SecurityWebFilterChain` in the filter chain. For paths matching `permitAll()` (like `/api/auth/**`), `AuthenticationWebFilter` skips authentication — `ReactiveSecurityContextHolder` remains empty. The `userKeyResolver` calls `ReactiveSecurityContextHolder.getContext()` → empty `Mono` → `defaultIfEmpty(ipAddress)` fallback triggers. Login attempts are rate-limited per IP address — which is exactly the right behavior for brute-force protection.
+
+**Q186: "What was the `@Component` bug on SecurityHeadersGlobalFilter and how would you diagnose it in prod?"**
+
+A: The class implemented `GlobalFilter` but had no `@Component` annotation. Spring Boot's component scan never discovered it → no bean created in `ApplicationContext`. Spring Cloud Gateway's `GatewayAutoConfiguration` collects all `GlobalFilter` beans at startup — since no bean existed, the filter was never registered. OWASP headers were never added to any response. Diagnosis: `curl -I http://gateway/api/products | grep -i x-frame` → header absent. Confirmation: `GET /actuator/beans` → search for `securityHeadersGlobalFilter` → absent from bean list. Fix: add `@Component`.
+
+**Q187: "Why do you add security headers at the gateway instead of each downstream service?"**
+
+A: One filter → seven services protected simultaneously. If you implemented headers in each service: seven files to update every time a header changes, seven places for a missing import or typo to cause a security gap, and inconsistent headers (one service updated, others not). The gateway is the single HTTP exit point for all downstream traffic — setting headers there is a guaranteed "every response gets this" guarantee. Services also typically return JSON APIs; browser security headers only matter at the network boundary where a browser might be reading the response.
+
+**Q188: "Explain the `chain.filter(exchange).then(Mono.fromRunnable())` pattern and why you don't set headers before calling chain.filter()."**
+
+A: `chain.filter(exchange)` executes the entire downstream chain (auth, routing, proxying to the service) and returns a `Mono<Void>` that completes when the response is fully received from the downstream service. `.then(Mono.fromRunnable(...))` subscribes AFTER that `Mono` completes — meaning after the downstream response has arrived at the gateway but BEFORE Netty has flushed the bytes to the client. At this point, `exchange.getResponse().getHeaders()` is the mutable header map. Setting headers here inserts them into the response that Netty is about to flush. If you set headers BEFORE `chain.filter()`, downstream processing might reset or override them. Setting them AFTER ensures they're the last modification before the wire flush.
+
+**Q189: "How does `@Component` behave differently on a WebFlux GlobalFilter vs a Servlet OncePerRequestFilter?"**
+
+A: On a servlet `OncePerRequestFilter`: Spring Boot registers any `@Component`-annotated `Filter` as a real servlet filter via `FilterRegistrationBean`. This registration is OUTSIDE the `SecurityFilterChain`. The filter runs on every request regardless of which security mode is active. This caused a conflict: in `mode=oauth2`, the `JwtAuthenticationFilter` still ran as a standalone filter alongside Spring Security's `BearerTokenAuthenticationFilter`. Fix: remove `@Component` so it's only instantiated as a bean when explicitly wired into `SecurityAutoConfig`. On a WebFlux `GlobalFilter`: `@Component` only registers the bean; Spring Cloud Gateway's `GatewayAutoConfiguration` collects all `GlobalFilter` beans at startup and adds them to the global chain. No separate `FilterRegistrationBean` concept. If the bean exists → it's in the chain. If not → absent.

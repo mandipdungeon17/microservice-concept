@@ -75,6 +75,25 @@ services:
       - 1025:1025
       - 8025:8025
 
+  keycloak:
+    container_name: keycloak
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    depends_on:
+      - postgres
+    ports:
+      - 8180:8080
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=admin
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
+      - KC_DB_USERNAME=postgres
+      - KC_DB_PASSWORD=postgres
+      - KC_HEALTH_ENABLED=true
+    volumes:
+      - ./keycloak/equitycart-realm.json:/opt/keycloak/data/import/equitycart-realm.json:ro
+
 volumes:
   postgres-data:
   kafka-data:

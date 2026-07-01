@@ -1088,38 +1088,39 @@ Why externalize routes?
 └────────────────────────────────────────────────────────────┘
 ```
 
-### 4.13 Security at the Gateway Level (Current and Future)
+### 4.13 Security at the Gateway Level — Phase 8 Complete
 
-**Current state (Phase 7):** The gateway performs NO authentication. All requests pass through to downstream services. Security relies on network isolation (Docker bridge — only port 8080 is exposed to the host).
+**Phase 7 state:** The gateway performed NO authentication. All requests passed through to downstream services. Security relied on network isolation (Docker bridge — only port 8080 exposed to host).
 
-**Phase 8 plan — JWT validation at the gateway:**
+**Phase 8 implementation — full security stack at gateway:**
 
 ```
-CURRENT (Phase 7): No auth at gateway
-  Client → Gateway → downstream (no token check anywhere)
-
-PHASE 8: Gateway validates JWT before routing
-  Client → Gateway [AuthFilter: validate JWT, extract userId]
-    → VALID: forward to downstream with X-User-Id header
-    → INVALID: return 401 immediately (request never reaches downstream)
-
-Benefits:
-  - Downstream services trust X-User-Id header (no JWT parsing needed per service)
-  - Invalid requests rejected at the edge (saves downstream resources)
-  - Token validation logic exists in ONE place (not duplicated across 7 services)
-  - Can implement different auth rules per route (public vs protected)
+Client (Authorization: Bearer <RS256 token>)
+    │
+    ▼
+API Gateway (Netty/WebFlux)
+    ├── SecurityWebFilterChain (@EnableWebFluxSecurity)
+    │   ├── NimbusReactiveJwtDecoder → JWKS → RS256 validation
+    │   └── AuthorizationWebFilter → /api/auth/** permit, else authenticated
+    ├── RequestRateLimiter → Redis token bucket (10/sec per user, per IP anon)
+    ├── SecurityHeadersGlobalFilter → 6 OWASP headers on every response
+    └── ProxyExchange → Authorization header forwarded unchanged
+        → Downstream services re-validate independently (defense in depth)
 ```
 
-### 4.14 Gateway Patterns for Future Phases
+**Why each service ALSO validates (not just the gateway):**
+- Direct port access (debug tools, internal services, misconfiguration) bypasses the gateway
+- Defense in depth: attacker compromising the gateway doesn't gain access to service data
+- Zero-trust: services never assume a request is authenticated just because it came from the gateway
 
-| Pattern | What It Does | When We'll Add It |
-|---------|-------------|-------------------|
-| **Rate Limiting** | Limit requests per client (IP or user) per time window | Phase 8 (security hardening) |
-| **Request/Response Transformation** | Modify headers, add metadata, strip internal fields from responses | Phase 8 |
-| **Circuit Breaking per route** | If a downstream is unhealthy, fail fast at gateway level | Phase 9 (observability) |
-| **Request Aggregation (BFF)** | Combine multiple downstream calls into one client response | If mobile client added |
-| **Canary Routing** | Route percentage of traffic to new version | Blue-green deployments |
-| **WebSocket Support** | Upgrade HTTP → WS for real-time features | If real-time market feed needed |
+### 4.14 Gateway Patterns Implemented in Phase 8
+
+| Pattern | Implementation | Key Detail |
+|---------|---------------|------------|
+| **Edge Authentication (OAuth2 RS256)** | `SecurityWebFilterChain` + `NimbusReactiveJwtDecoder` via JWKS | `@EnableWebFluxSecurity` — reactive stack only |
+| **Rate Limiting (Token Bucket)** | `RequestRateLimiter` default-filter + Redis Lua script | Per-userId (authenticated), per-IP (anonymous) |
+| **Security Headers** | `SecurityHeadersGlobalFilter` at `LOWEST_PRECEDENCE` | `chain.filter().then()` — sets headers after downstream response |
+| **Token Relay** | `ProxyExchange` forwards `Authorization: Bearer` unchanged | No `TokenRelay` config needed with standard proxy behavior |
 
 ### 4.15 API Gateway Anti-Patterns
 
@@ -1158,6 +1159,145 @@ A: All traffic stops. The gateway is a single point of failure. Production mitig
 
 **Q: Why not put authentication in each microservice?**
 A: You CAN, but you duplicate JWT validation logic in 7 services (same library, same config, same token parsing). Gateway-level auth centralizes it: validate once at the edge, forward trusted identity (userId header) to downstream. Downstream trusts the gateway (network-internal only). Trade-off: if a service is accessed outside the gateway (debugging, internal tool), it has no auth protection — Phase 8 adds per-service fallback validation.
+
+---
+
+### 4.18 Gateway as Edge Security Enforcer
+
+The API Gateway sits at the single entry point for all external traffic. Centralizing security enforcement here gives you:
+
+| Concern | Without Gateway Centralization | With Gateway Centralization |
+|---------|-------------------------------|----------------------------|
+| JWT validation | Each service validates independently | Gateway rejects bad tokens before network hop |
+| Rate limiting | Each service implements its own limits | One Redis-backed limit covers all 7 services |
+| Security headers | Each service adds headers | One GlobalFilter adds headers to all responses |
+| Key rotation | Each service polls JWKS independently | All gateway validations share one NimbusReactiveJwtDecoder instance |
+
+**The dual-validation principle:** Gateway validates AND each service validates independently. This is "defense in depth" — if an attacker bypasses the gateway (direct port access, network misconfiguration), services still reject unauthorized requests. Services never trust the gateway's opinion of authentication.
+
+---
+
+### 4.19 Edge Authentication Pattern (Reactive OAuth2 Resource Server)
+
+**Context:** API Gateway runs on Netty/WebFlux — not Tomcat/Servlet. Every security class must be the reactive variant.
+
+```
+Reactive (Gateway)                   Servlet (Services)
+─────────────────────────────────    ─────────────────────────────────
+SecurityWebFilterChain               SecurityFilterChain
+ServerHttpSecurity DSL               HttpSecurity DSL
+.authorizeExchange()                 .authorizeHttpRequests()
+ReactiveSecurityContextHolder        SecurityContextHolder (ThreadLocal)
+AuthenticationWebFilter              BearerTokenAuthenticationFilter
+NimbusReactiveJwtDecoder             NimbusJwtDecoder
+Converter<Jwt,Mono<AuthToken>>       Converter<Jwt,AuthToken>
+@EnableWebFluxSecurity               @EnableWebSecurity/@EnableMethodSecurity
+```
+
+**Pattern — why the converter returns `Mono<>`:**
+The reactive `AuthenticationWebFilter` internally calls `.flatMap(converter::convert)`. A `Mono<>` return type is required to chain into the next reactive operator. The conversion is synchronous, but it must fit the reactive contract: wrap with `Mono.just(result)`.
+
+**Pattern — token forwarding without explicit config:**
+The `ProxyExchange` in Spring Cloud Gateway reads the original `ServerHttpRequest` from the incoming `ServerWebExchange` and forwards all headers (including `Authorization: Bearer`) to the downstream service unchanged. No explicit `TokenRelay` configuration needed when using the standard HTTP proxy behavior.
+
+---
+
+### 4.20 Gateway Rate Limiting Pattern (Redis Token Bucket)
+
+**Problem:** How do you enforce per-user request limits across multiple gateway instances without race conditions?
+
+**Solution:** Redis-backed token bucket with a Lua script for atomic check-and-decrement.
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Multi-Instance Rate Limiting — Why Redis is Required           │
+├────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  In-memory (WRONG):                                             │
+│    Gateway-1: user "1" count = 8                               │
+│    Gateway-2: user "1" count = 0  ← different counter!         │
+│    User hits limit on Gateway-1, but Gateway-2 still allows    │
+│    → effective limit = instances × per-instance limit          │
+│                                                                 │
+│  Redis shared state (CORRECT):                                  │
+│    Gateway-1 reads redis → user "1" tokens = 8                 │
+│    Gateway-2 reads redis → user "1" tokens = 7  (already used) │
+│    Both see same shared counter                                 │
+│    → effective limit = configured limit, regardless of routing  │
+│                                                                 │
+│  Lua script atomicity:                                          │
+│    Without atomic: Thread A reads 1, Thread B reads 1,         │
+│    both allow, both decrement → -1 (both served 1 token)       │
+│    With Lua: A's script runs entirely → B's script sees 0       │
+│    → only A is served, B gets 429                               │
+│                                                                 │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**KeyResolver pattern — key determines the bucket:**
+- Authenticated request → `ReactiveSecurityContextHolder.getContext().map(ctx -> ctx.getAuthentication().getPrincipal().toString())` → userId string → one bucket per user (all devices share)
+- Anonymous request → `exchange.getRequest().getRemoteAddress().getAddress().getHostAddress()` → IP string → one bucket per IP (login brute-force protection)
+- The `.defaultIfEmpty(ip)` only fires when the SecurityContext `Mono` is empty (unauthenticated path)
+
+**SpEL bean reference pattern:** `key-resolver: "#{@userKeyResolver}"` in YAML — `#{}` is Spring Expression Language, `@beanName` dereferences the bean from `ApplicationContext`. The `@Bean` method name must match exactly.
+
+---
+
+### 4.21 Centralized Response Header Pattern (GlobalFilter)
+
+**Problem:** How do you add the same HTTP response headers to every response from every service without modifying 7 services?
+
+**Solution:** `GlobalFilter` at the gateway with `LOWEST_PRECEDENCE`.
+
+```
+Request lifecycle in the reactive gateway:
+    │
+    ├── GlobalFilter A (HIGHEST_PRECEDENCE = Integer.MIN_VALUE)
+    │   → CorrelationIdGatewayFilter: generates X-Correlation-Id
+    │
+    ├── SecurityWebFilterChain
+    │   → validates token, populates ReactiveSecurityContextHolder
+    │
+    ├── RequestRateLimiter (default-filter)
+    │   → checks Redis bucket
+    │
+    ├── ProxyExchange
+    │   → forwards to downstream service
+    │   → receives response from service
+    │
+    └── GlobalFilter B (LOWEST_PRECEDENCE = Integer.MAX_VALUE)
+        → SecurityHeadersGlobalFilter: adds OWASP headers to response
+        → .then(Mono.fromRunnable()) runs AFTER downstream response received
+        → headers set on buffered response before Netty flushes to client
+```
+
+**`chain.filter(exchange).then(Mono.fromRunnable())` explained:**
+- `chain.filter(exchange)` = run everything downstream (auth, rate limit, proxy, receive response) → returns `Mono<Void>`
+- `.then(...)` = subscribe to a second `Mono` only AFTER the first completes
+- `Mono.fromRunnable(lambda)` = wrap a synchronous side-effect in a `Mono<Void>`
+- Combined: "proxy to service → receive full response → THEN set headers → THEN Netty flushes"
+
+**Discovery requirement:** Spring Cloud Gateway's `GatewayAutoConfiguration` collects beans implementing `GlobalFilter` at startup. The bean must exist in the `ApplicationContext` — requires `@Component` (or `@Bean` in a `@Configuration` class). Without it, the class is never instantiated, never collected, headers are never set.
+
+---
+
+### 4.22 Interview Questions — Gateway Security Patterns
+
+**Q: "How does your gateway handle a Keycloak token rotation without restarting services?"**
+
+A: `NimbusReactiveJwtDecoder` (gateway) and `NimbusJwtDecoder` (services) both cache JWKS public keys in memory keyed by `kid` (key ID). When Keycloak generates a new RSA key pair: new tokens carry the new `kid` in their JWT header. The decoder looks up the new `kid` in cache → not found → fetches the JWKS endpoint → both old and new keys now in cache → validates new token. Old tokens still validate from cache using old key. No restart needed. The cache self-heals on first request with an unknown `kid`.
+
+**Q: "What happens to rate limiting when the same user's request hits different gateway instances?"**
+
+A: Both instances read and write the SAME Redis key (`request_rate_limiter.{userId}.tokens`). The Lua script runs atomically on Redis — regardless of which gateway instance issued the command. Combined rate across all instances is correctly enforced. Redis is the single source of truth; the gateway instances are stateless workers. This is why in-memory rate limiting breaks with horizontal scaling.
+
+**Q: "Why is `@EnableWebFluxSecurity` at the gateway but `@EnableMethodSecurity` at the services?"**
+
+A: The gateway has no `@RestController` methods to annotate. It only routes. `@EnableWebFluxSecurity` is sufficient — it enables path-based rules via `.authorizeExchange()`. Services have controllers with `@PreAuthorize("hasRole('SELLER')")` annotations. `@EnableMethodSecurity` activates AOP weaving that intercepts those method calls and checks the annotation. Without it, `@PreAuthorize` annotations are silently ignored — any authenticated user can reach any endpoint regardless of role.
+
+**Q: "What is the difference between a GlobalFilter, a GatewayFilter, and a default-filter?"**
+
+A: `GlobalFilter` applies to EVERY request through the gateway (all routes). Registered by implementing the `GlobalFilter` interface + `@Component`. `GatewayFilter` applies to a SPECIFIC route (configured under a route's `filters:` in YAML). `default-filters` applies to ALL routes but configured via YAML (like `RequestRateLimiter`) rather than a `@Component`. The difference: `GlobalFilter` is Java code always active; `default-filter` is YAML-configured but globally applied. Both are run for every matching request.
 
 ---
 
@@ -2680,3 +2820,6 @@ order-service:
 
 3. **"Can two containers in the same network use the same internal port?"**
    → Yes. Port isolation is per-container. `postgres:5432` and `mysql:3306` in the same network don't conflict. Even two PostgreSQL instances can both listen on 5432 internally — they're distinguished by service name (DNS), not port. Conflicts only arise if you map both to the same HOST port.
+
+---
+

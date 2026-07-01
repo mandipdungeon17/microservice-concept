@@ -14,13 +14,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * HMAC-SHA256 implementation of {@link ServiceTokenProvider} that generates
- * short-lived JWTs for
- * service-to-service authentication in non-HTTP contexts (Kafka consumers,
- * scheduled tasks).
+ * HMAC-SHA256 implementation of {@link ServiceTokenProvider} that generates short-lived JWTs for
+ * service-to-service authentication in non-HTTP contexts (Kafka consumers, scheduled tasks).
  *
- * <p>
- * <b>Token Structure:</b>
+ * <p><b>Token Structure:</b>
  *
  * <pre>
  * {
@@ -31,39 +28,24 @@ import org.springframework.stereotype.Component;
  * }
  * </pre>
  *
- * <p>
- * <b>Why subject is "0" (not "SYSTEM"):</b>
- * {@code JwtTokenValidatorImpl.extractUserId()}
- * parses the subject claim as {@code Long.parseLong(subject)}. A non-numeric
- * subject like "SYSTEM"
- * throws {@code NumberFormatException}, breaking authentication. Using "0" — a
- * userId that cannot
- * exist in the database (auto-increment starts at 1) — satisfies the Long
- * parsing contract while
- * remaining distinguishable from real users.
+ * <p><b>Why subject is "0" (not "SYSTEM"):</b> {@code JwtTokenValidatorImpl.extractUserId()} parses
+ * the subject claim as {@code Long.parseLong(subject)}. A non-numeric subject like "SYSTEM" throws
+ * {@code NumberFormatException}, breaking authentication. Using "0" — a userId that cannot exist in
+ * the database (auto-increment starts at 1) — satisfies the Long parsing contract while remaining
+ * distinguishable from real users.
  *
- * <p>
- * <b>Why roles is List.of("SERVICE") (not just "SERVICE"):</b> {@code
- * JwtTokenValidatorImpl.extractRoles()} casts the "roles" claim to
- * {@code List<String>}. If the
- * claim is stored as a plain String, the cast throws {@code ClassCastException}
- * at runtime. JJWT
- * serializes {@code List.of("SERVICE")} as a JSON array {@code ["SERVICE"]},
- * which deserializes
+ * <p><b>Why roles is List.of("SERVICE") (not just "SERVICE"):</b> {@code
+ * JwtTokenValidatorImpl.extractRoles()} casts the "roles" claim to {@code List<String>}. If the
+ * claim is stored as a plain String, the cast throws {@code ClassCastException} at runtime. JJWT
+ * serializes {@code List.of("SERVICE")} as a JSON array {@code ["SERVICE"]}, which deserializes
  * back to a List — matching the expected type.
  *
- * <p>
- * <b>Why 60-second expiry:</b> Minimizes the window of misuse if a token is
- * intercepted in
- * transit. Each Feign call generates a fresh token (HMAC signing is ~0.1ms), so
- * short expiry has
+ * <p><b>Why 60-second expiry:</b> Minimizes the window of misuse if a token is intercepted in
+ * transit. Each Feign call generates a fresh token (HMAC signing is ~0.1ms), so short expiry has
  * zero performance impact. The token is never cached or reused.
  *
- * <p>
- * <b>Secret key source:</b> Read from {@code jwt.secret} in Config Server's
- * application.yml —
- * the same key used by all services for validation. This ensures tokens
- * generated here pass
+ * <p><b>Secret key source:</b> Read from {@code jwt.secret} in Config Server's application.yml —
+ * the same key used by all services for validation. This ensures tokens generated here pass
  * validation in any downstream service's {@code JwtAuthenticationFilter}.
  *
  * @see ServiceTokenProvider

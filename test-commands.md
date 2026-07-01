@@ -1302,3 +1302,447 @@ SELECT notification_status, COUNT(*) FROM notification_logs GROUP BY notificatio
 # Count by type
 SELECT notification_type, COUNT(*) FROM notification_logs GROUP BY notification_type;
 ```
+
+---
+
+## Phase 8: Keycloak Identity Provider (OAuth2/OIDC)
+
+> **Pre-requisites:** Keycloak running via docker-pets.yml (port 8180).
+> Admin console: http://localhost:8180 (admin/admin → select "equitycart" realm).
+> First boot creates all realm config from equitycart-realm.json automatically.
+
+### Keycloak Admin Console
+
+```bash
+# Verify Keycloak is up (OIDC discovery — returns all endpoint URLs)
+curl -s http://localhost:8180/realms/equitycart/.well-known/openid-configuration | python -m json.tool
+
+# Verify JWKS endpoint (public keys for RS256 token verification)
+curl -s http://localhost:8180/realms/equitycart/protocol/openid-connect/certs | python -m json.tool
+```
+
+### Get Token via ROPC (Resource Owner Password Credentials)
+
+> Direct Access Grants (ROPC) — sends username+password directly. For testing only, NOT production.
+
+```bash
+# Login as CUSTOMER (customer1)
+curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=equitycart-gateway" \
+  -d "client_secret=gateway-secret" \
+  -d "username=customer1" \
+  -d "password=Test@1234"
+
+# Login as SELLER (seller1)
+curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=equitycart-gateway" \
+  -d "client_secret=gateway-secret" \
+  -d "username=seller1" \
+  -d "password=Test@1234"
+
+# Login as ADMIN (admin1)
+curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=equitycart-gateway" \
+  -d "client_secret=gateway-secret" \
+  -d "username=admin1" \
+  -d "password=Test@1234"
+```
+
+### Get Service Token via Client Credentials
+
+> Machine-to-machine flow — no user involved. Returns token with SERVICE role.
+
+```bash
+curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=client_credentials" \
+  -d "client_id=equitycart-services" \
+  -d "client_secret=services-secret"
+```
+
+### Decode & Verify Token Structure
+
+```bash
+# Extract access_token from response, then decode payload (base64 middle segment)
+# Using bash:
+TOKEN="<paste access_token here>"
+echo $TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | python -m json.tool
+
+# Expected structure:
+# {
+#   "sub": "<uuid>",
+#   "roles": ["CUSTOMER"],        ← flattened by roles-mapper (NOT nested in realm_access)
+#   "userId": 1,                   ← injected by userId-mapper (maps to database ID)
+#   "iss": "http://localhost:8180/realms/equitycart",
+#   "exp": <timestamp>,
+#   "iat": <timestamp>,
+#   ...
+# }
+```
+
+### Keycloak Configuration Management
+
+```bash
+# Re-import realm after JSON changes (drop keycloak DB + restart container):
+docker exec postgres psql -U postgres -c "DROP DATABASE keycloak; CREATE DATABASE keycloak;"
+docker compose -f docker/docker-pets.yml restart keycloak
+# Wait for OIDC discovery to respond (~30-60s)
+
+# Alternative: nuclear reset (all volumes wiped — recreates ALL databases)
+cd equitycart
+docker compose -f docker/docker-pets.yml down -v
+sh docker/start-pets.sh
+
+# View Keycloak logs (check for import errors, warnings)
+docker logs keycloak --tail 100
+
+# Create keycloak DB manually (if init-db.sh didn't run — volume already existed)
+docker exec postgres psql -U postgres -c "CREATE DATABASE keycloak;"
+```
+
+### Step 6 Verification — OAuth2 Resource Server (product-service in oauth2 mode)
+
+```bash
+# 1. Get Keycloak token for customer1
+TOKEN=$(curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=equitycart-gateway" \
+  -d "client_secret=gateway-secret" \
+  -d "username=customer1" \
+  -d "password=Test@1234" | jq -r .access_token)
+
+# 2. Call product-service through gateway with Keycloak token (RS256)
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/products | python -m json.tool
+# Expected: 200 OK with products list (product-service validates via JWKS)
+
+# 3. Call without token (should get 401)
+curl -s http://localhost:8080/api/products
+# Expected: 401 Unauthorized
+
+# 4. Call order-service (still mode=custom) with OLD custom token
+# First get custom token:
+CUSTOM_TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"customer1@equitycart.com","password":"Test@1234"}' | jq -r .accessToken)
+# Then use it on order-service:
+curl -s -H "Authorization: Bearer $CUSTOM_TOKEN" http://localhost:8080/api/order | python -m json.tool
+# Expected: 200 OK (order-service still validates HS256 via custom filter)
+
+# 5. Verify Keycloak token does NOT work on custom-mode services
+# (because they validate HS256 signature, but Keycloak token is RS256)
+curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/order
+# Expected: 401 (signature mismatch — order-service expects HS256, token is RS256)
+
+# 6. Get seller token and test RBAC on product-service
+SELLER_TOKEN=$(curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=equitycart-gateway" \
+  -d "client_secret=gateway-secret" \
+  -d "username=seller1" \
+  -d "password=Test@1234" | jq -r .access_token)
+# Test seller-only endpoint (if product creation requires SELLER role):
+curl -s -X POST -H "Authorization: Bearer $SELLER_TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/products -d '{"name":"Test","price":100}'
+# Expected: 200 (SELLER role present)
+
+# 7. Verify CUSTOMER cannot create products (RBAC enforcement)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/products -d '{"name":"Test","price":100}'
+# Expected: 403 Forbidden (CUSTOMER lacks SELLER role)
+```
+
+### Useful Keycloak Admin REST API
+
+```bash
+# Get realm info
+curl -s -H "Authorization: Bearer <admin_token>" \
+  http://localhost:8180/admin/realms/equitycart | python -m json.tool
+
+# List all users in realm
+curl -s -H "Authorization: Bearer <admin_token>" \
+  http://localhost:8180/admin/realms/equitycart/users | python -m json.tool
+
+# Get admin token (from master realm)
+curl -s -X POST http://localhost:8180/realms/master/protocol/openid-connect/token \
+  -d "grant_type=password" \
+  -d "client_id=admin-cli" \
+  -d "username=admin" \
+  -d "password=admin"
+```
+
+---
+
+## Phase 8 — Security Hardening (Steps 6-10)
+
+### Phase 8 Steps 1-5: Completed in Previous Phases
+- Step 1-2: Commons JWT library + all services enforce auth
+- Step 3: Feign Authorization propagation  
+- Step 4: Gateway JwtValidationGatewayFilter (now replaced by Step 7)
+- Step 5: Keycloak Docker setup
+
+### Phase 8 Step 6: OAuth2 Resource Server (Keycloak JWKS Validation)
+
+**Prerequisite:** Keycloak running + services configured with mode=oauth2
+
+**1. Verify Keycloak realm exists:**
+
+```bash
+curl -s http://localhost:8180/realms/equitycart | jq '.realm, .enabled'
+# Expected: "equitycart", true
+```
+
+**2. Get JWKS endpoint (cached public keys):**
+
+```bash
+curl -s http://localhost:8180/realms/equitycart/protocol/openid-connect/certs | jq '.keys[0] | {kty, alg, kid}'
+# Expected: {"kty":"RSA","alg":"RS256","kid":"..."}
+```
+
+**3. Get access token via Resource Owner Password Credentials:**
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password" \
+  -d "client_id=equitycart-gateway" \
+  -d "client_secret=<client-secret-from-realm-json>" \
+  -d "username=customer1" \
+  -d "password=password" | jq -r '.access_token')
+
+echo $TOKEN
+```
+
+**4. Decode token (verify RS256 structure, userId, roles):**
+
+```bash
+echo $TOKEN | cut -d. -f2 | base64 -d | jq .
+# Expected: { "sub": "...", "userId": "1", "roles": ["CUSTOMER"], "iss": "...", "exp": ..., ... }
+```
+
+**5. Test API with Keycloak token (through gateway):**
+
+```bash
+curl -s -X GET http://localhost:8080/api/products \
+  -H "Authorization: Bearer $TOKEN" | jq '.content[0] | {id, name, price}'
+```
+
+**6. Test product-service directly (verify mode=oauth2):**
+
+```bash
+curl -s -X GET http://localhost:8082/api/products \
+  -H "Authorization: Bearer $TOKEN" | jq '.content[0] | {id, name, price}'
+# Should succeed without WARN from JwtTokenValidatorImpl
+```
+
+**7. Test missing token → 401:**
+
+```bash
+curl -s -X GET http://localhost:8080/api/products | jq '.error'
+# Expected: "Unauthorized" with 401 status
+```
+
+---
+
+### Phase 8 Step 7: Gateway Token Relay (Reactive OAuth2)
+
+**1. Verify SecurityWebFilterChain is active:**
+
+```bash
+docker logs docker-api-gateway-1 | grep -i "websecurity\|oauth2"
+```
+
+**2. Verify TokenRelay propagates token:**
+
+```bash
+TOKEN=<keycloak-token>
+curl -v -X GET http://localhost:8080/api/products \
+  -H "Authorization: Bearer $TOKEN" 2>&1 | grep "< HTTP"
+
+# Check downstream logs
+docker logs docker-product-service-1 | tail -20 | grep -i "authenticated"
+```
+
+**3. Verify token propagates through Feign calls:**
+
+```bash
+curl -X POST http://localhost:8080/api/order \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotencyKey": "order-'$(date +%s)'",
+    "shippingAddress": "123 Main St",
+    "paymentMethod": "CARD",
+    "items": [{"productId": 1, "quantity": 1}]
+  }' | jq '.orderId'
+
+# Verify in order-service logs: token forwarded to product-service
+docker logs docker-order-service-1 | tail -30 | grep -i "feign\|propagated"
+```
+
+---
+
+### Phase 8 Step 8: Rate Limiting (Redis Token Bucket)
+
+**1. Verify RateLimiterConfig loaded:**
+
+```bash
+docker logs docker-api-gateway-1 | grep -i "ratelimit"
+```
+
+**2. Check rate limiter keys in Redis (verify key format):**
+
+```bash
+docker exec -it redis redis-cli
+KEYS "request_rate_limiter.*"
+# Expected keys: request_rate_limiter.1.tokens, request_rate_limiter.1.timestamp
+# (key format uses dots, not colons — Spring Gateway Lua script convention)
+GET "request_rate_limiter.1.tokens"
+# Expected: integer 0-20 (current tokens in bucket for userId=1)
+```
+
+**3. Test rate limiting — make 25 requests rapidly:**
+
+```bash
+TOKEN=<keycloak-token>
+
+for i in {1..25}; do
+  echo -n "Request $i: "
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H "Authorization: Bearer $TOKEN" \
+    http://localhost:8080/api/products
+  sleep 0.05
+done
+
+# Expected: Requests 1-20 → 200 OK, Requests 21-25 → 429 Too Many Requests
+```
+
+**4. Wait for bucket replenishment (10 req/sec):**
+
+```bash
+sleep 2
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/api/products
+# Expected: 200 OK (bucket refilled)
+```
+
+---
+
+### Phase 8 Step 9: OWASP Security Headers
+
+**Context:** SecurityHeadersGlobalFilter runs at LOWEST_PRECEDENCE. Requires `@Component` to be discovered by Spring Cloud Gateway. All 6 headers must appear on EVERY response (authenticated or not, success or error).
+
+**1. Verify ALL 6 OWASP headers present:**
+
+```bash
+curl -s -I http://localhost:8080/api/products \
+  -H "Authorization: Bearer $TOKEN" \
+  | grep -iE "x-content-type-options|x-frame-options|strict-transport-security|content-security-policy|referrer-policy|permissions-policy"
+
+# Expected output (all 6 lines):
+# x-content-type-options: nosniff
+# x-frame-options: DENY
+# strict-transport-security: max-age=31536000; includeSubDomains
+# content-security-policy: default-src 'self'
+# referrer-policy: strict-origin-when-cross-origin
+# permissions-policy: camera=(), microphone=(), geolocation=()
+```
+
+**2. Verify headers present even on 401 (unauthenticated):**
+
+```bash
+curl -s -I http://localhost:8080/api/products \
+  | grep -iE "x-frame-options|x-content-type"
+# Expected: headers still present even on rejected requests
+```
+
+**3. Verify bean is registered (if headers missing, check this first):**
+
+```bash
+curl -s http://localhost:8080/actuator/beans \
+  | jq '.contexts[].beans | keys[] | select(contains("securityHeaders"))'
+# Expected: "securityHeadersGlobalFilter"
+# If absent: @Component annotation missing from SecurityHeadersGlobalFilter
+```
+
+**4. Verify secrets NOT hardcoded (12-factor App Factor III):**
+
+```bash
+grep -r "jwt.secret:" equitycart-config/
+# Expected: only ${JWT_SECRET:default-base64-value}, no bare secrets
+```
+
+---
+
+### Phase 8 Step 10: Full E2E Test
+
+**Test 1: Invalid token → 401**
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer invalid.token" \
+  http://localhost:8080/api/products
+# Expected: 401
+```
+
+**Test 2: CUSTOMER on SELLER endpoint → 403**
+
+```bash
+TOKEN=<customer-token>
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -X POST http://localhost:8080/api/products \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test","sku":"TEST123","price":9.99,"stockQuantity":10,"categoryId":1,"brandId":1}'
+# Expected: 403 (RBAC enforced)
+```
+
+**Test 3: Full flow — Register → Login → Browse → Cart → Order**
+
+```bash
+# 1. Register
+curl -s -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@test.com","password":"Test@1234567"}' | jq '.accessToken' > /tmp/token1
+
+# 2. Get Keycloak token
+TOKEN=$(curl -s -X POST http://localhost:8180/realms/equitycart/protocol/openid-connect/token \
+  -d "grant_type=password&client_id=equitycart-gateway&client_secret=<secret>&username=customer1&password=password" \
+  | jq -r '.access_token')
+
+# 3. Browse products
+curl -s -X GET http://localhost:8080/api/products \
+  -H "Authorization: Bearer $TOKEN" | jq '.totalElements'
+
+# 4. Add to cart
+curl -s -X POST http://localhost:8080/api/cart/items \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"productId":1,"quantity":2}' | jq '.items | length'
+
+# 5. Place order
+curl -s -X POST http://localhost:8080/api/order \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"idempotencyKey":"e2e-'$(date +%s)'","shippingAddress":"123 Main","paymentMethod":"CARD"}' \
+  | jq '{orderId: .orderId, status: .status, userId: .userId}'
+
+echo "✓ E2E flow complete"
+```
+
+---
+
+## Quick Phase 8 Verification Checklist
+
+- [ ] Keycloak token is RS256 (decode shows alg:RS256)
+- [ ] Gateway accepts Keycloak token (no RS256 rejection)
+- [ ] Product-service oauth2 mode (no WARN logs)
+- [ ] Rate limiter rejects at request 21+
+- [ ] Security headers in responses
+- [ ] Invalid token → 401
+- [ ] Wrong role → 403
+- [ ] E2E flow succeeds

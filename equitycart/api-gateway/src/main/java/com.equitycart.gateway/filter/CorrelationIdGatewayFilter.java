@@ -55,13 +55,13 @@ import reactor.core.publisher.Mono;
  *
  * <p><b>Why ServerHttpResponseDecorator (not .then()):</b> In reactive Gateway, the response
  * headers are flushed to the client as part of the first {@code writeWith()} call. After that
- * point, headers are wrapped in {@link org.springframework.http.ReadOnlyHttpHeaders} and cannot
- * be modified — any attempt throws {@code UnsupportedOperationException}. The previous approach
- * of {@code chain.filter(exchange).then(Mono.fromRunnable(...))} ran AFTER the response was
- * already committed (body fully written). The decorator pattern intercepts the write call itself,
- * injecting the header just before bytes are flushed — while headers are still mutable. Three
- * override points cover all response types: {@code writeWith} (normal body), {@code
- * writeAndFlushWith} (SSE/streaming), and {@code setComplete} (empty-body 204/304/redirects).
+ * point, headers are wrapped in {@link org.springframework.http.ReadOnlyHttpHeaders} and cannot be
+ * modified — any attempt throws {@code UnsupportedOperationException}. The previous approach of
+ * {@code chain.filter(exchange).then(Mono.fromRunnable(...))} ran AFTER the response was already
+ * committed (body fully written). The decorator pattern intercepts the write call itself, injecting
+ * the header just before bytes are flushed — while headers are still mutable. Three override points
+ * cover all response types: {@code writeWith} (normal body), {@code writeAndFlushWith}
+ * (SSE/streaming), and {@code setComplete} (empty-body 204/304/redirects).
  *
  * <p><b>Ordering:</b> {@link Ordered#HIGHEST_PRECEDENCE} ensures this filter runs before all other
  * global filters (security, rate limiting, logging) — guaranteeing the Correlation ID is available
@@ -119,7 +119,7 @@ public class CorrelationIdGatewayFilter implements GlobalFilter, Ordered {
 
     String finalCorrelationId = correlationId;
 
-ServerHttpResponse originalResponse = mutatedExchange.getResponse();
+    ServerHttpResponse originalResponse = mutatedExchange.getResponse();
     ServerHttpResponseDecorator decoratedResponse =
         new ServerHttpResponseDecorator(originalResponse) {
           @Override

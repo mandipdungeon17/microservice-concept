@@ -14,7 +14,6 @@ import org.apache.logging.log4j.Logger;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
@@ -55,7 +54,20 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * @see com.equitycart.commons.config.SecurityAutoConfig (registers this filter in the filter chain)
  */
 @RequiredArgsConstructor
-@Component
+// @Component -> Commenting as this No Longer needed after implementation of Keycloak Security
+// Config.
+// If both co-exist then both are validated and it throws error like :
+// 2026-06-27 05:58:34 [http-nio-8089-exec-5] [] WARN  c.e.c.s.impl.JwtTokenValidatorImpl - JWT
+// token validation failed:
+// The parsed JWT indicates it was signed with the 'RS256' signature algorithm,
+// but the provided javax.crypto.spec.SecretKeySpec key may not be used to verify RS256 signatures.
+// Because the specified key reflects a specific and expected algorithm, and the JWT does not
+// reflect this algorithm,
+// it is likely that the JWT was not expected and therefore should not be trusted.  Another
+// possibility is that the
+// parser was provided the incorrect signature verification key, but this cannot be assumed for
+// security reasons.
+
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
   private static final Logger log = LogManager.getLogger(JwtAuthenticationFilter.class);

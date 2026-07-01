@@ -1956,3 +1956,445 @@ A: Kafka consumer threads are managed by Spring Kafka's `ConcurrentMessageListen
 
 **Q: "Why does SecurityContextHolder use ThreadLocal instead of something that works across threads?"**
 A: ThreadLocal provides thread-safety without synchronization — each thread's context is isolated. Using InheritableThreadLocal would propagate to child threads but creates a security risk: if a thread pool reuses a thread with stale security context, a request could execute with another user's identity. The framework chooses safety over convenience, requiring explicit propagation where needed (`DelegatingSecurityContextExecutor`).
+
+---
+
+## Section 14: The @Component Filter Registration Trap — Servlet vs WebFlux
+
+### The Bug That Appeared in Phase 8
+
+When `JwtAuthenticationFilter` (a `OncePerRequestFilter`) had `@Component`, services started in `mode=oauth2` still ran the HS256 validation filter — rejecting RS256 tokens before Spring Security's OAuth2 Resource Server could process them.
+
+Root cause: **`@Component` on a Servlet filter does two things simultaneously in Spring Boot**, and only one of them is intentional.
+
+---
+
+### What @Component on a Servlet Filter Actually Does
+
+```
+INTENT:    Register the filter with Spring's IoC container (dependency injection)
+SIDE EFFECT: Spring Boot's FilterRegistrationBean auto-registration runs it
+             OUTSIDE the SecurityFilterChain, as a raw servlet filter
+```
+
+**The mechanism step-by-step:**
+
+```
+STEP 1: Spring Boot starts up
+        → ComponentScan finds JwtAuthenticationFilter (has @Component)
+        → Creates a bean in ApplicationContext
+
+STEP 2: Spring Boot auto-configuration fires
+        → SecurityFilterAutoConfiguration runs
+        → Detects ALL beans of type javax.servlet.Filter / jakarta.servlet.Filter
+        → For each one found: creates a FilterRegistrationBean wrapping it
+        → FilterRegistrationBean registers the filter directly with Tomcat
+
+STEP 3: Tomcat's filter pipeline now has:
+        [JwtAuthenticationFilter]  ← registered by FilterRegistrationBean (order: Integer.MAX_VALUE)
+        [DelegatingFilterProxy → FilterChainProxy]  ← Spring Security's entry point
+               └── SecurityFilterChain
+                   ├── UsernamePasswordAuthenticationFilter
+                   ├── BearerTokenAuthenticationFilter  ← OAuth2 Resource Server
+                   └── ... other security filters
+
+STEP 4: On every HTTP request:
+        Tomcat runs ALL its registered filters in order
+        → JwtAuthenticationFilter runs FIRST (raw HS256 validation)
+        → RS256 token fails HS256 signature check → 401 returned immediately
+        → DelegatingFilterProxy NEVER REACHED
+        → BearerTokenAuthenticationFilter NEVER RUNS
+```
+
+**Visual: @Component PRESENT (broken)**
+
+```
+HTTP Request
+     │
+     ▼
+[Tomcat Pipeline]
+     │
+     ├─→ [JwtAuthenticationFilter]  ← FilterRegistrationBean put it HERE
+     │         │ RS256 token → HS256 check fails → 401
+     │         ✗ STOPS HERE
+     │
+     └─→ [DelegatingFilterProxy]    ← never reached
+              └─→ [SecurityFilterChain]
+                       └─→ [BearerTokenAuthenticationFilter]  ← never runs
+```
+
+**Visual: @Component REMOVED (correct)**
+
+```
+HTTP Request
+     │
+     ▼
+[Tomcat Pipeline]
+     │
+     └─→ [DelegatingFilterProxy]    ← only registered filter
+              └─→ [SecurityFilterChain]
+                       └─→ [BearerTokenAuthenticationFilter]
+                                 │ RS256 → JWKS → validates ✓
+                                 │ SecurityContext populated
+                                 ▼
+                       [Controller method executes]
+```
+
+---
+
+### The @ConditionalOnMissingBean Nuance
+
+`SecurityFilterAutoConfiguration` does NOT unconditionally register every `@Component` Filter. Spring Boot checks `FilterRegistrationBean` is not already provided:
+
+```
+if (no FilterRegistrationBean for this filter exists AND filter is @Component)
+    → auto-register via FilterRegistrationBean
+
+if (FilterRegistrationBean already exists in context)
+    → skip (developer controls registration)
+```
+
+This is why the CORRECT pattern when you DO want a filter in the SecurityFilterChain is:
+
+| Approach | Result |
+|----------|--------|
+| `@Component` alone | Auto-registered by FilterRegistrationBean OUTSIDE SecurityFilterChain |
+| `@Component` + define a `FilterRegistrationBean` with `setEnabled(false)` | Prevents auto-reg; only SecurityFilterChain places it |
+| Remove `@Component` | Bean not in IoC; manually placed via `addFilterBefore()` in SecurityConfig |
+| `@Bean` in `@Configuration` without `FilterRegistrationBean` | Same trap as @Component — Spring treats @Bean Filter the same way |
+
+In EquityCart's case, `JwtAuthenticationFilter` is wired into `SecurityAutoConfig.securityFilterChain()` via `addFilterBefore()`. The filter does NOT need `@Component` — `SecurityAutoConfig` creates it via `new JwtAuthenticationFilter(...)` and adds it directly to the chain.
+
+---
+
+### WebFlux Gateway: @Component Behaves Differently
+
+This is why `SecurityHeadersGlobalFilter` DOES need `@Component` at the Gateway:
+
+```
+Servlet (Tomcat):
+@Component Filter → FilterRegistrationBean auto-registers → runs OUTSIDE SecurityFilterChain
+                                                                    ↑ BUG SOURCE
+
+WebFlux (Netty):
+@Component GlobalFilter → GatewayAutoConfiguration collects all GlobalFilter beans
+                        → registers them in WebFilterChainProxy's ordered chain
+                        → runs as part of the reactive filter pipeline ✓
+```
+
+No `FilterRegistrationBean` exists in WebFlux — there is no Servlet API. Spring Cloud Gateway's `GatewayAutoConfiguration` uses a simple `@Autowired List<GlobalFilter>` to collect all `@Component`-annotated GlobalFilters and merge them into the chain.
+
+**Comparison table:**
+
+| | Servlet Filter + @Component | WebFlux GlobalFilter + @Component |
+|-|---------------------------|-----------------------------------|
+| Registration mechanism | `FilterRegistrationBean` (Spring Boot auto-config) | `GatewayAutoConfiguration` autowired list |
+| Runs outside security chain? | YES (bug trap) | NO (no Servlet concept of "outside") |
+| Correct pattern for security | Remove @Component, wire manually in SecurityConfig | @Component works fine |
+| Discovery mechanism | `SecurityFilterAutoConfiguration` detects Filter beans | GatewayAutoConfiguration collects GlobalFilter beans |
+
+---
+
+### Interview Questions
+
+**Q: "Your JwtAuthenticationFilter implements OncePerRequestFilter and has @Component. It's also wired into the SecurityFilterChain via addFilterBefore(). How many times does it run per request?"**
+A: Twice. `FilterRegistrationBean` auto-registration (triggered by `@Component`) registers it directly in Tomcat's filter pipeline. The `addFilterBefore()` call places it inside the `SecurityFilterChain` as well. The result: the filter runs once outside Spring Security's chain and once inside it. To run it only inside the SecurityFilterChain, remove `@Component` and let `SecurityAutoConfig` own the bean creation.
+
+**Q: "What is FilterRegistrationBean and when does it matter?"**
+A: `FilterRegistrationBean` is a Spring Boot abstraction that wraps a `jakarta.servlet.Filter` and registers it with the embedded Tomcat (or Jetty/Undertow) servlet container. Spring Boot's `SecurityFilterAutoConfiguration` auto-creates one for every `@Component` Filter it finds. This is separate from Spring Security's `SecurityFilterChain`. Tomcat's pipeline runs all `FilterRegistrationBean`-registered filters first, THEN the `DelegatingFilterProxy` which delegates into the `SecurityFilterChain`. If your security filter lands in both places, you have a double-run and potential bypass.
+
+**Q: "Does the same @Component trap apply to Spring Cloud Gateway GlobalFilters?"**
+A: No. Spring Cloud Gateway runs on Netty (WebFlux), not Tomcat. There is no Servlet container, no `FilterRegistrationBean`, and no `SecurityFilterAutoConfiguration`. `GatewayAutoConfiguration` collects all `@Component GlobalFilter` beans via Spring's standard `@Autowired List<GlobalFilter>` injection and places them in the reactive filter chain. `@Component` is the CORRECT and REQUIRED registration mechanism for GlobalFilters.
+
+**Q: "How would you diagnose whether a filter is running outside the SecurityFilterChain?"**
+A: Three ways. (1) Enable `DEBUG` logging on `org.springframework.security` — log shows which filters the `SecurityFilterChain` includes; compare against your filter's actual logs to see if it fires before them. (2) Set a breakpoint or log statement in the filter; check the call stack — if you see `FilterRegistrationBean` or Tomcat's `ApplicationFilterChain` in the stack (without `DelegatingFilterProxy`), it's outside. (3) Add `http.addFilterBefore()` and temporarily throw an exception inside it — if the exception occurs twice per request, you have double registration.
+
+---
+
+## Section 15: OAuth2 Resource Server Auto-Configuration — NimbusJwtDecoder Internals
+
+### What spring-boot-starter-oauth2-resource-server Does
+
+```
+Dependency added: spring-boot-starter-oauth2-resource-server
+
+Spring Boot's auto-configuration machinery:
+    reads META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+    finds: OAuth2ResourceServerAutoConfiguration
+
+OAuth2ResourceServerAutoConfiguration:
+    @ConditionalOnClass(BearerTokenAuthenticationToken.class)  ← resource server on classpath
+    @ConditionalOnWebApplication
+    ↓
+    Delegates to:
+        OAuth2ResourceServerJwtConfiguration
+        OAuth2ResourceServerOpaqueTokenConfiguration
+
+OAuth2ResourceServerJwtConfiguration:
+    @ConditionalOnProperty("spring.security.oauth2.resourceserver.jwt.jwk-set-uri")
+     OR
+    @ConditionalOnProperty("spring.security.oauth2.resourceserver.jwt.issuer-uri")
+    ↓
+    Creates: JwtDecoder bean (NimbusJwtDecoder internally)
+    Creates: BearerTokenAuthenticationFilter (added to SecurityFilterChain)
+```
+
+**What the `JwtDecoder` bean does:**
+
+```
+NimbusJwtDecoder creation from jwk-set-uri:
+    new NimbusJwtDecoder(JWKSource from JWKS endpoint)
+    ↓
+    STEP 1: On first JWT validation request
+            → HTTP GET http://keycloak:8080/realms/equitycart/protocol/openid-connect/certs
+            → Response: { "keys": [{ "kid": "abc123", "kty": "RSA", "n": "...", "e": "..." }] }
+            → JWKSet cached in JWKSource (DefaultRemoteJWKSet)
+
+    STEP 2: On each JWT arrival
+            → Parse JWT header: { "alg": "RS256", "kid": "abc123" }
+            → Lookup cached key by kid = "abc123"
+            → Reconstruct RSAPublicKey from "n" and "e" fields
+            → Verify RS256 signature using RSAPublicKey
+            → Parse claims, validate exp, nbf
+
+    STEP 3: Key rotation (automatic)
+            → If kid not found in cache → re-fetch JWKS endpoint
+            → Cache updated → validation continues
+            → Zero application restarts needed
+```
+
+---
+
+### jwk-set-uri vs issuer-uri — Why Docker Forced Our Hand
+
+| Property | Effect |
+|----------|--------|
+| `jwk-set-uri` | Fetches keys from exact URL provided. No issuer validation. Services trust whatever keys come from the URI. |
+| `issuer-uri` | Calls `.well-known/openid-configuration` discovery endpoint. Downloads JWKS URI + validates `iss` claim in every token matches the configured issuer. |
+
+**Why `issuer-uri` fails in Docker:**
+
+```
+Keycloak inside Docker container:
+    → advertises itself as: http://keycloak:8080 (Docker internal hostname)
+    → OIDC discovery document: { "issuer": "http://keycloak:8080/realms/equitycart" }
+
+Spring services also inside Docker:
+    → configured with: spring.security.oauth2.resourceserver.jwt.issuer-uri=http://keycloak:8080/...
+    → this WORKS for Docker-internal service-to-service communication
+
+BUT: if services were on host and Keycloak on Docker (typical dev setup):
+    → configured with: issuer-uri=http://localhost:8180/...
+    → token acquired via: http://localhost:8180/realms/equitycart/...
+    → token 'iss' claim: "http://keycloak:8080/realms/equitycart"  ← Docker hostname!
+    → configured issuer: "http://localhost:8180/realms/equitycart"  ← host hostname!
+    → MISMATCH → "The iss claim is not valid" → 401 on EVERY request
+
+FIX: Use jwk-set-uri instead of issuer-uri
+    → spring.security.oauth2.resourceserver.jwt.jwk-set-uri=http://localhost:8180/.../certs
+    → Direct key fetch — no issuer validation
+    → Tokens validate correctly regardless of hostname mismatch
+```
+
+---
+
+### Custom JwtAuthenticationConverter — Maintaining Backward Compatibility
+
+Spring's `BearerTokenAuthenticationFilter` creates the `Authentication` object using a `JwtAuthenticationConverter`. The default converter sets `authentication.getPrincipal()` to the `Jwt` object itself.
+
+**Problem:** Existing controllers use:
+```java
+(Long) authentication.getPrincipal()  // expects Long userId
+```
+With default OAuth2 converter, this ClassCastException at runtime.
+
+**Solution: Custom converter** that extracts `userId` attribute from Keycloak JWT and wraps in `UsernamePasswordAuthenticationToken(Long userId, ...)`:
+
+```
+Incoming Keycloak JWT claims:
+{
+  "sub": "f7a1c23d-...",   ← Keycloak's UUID (NOT our userId)
+  "userId": "1",           ← userId attribute mapped by Keycloak realm mapper
+  "roles": ["CUSTOMER"]    ← flat roles claim (mapped by roles-mapper in realm config)
+}
+
+Custom KeycloakJwtAuthenticationConverter:
+    STEP 1: Read claims.get("userId") → "1"
+    STEP 2: Long.parseLong("1") → 1L
+    STEP 3: Read claims.get("roles") → ["CUSTOMER"]
+    STEP 4: Convert to GrantedAuthority list: [ROLE_CUSTOMER]
+    STEP 5: return new UsernamePasswordAuthenticationToken(1L, null, authorities)
+
+Result: authentication.getPrincipal() == 1L (Long)
+        → Existing controllers unchanged
+        → Zero migration cost
+```
+
+**Reactive variant (Gateway):** The converter must return `Mono<AbstractAuthenticationToken>` instead of `AbstractAuthenticationToken`:
+
+```
+Servlet (Tomcat):
+    JwtAuthenticationConverter implements Converter<Jwt, AbstractAuthenticationToken>
+    → synchronous: return new UsernamePasswordAuthenticationToken(...)
+
+WebFlux (Netty):
+    Converter<Jwt, Mono<AbstractAuthenticationToken>>
+    → reactive: return Mono.just(new UsernamePasswordAuthenticationToken(...))
+    → WHY: AuthenticationWebFilter.authenticate() does .flatMap(converter::convert)
+    → flatMap REQUIRES a Mono return — synchronous Converter cannot be used here
+```
+
+---
+
+### NimbusJwtDecoder vs NimbusReactiveJwtDecoder
+
+| | NimbusJwtDecoder | NimbusReactiveJwtDecoder |
+|-|-----------------|--------------------------|
+| Programming model | Blocking (Servlet) | Non-blocking (WebFlux) |
+| HTTP client for JWKS | `RestTemplate` (blocking) | `WebClient` (reactive) |
+| Integration point | `JwtDecoder` bean in SecurityFilterChain | `ReactiveJwtDecoder` bean in SecurityWebFilterChain |
+| Thread behavior | Blocks HTTP thread while fetching JWKS | Returns Mono — caller subscribes asynchronously |
+| Used at | Services (order, product, etc.) | API Gateway |
+| Auto-config triggers | `OAuth2ResourceServerJwtConfiguration` | `ReactiveOAuth2ResourceServerJwtConfiguration` |
+
+---
+
+### Interview Questions
+
+**Q: "How does Spring Boot know to use Keycloak's public keys without you writing any JWKS-fetching code?"**
+A: `spring-boot-starter-oauth2-resource-server` auto-configures `NimbusJwtDecoder` when `spring.security.oauth2.resourceserver.jwt.jwk-set-uri` is set. Internally, `DefaultRemoteJWKSet` fetches the JWKS endpoint on first token validation, caches the key set, and performs `kid`-based lookup for each JWT. If a `kid` is missing from the cache (key rotation), it re-fetches automatically. You write zero JWKS code — the framework handles caching, rotation, and RSA reconstruction.
+
+**Q: "Why does changing from issuer-uri to jwk-set-uri fix the 'iss claim is not valid' error?"**
+A: `issuer-uri` triggers OIDC discovery (`/.well-known/openid-configuration`) and validates that every token's `iss` claim matches the configured URI exactly. In Docker, the Keycloak container advertises its internal hostname (e.g., `keycloak:8080`) in the `iss` claim, but the service is configured with `localhost:8180`. The string comparison fails. `jwk-set-uri` skips issuer validation entirely — it only fetches public keys from the exact URL you provide. The tradeoff: no automatic discovery, and you lose issuer claim verification (acceptable in controlled dev environments, not for production).
+
+**Q: "Why does the OAuth2 JwtAuthenticationConverter need to return Mono in WebFlux but not in Servlet?"**
+A: `AuthenticationWebFilter` (WebFlux) calls the converter via `flatMap()`:  `Mono<Authentication> auth = jwtDecoder.decode(token).flatMap(converter::convert)`. `flatMap` requires a function that returns a `Publisher` (Mono/Flux) — a synchronous return value would prevent composition with upstream reactive streams. In Servlet, `AbstractSecurityInterceptor` calls the converter synchronously as part of a blocking thread — no reactive composition involved, so a plain `Converter<Jwt, AbstractAuthenticationToken>` suffices.
+
+**Q: "How does Spring automatically detect and validate JWT tokens on every request?"**
+A: `BearerTokenAuthenticationFilter` (added to `SecurityFilterChain` by `OAuth2ResourceServerAutoConfiguration`) runs before your controllers. It extracts the `Authorization: Bearer <token>` header, calls `JwtDecoder.decode()` which validates the RS256 signature via JWKS, validates `exp`/`nbf` claims, then calls the `JwtAuthenticationConverter` to produce an `Authentication`. It stores this in `SecurityContextHolder`. The rest of the filter chain sees an authenticated request. If decoding fails, a 401 is returned immediately.
+
+---
+
+## Section 16: @EnableWebFluxSecurity vs @EnableWebSecurity — Two Separate Security Stacks
+
+### The Two Security Stacks Cannot Mix
+
+Spring Security has two completely independent implementations for the two web stacks:
+
+```
+Spring MVC (Tomcat/Servlet):          Spring WebFlux (Netty/Reactive):
+────────────────────────────          ──────────────────────────────────
+@EnableWebSecurity                    @EnableWebFluxSecurity
+    ↓                                     ↓
+WebSecurityConfiguration              WebFluxSecurityConfiguration
+    ↓                                     ↓
+FilterChainProxy                      WebFilterChainProxy
+    ↓                                     ↓
+SecurityFilterChain                   SecurityWebFilterChain
+    ↓                                     ↓
+HttpSecurity DSL                      ServerHttpSecurity DSL
+    ↓                                     ↓
+OncePerRequestFilter (javax.servlet)  WebFilter (org.springframework.web.server)
+    ↓                                     ↓
+SecurityContextHolder (ThreadLocal)   ReactiveSecurityContextHolder (Reactor Context)
+    ↓                                     ↓
+@EnableMethodSecurity works           @EnableMethodSecurity DOES NOT APPLY
+                                      (@EnableReactiveMethodSecurity for WebFlux)
+```
+
+**Critical difference:** The two stacks have ZERO shared code in their filter/web infrastructure. You CANNOT use `HttpSecurity` in a WebFlux application — `HttpSecurity` is not on the classpath when only `spring-boot-starter-webflux` is present (no `spring-boot-starter-web`).
+
+---
+
+### What @EnableWebFluxSecurity Activates
+
+```
+@EnableWebFluxSecurity
+    │
+    ├─→ Imports WebFluxSecurityConfiguration
+    │       ├─→ Creates WebFilterChainProxy bean
+    │       ├─→ Injects all SecurityWebFilterChain beans (ordered)
+    │       └─→ Registers WebFilterChainProxy as a WebFilter with priority -100
+    │
+    ├─→ Enables ReactiveAuthenticationManager infrastructure
+    │       └─→ UserDetailsRepositoryReactiveAuthenticationManager (for form login)
+    │           OR ReactiveJwtAuthenticationManager (for OAuth2 Resource Server)
+    │
+    └─→ Enables ReactiveMethodSecurityConfiguration (if @EnableReactiveMethodSecurity present)
+```
+
+**What @EnableWebFluxSecurity does NOT do:**
+- Does NOT enable method security (`@PreAuthorize` still inactive without explicit enablement)
+- Does NOT create any SecurityWebFilterChain — YOU must declare a `@Bean` of type `SecurityWebFilterChain`
+- Does NOT interfere with Spring MVC if somehow on the same classpath (though mixing stacks is wrong)
+
+---
+
+### SecurityWebFilterChain vs SecurityFilterChain
+
+| | SecurityFilterChain (Servlet) | SecurityWebFilterChain (WebFlux) |
+|-|------------------------------|----------------------------------|
+| DSL builder | `HttpSecurity` | `ServerHttpSecurity` |
+| Builds from | `WebSecurityConfigurerAdapter` (deprecated) or `@Bean SecurityFilterChain` | `@Bean SecurityWebFilterChain` |
+| Token validation filter | `BearerTokenAuthenticationFilter` | `AuthenticationWebFilter` |
+| Authentication storage | `SecurityContextHolder` (ThreadLocal) | `ReactiveSecurityContextHolder` (Reactor Context) |
+| Authorization filter | `AuthorizationFilter` | `AuthorizationWebFilter` |
+| CSRF | `CsrfFilter` (enabled by default) | `CsrfWebFilter` (disabled by default in stateless APIs) |
+
+---
+
+### ReactiveSecurityContextHolder — Why ThreadLocal Cannot Work in WebFlux
+
+```
+Servlet (Tomcat — one thread per request):
+    Thread-1 handles Request A entirely:
+    ┌─────────────────────────────────────────┐
+    │ Thread-1 ThreadLocal:                   │
+    │   SecurityContextHolder: User-A context │
+    │   RequestContextHolder: Request-A data  │
+    └─────────────────────────────────────────┘
+    ThreadLocal is safe: Thread-1 = Request-A always
+
+WebFlux (Netty — event loop, many requests on few threads):
+    EventLoop thread handles Step 1 of Request A
+    EventLoop thread handles Step 1 of Request B  ← same thread!
+    EventLoop thread resumes Step 2 of Request A  ← same thread again!
+
+    If SecurityContext stored in ThreadLocal on EventLoop thread:
+    - Thread handles Request-A → stores User-A in ThreadLocal
+    - Same thread handles Request-B → overwrites ThreadLocal with User-B
+    - Same thread resumes Request-A → reads User-B context → SECURITY BREACH
+
+Solution: Reactor Context (per-subscription, not per-thread)
+    Each reactive Mono/Flux subscription has its own Context key-value store.
+    ReactiveSecurityContextHolder stores/retrieves from Reactor Context:
+        Context.write(SecurityContext.class, securityContext)
+    Never touches ThreadLocal — safe across thread switches.
+```
+
+---
+
+### Why @EnableMethodSecurity Does Nothing at API Gateway
+
+`@EnableMethodSecurity` activates AOP advice that intercepts `@PreAuthorize`/`@PostAuthorize` on Spring MVC controller methods. The API Gateway:
+1. Has no `@RestController` or `@Controller` — it's a pure routing layer
+2. Runs on WebFlux stack — `@EnableMethodSecurity` targets Servlet MVC AOP
+3. Uses `@EnableWebFluxSecurity` — the reactive stack ignores `@EnableMethodSecurity` entirely
+
+If method-level security were needed at the Gateway (unusual), `@EnableReactiveMethodSecurity` would be required. But authorization at the Gateway should be coarse-grained (authenticated? correct scope?) — fine-grained role checks (`@PreAuthorize("hasRole('ADMIN')")`) belong in the individual services where business context exists.
+
+---
+
+### Interview Questions
+
+**Q: "You add @EnableMethodSecurity to a Spring Cloud Gateway application. @PreAuthorize annotations are on your filters. Does it work?"**
+A: No. Spring Cloud Gateway runs on WebFlux (Netty), not Spring MVC. `@EnableMethodSecurity` activates an AOP proxy infrastructure tied to the Servlet stack and Spring MVC's `HandlerMethod`. WebFlux uses a different execution model (reactive pipelines, no `HandlerInterceptor`), so the Servlet-targeted AOP never fires. For method security in WebFlux, use `@EnableReactiveMethodSecurity`. But Gateway has no controllers — method security is inappropriate there. Authorization at the gateway should be via `ServerHttpSecurity.authorizeExchange()`, not annotation-based checks.
+
+**Q: "What is the difference between SecurityContextHolder and ReactiveSecurityContextHolder?"**
+A: `SecurityContextHolder` uses `ThreadLocal` — the security context is tied to the current OS thread. This works in Servlet (one thread per request), but WebFlux uses an event loop where a single thread processes many requests interleaved. ThreadLocal on an event loop thread would be overwritten by concurrent requests. `ReactiveSecurityContextHolder` stores context in the Reactor `Context` — a per-subscription key-value store that flows through the reactive operator chain regardless of which thread executes. It's immune to event-loop thread sharing because each Mono subscription carries its own context.
+
+**Q: "Can you run both Servlet and WebFlux security in the same Spring Boot application?"**
+A: Not in a meaningful way. While both can technically be on the classpath, Spring Boot's auto-configuration detects the primary web application type and activates one stack. Mixing them leads to undefined behavior — `FilterChainProxy` and `WebFilterChainProxy` have no coordination mechanism. The standard architecture is: separate your Servlet services from your reactive gateway. `@EnableWebFluxSecurity` and `@EnableWebSecurity` should never appear in the same application.
+
+**Q: "How does SecurityWebFilterChain order affect security enforcement?"**
+A: `SecurityWebFilterChain` beans can be annotated with `@Order`. The `WebFilterChainProxy` evaluates chains in ascending order and uses the FIRST chain whose `pathMatcher` matches the request. A chain with `@Order(1)` matching `/api/public/**` with no auth can short-circuit requests before `@Order(2)` matching `/**` with full auth. This enables different security policies per URL pattern without conditionals inside a single chain.

@@ -39,8 +39,8 @@ import org.springframework.web.context.request.ServletRequestAttributes;
  * null in these contexts. Rather than silently skipping (which causes 401 on the downstream call),
  * this interceptor falls back to {@link ServiceTokenProvider#getServiceToken()} to generate a
  * short-lived machine-identity JWT (subject=0, role=SERVICE, 60s expiry). The downstream service's
- * {@code JwtAuthenticationFilter} validates this token normally — it sees an authenticated principal
- * with userId=0 and ROLE_SERVICE, satisfying {@code .anyRequest().authenticated()} rules.
+ * {@code JwtAuthenticationFilter} validates this token normally — it sees an authenticated
+ * principal with userId=0 and ROLE_SERVICE, satisfying {@code .anyRequest().authenticated()} rules.
  *
  * <p><b>Relationship to FeignCorrelationInterceptor:</b> Both interceptors are registered on every
  * Feign client (Spring auto-discovers all {@code @Component RequestInterceptor} beans). They run
