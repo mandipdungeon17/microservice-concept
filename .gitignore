@@ -24,3 +24,6 @@ Thumbs.db
 
 *.crt
 *.pem
+
+*.log
+*.log.gz
