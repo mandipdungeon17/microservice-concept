@@ -2,6 +2,11 @@
 set -e
 cd "$(dirname "$0")/.."   # ← always runs from equitycart/
 
+NETWORK_NAME=equitycart_network
+
+echo "==> Ensuring Docker network exists: $NETWORK_NAME"
+docker network inspect "$NETWORK_NAME" >/dev/null 2>&1 || docker network create "$NETWORK_NAME"
+
 echo "==> Starting infrastructure (docker-pets.yml)..."
 docker compose -f docker/docker-pets.yml up -d
 

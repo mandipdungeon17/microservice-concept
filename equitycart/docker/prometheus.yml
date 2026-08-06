@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8080']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'user-service'
+    static_configs:
+      - targets: ['user-service:8081']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'order-service'
+    static_configs:
+      - targets: ['order-service:8088']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'portfolio-service'
+    static_configs:
+      - targets: ['portfolio-service:8084']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'product-service'
+    static_configs:
+      - targets: ['product-service:8089']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'market-data-service'
+    static_configs:
+      - targets: ['market-data-service:8085']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'ledger-service'
+    static_configs:
+      - targets: ['ledger-service:8086']
+    metrics_path: '/actuator/prometheus'
+
+  - job_name: 'notification-service'
+    static_configs:
+      - targets: ['notification-service:8087']
+    metrics_path: '/actuator/prometheus'

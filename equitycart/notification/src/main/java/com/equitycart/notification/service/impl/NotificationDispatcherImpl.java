@@ -5,6 +5,7 @@ import com.equitycart.notification.entity.NotificationLog;
 import com.equitycart.notification.enums.NotificationChannel;
 import com.equitycart.notification.enums.NotificationStatus;
 import com.equitycart.notification.enums.NotificationType;
+import com.equitycart.notification.metrics.NotificationMetrics;
 import com.equitycart.notification.repository.NotificationLogRepository;
 import com.equitycart.notification.service.api.NotificationDispatcher;
 import com.equitycart.notification.service.channel.api.NotificationChannelStrategy;
@@ -40,6 +41,7 @@ public class NotificationDispatcherImpl implements NotificationDispatcher {
   private final Map<String, NotificationChannelStrategy> notificationChannelStrategies;
   private final NotificationLogRepository notificationLogRepository;
   private final ObjectMapper objectMapper;
+  private final NotificationMetrics notificationMetrics;
 
   @Value("${equitycart.notification.channel}")
   String activeChannel;
@@ -118,6 +120,7 @@ public class NotificationDispatcherImpl implements NotificationDispatcher {
               .build();
 
       notificationLogRepository.save(notificationLog);
+      notificationMetrics.record(activeChannel, "SUCCESS");
     } catch (Exception e) {
       log.error(
           "Failed to dispatch notification for event: {}. Error: {}", event, e.getMessage(), e);
@@ -133,6 +136,7 @@ public class NotificationDispatcherImpl implements NotificationDispatcher {
               .errorMessage(e.getMessage())
               .build();
       notificationLogRepository.save(notificationLog);
+      notificationMetrics.record(activeChannel, "FAILED");
     }
   }
 }

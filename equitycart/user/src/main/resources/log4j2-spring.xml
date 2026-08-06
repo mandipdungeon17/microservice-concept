@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+    <Properties>
+        <Property name="SERVICE_NAME">${spring:spring.application.name:-unknown-service}</Property>
+        <Property name="LOG_ROOT">${env:LOG_ROOT:-logs}</Property>
+        <Property name="LOG_DIR">${LOG_ROOT}/${SERVICE_NAME}</Property>
+        <Property name="LOG_FILE">${LOG_DIR}/${SERVICE_NAME}.log</Property>
+    </Properties>
+
+    <Appenders>
+        <!-- stdout -->
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout pattern="%d{ISO8601} [%t] %-5level [%X{correlationId}] %c{1.} - %msg%n%throwable"/>
+        </Console>
+
+        <!-- JSON rolling file -->
+        <RollingFile name="JsonFile"
+                     fileName="${LOG_FILE}"
+                     filePattern="${LOG_DIR}/${SERVICE_NAME}-%d{yyyy-MM-dd}-%i.log.gz"
+                     createOnDemand="false">
+            <JsonLayout compact="true"
+                        eventEol="true"
+                        properties="true"
+                        stacktraceAsString="true"/>
+            <Policies>
+                <TimeBasedTriggeringPolicy interval="1"/>
+                <SizeBasedTriggeringPolicy size="100 MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="30"/>
+        </RollingFile>
+    </Appenders>
+
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+            <AppenderRef ref="JsonFile"/>
+        </Root>
+    </Loggers>
+</Configuration>

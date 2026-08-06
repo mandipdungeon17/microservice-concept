@@ -8,6 +8,7 @@ import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
+import com.equitycart.portfolio.metrics.PortfolioMetrics;
 import com.equitycart.portfolio.repository.HoldingRepository;
 import com.equitycart.portfolio.repository.PortfolioRepository;
 import com.equitycart.portfolio.repository.StockBackRewardRepository;
@@ -53,6 +54,7 @@ public class PortfolioServiceImpl implements PortfolioService {
   private final StockBackRewardRepository stockBackRewardRepository;
   private final VestingHelper vestingHelper;
   private final PortfolioEventStore portfolioEventStore;
+  private final PortfolioMetrics portfolioMetrics;
 
   private static final int retryOptimisticLocking = 3;
 
@@ -200,6 +202,7 @@ public class PortfolioServiceImpl implements PortfolioService {
           dollarVal,
           Map.of("orderId", orderId, "vestingDate", vestingDate.toString()));
 
+      portfolioMetrics.recordRewardGranted();
       return savedStockBackReward;
     }
   }

@@ -1275,7 +1275,7 @@ docker exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
 # In application.yml — change channel and restart:
 equitycart:
   notification:
-    channel: EMAIL     # or WEBHOOK or LOG
+    channel: EMAIL # or WEBHOOK or LOG
 ```
 
 ```bash
@@ -1479,8 +1479,9 @@ curl -s -X POST http://localhost:8180/realms/master/protocol/openid-connect/toke
 ## Phase 8 — Security Hardening (Steps 6-10)
 
 ### Phase 8 Steps 1-5: Completed in Previous Phases
+
 - Step 1-2: Commons JWT library + all services enforce auth
-- Step 3: Feign Authorization propagation  
+- Step 3: Feign Authorization propagation
 - Step 4: Gateway JwtValidationGatewayFilter (now replaced by Step 7)
 - Step 5: Keycloak Docker setup
 
@@ -1746,3 +1747,92 @@ echo "✓ E2E flow complete"
 - [ ] Invalid token → 401
 - [ ] Wrong role → 403
 - [ ] E2E flow succeeds
+
+---
+
+## Phase 9 — Observability Verification Commands
+
+### 1) Infrastructure health checks
+
+```bash
+# Prometheus
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:9090/-/healthy
+
+# Grafana
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/api/health
+
+# Zipkin
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:9411/health
+```
+
+### 2) Service metrics endpoint checks
+
+```bash
+curl -s http://localhost:8081/actuator/prometheus | head -20
+curl -s http://localhost:8088/actuator/prometheus | head -20
+curl -s http://localhost:8084/actuator/prometheus | head -20
+curl -s http://localhost:8087/actuator/prometheus | head -20
+```
+
+### 3) Prometheus target status
+
+```bash
+curl -s http://localhost:9090/api/v1/targets \
+  | jq '.data.activeTargets[] | {job: .labels.job, health: .health, lastError: .lastError}'
+```
+
+### 4) Generate traffic for metrics/traces
+
+```bash
+TOKEN=<valid-access-token>
+
+curl -s -X GET http://localhost:8080/api/products \
+  -H "Authorization: ******" > /dev/null
+
+curl -s -X GET http://localhost:8080/api/portfolio \
+  -H "Authorization: ******" > /dev/null
+
+curl -s -X GET http://localhost:8080/api/notifications \
+  -H "Authorization: ******" > /dev/null
+```
+
+### 5) Spot-check business metrics in Prometheus
+
+```bash
+# Replace metric names with exact names from your /actuator/prometheus output
+curl -s "http://localhost:9090/api/v1/query?query=order_place_total"
+curl -s "http://localhost:9090/api/v1/query?query=portfolio_trade_total"
+curl -s "http://localhost:9090/api/v1/query?query=notification_dispatch_total"
+```
+
+### 6) Alert-rule sanity checks (Grafana/Prometheus side)
+
+```bash
+# Prometheus rules known to Prometheus
+curl -s http://localhost:9090/api/v1/rules | jq '.data.groups[].name'
+
+# Trigger service-down style signal (stop one service container temporarily)
+docker stop docker-order-service-1
+# ...check alert state in Grafana...
+docker start docker-order-service-1
+```
+
+### 7) Structured log verification
+
+```bash
+# Check per-service log files are written (example paths inside mounted LOG_ROOT)
+find . -type f -name "*.log" | head
+
+# If using core-loglens, point it at service log folders and verify correlationId field presence
+```
+
+### Phase 9 Quick Checklist
+
+- [ ] Prometheus, Grafana, Zipkin are healthy
+- [ ] `/actuator/prometheus` exposed for target services
+- [ ] Prometheus targets show `health: up`
+- [ ] Dashboards render live data
+- [ ] Traces visible in Zipkin for gateway → downstream calls
+- [ ] Business metrics increase after functional calls
+- [ ] Alerts transition correctly (OK/Pending/Firing/Recovered)
+- [ ] Structured JSON logs available per service

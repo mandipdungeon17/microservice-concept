@@ -13,6 +13,8 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    networks:
+      - equitycart_network
   kafka:
     container_name: kafka
     image: apache/kafka:latest
@@ -36,6 +38,8 @@ services:
       - KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1
     volumes:
       - kafka-data:/var/kafka/data
+    networks:
+      - equitycart_network
 
   debezium:
     container_name: debezium
@@ -51,6 +55,8 @@ services:
       - CONFIG_STORAGE_TOPIC=equitycart-connect-configs
       - OFFSET_STORAGE_TOPIC=equitycart-connect-offsets
       - STATUS_STORAGE_TOPIC=equitycart-connect-status
+    networks:
+      - equitycart_network
 
   redis:
     container_name: redis
@@ -59,6 +65,8 @@ services:
       - 6379:6379
     volumes:
       - redis-data:/data
+    networks:
+      - equitycart_network
 
   mongodb:
     container_name: mongodb
@@ -67,6 +75,8 @@ services:
       - 27017:27017
     volumes:
       - mongo-data:/data/db
+    networks:
+      - equitycart_network
 
   mailhog:
     container_name: mailhog
@@ -74,6 +84,8 @@ services:
     ports:
       - 1025:1025
       - 8025:8025
+    networks:
+      - equitycart_network
 
   keycloak:
     container_name: keycloak
@@ -91,11 +103,107 @@ services:
       - KC_DB_USERNAME=postgres
       - KC_DB_PASSWORD=postgres
       - KC_HEALTH_ENABLED=true
+    networks:
+      - equitycart_network
     volumes:
       - ./keycloak/equitycart-realm.json:/opt/keycloak/data/import/equitycart-realm.json:ro
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - equitycart_network
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    networks:
+      - equitycart_network
+    depends_on:
+      - prometheus
+
+  zipkin:
+    image: openzipkin/zipkin:latest
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - equitycart_network
+
+## Commented out for now, as ElasticSearch and Kibana are not currently used in the project as environment-constrained, blocked by Zscaler
+
+#  elasticsearch:
+#    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+#    container_name: elasticsearch
+#    environment:
+#      - discovery.type=single-node
+#      - xpack.security.enabled=false
+#      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+#    ports:
+#      - "9200:9200"
+#    volumes:
+#      - elasticsearch-data:/usr/share/elasticsearch/data
+#    networks:
+#      - equitycart_network
+
+#  kibana:
+#    image: docker.elastic.co/kibana/kibana:8.14.3
+#    container_name: kibana
+#    environment:
+#      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+#    ports:
+#      - "5601:5601"
+#    depends_on:
+#      - elasticsearch
+#    networks:
+#      - equitycart_network
+#
+#  fluentd:
+#    build:
+#      context: ./fluentd
+#      dockerfile: Dockerfile
+#    container_name: fluentd
+#    volumes:
+#      - ./fluentd/fluent.conf:/fluentd/etc/fluent.conf:ro
+#      - ./logs:/logs:ro
+#    depends_on:
+#      - elasticsearch
+#    networks:
+#      - equitycart_network
 
 volumes:
   postgres-data:
   kafka-data:
   redis-data:
   mongo-data:
+  prometheus_data:
+  grafana-data:
+#  elasticsearch-data:
+
+networks:
+  equitycart_network:
+    external: true
+    name: equitycart_network

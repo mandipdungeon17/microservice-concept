@@ -38,20 +38,20 @@ Infrastructure:
 
 ### Modules
 
-| Module                | Package                     | Port  | Purpose                                           | Status      |
-| --------------------- | --------------------------- | ----- | ------------------------------------------------- | ----------- |
-| `discovery-server`    | `com.equitycart.discovery`  | 8761  | Eureka service registry                           | Implemented |
-| `config-server`       | `com.equitycart.config`     | 8888  | Spring Cloud Config (Git-backed)                  | Implemented |
-| `api-gateway`         | `com.equitycart.gateway`    | 8080  | Spring Cloud Gateway (routing, correlation ID)    | Implemented |
-| `commons`             | `com.equitycart.commons`    | —     | Shared DTOs, exceptions, events, Feign clients    | Implemented |
-| `user-service`        | `com.equitycart.user`       | 8081  | Authentication, authorization, user profiles, KYC | Implemented |
-| `product-service`     | `com.equitycart.product`    | 8089  | Product catalog, brands, categories, batch import | Implemented |
-| `order-service`       | `com.equitycart.order`      | 8088  | Cart, orders, inventory, outbox, idempotency      | Implemented |
-| `portfolio-service`   | `com.equitycart.portfolio`  | 8084  | Holdings, trading, stock-back rewards, saga       | Implemented |
-| `market-data-service` | `com.equitycart.marketdata` | 8085  | Real-time prices, health scores, SSE streaming    | Implemented |
-| `ledger-service`      | `com.equitycart.ledger`     | 8086  | Double-entry bookkeeping, wallet, audit trail     | Implemented |
-| `notification-service`| `com.equitycart.notification` | 8087 | Event-driven notification dispatch (Kafka, Strategy) | Implemented |
-| `app`                 | `com.equitycart`            | 8082  | Monolith aggregator (legacy, runs all as one JAR) | Deprecated  |
+| Module                 | Package                       | Port | Purpose                                              | Status      |
+| ---------------------- | ----------------------------- | ---- | ---------------------------------------------------- | ----------- |
+| `discovery-server`     | `com.equitycart.discovery`    | 8761 | Eureka service registry                              | Implemented |
+| `config-server`        | `com.equitycart.config`       | 8888 | Spring Cloud Config (Git-backed)                     | Implemented |
+| `api-gateway`          | `com.equitycart.gateway`      | 8080 | Spring Cloud Gateway (routing, correlation ID)       | Implemented |
+| `commons`              | `com.equitycart.commons`      | —    | Shared DTOs, exceptions, events, Feign clients       | Implemented |
+| `user-service`         | `com.equitycart.user`         | 8081 | Authentication, authorization, user profiles, KYC    | Implemented |
+| `product-service`      | `com.equitycart.product`      | 8089 | Product catalog, brands, categories, batch import    | Implemented |
+| `order-service`        | `com.equitycart.order`        | 8088 | Cart, orders, inventory, outbox, idempotency         | Implemented |
+| `portfolio-service`    | `com.equitycart.portfolio`    | 8084 | Holdings, trading, stock-back rewards, saga          | Implemented |
+| `market-data-service`  | `com.equitycart.marketdata`   | 8085 | Real-time prices, health scores, SSE streaming       | Implemented |
+| `ledger-service`       | `com.equitycart.ledger`       | 8086 | Double-entry bookkeeping, wallet, audit trail        | Implemented |
+| `notification-service` | `com.equitycart.notification` | 8087 | Event-driven notification dispatch (Kafka, Strategy) | Implemented |
+| `app`                  | `com.equitycart`              | 8082 | Monolith aggregator (legacy, runs all as one JAR)    | Deprecated  |
 
 ### Folder Structure
 
@@ -141,33 +141,33 @@ equitycart/
 
 ## Tech Stack
 
-| Layer             | Technology                                    |
-| ----------------- | --------------------------------------------- |
-| Language          | Java 21 (LTS)                                 |
-| Framework         | Spring Boot 3.5.8                             |
-| Cloud             | Spring Cloud 2025.0.0 (Gateway, Config, Eureka, OpenFeign) |
-| Batch Processing  | Spring Batch (chunk-oriented CSV import)      |
-| Build             | Gradle 8.14.2 (Groovy DSL)                    |
-| Code Formatting   | Spotless (Google Java Format)                 |
-| Resilience        | Resilience4j (Circuit Breaker, Retry, Rate Limiter) |
-| Reactive Client   | WebClient + Reactor Netty (non-blocking HTTP) |
-| SQL Database      | PostgreSQL (7 databases, one per service)      |
-| NoSQL Database    | MongoDB (price history, event sourcing, TTL indexes) |
-| Cache             | Redis (@Cacheable + RedisTemplate + manual opsForValue) |
+| Layer             | Technology                                                     |
+| ----------------- | -------------------------------------------------------------- |
+| Language          | Java 21 (LTS)                                                  |
+| Framework         | Spring Boot 3.5.8                                              |
+| Cloud             | Spring Cloud 2025.0.0 (Gateway, Config, Eureka, OpenFeign)     |
+| Batch Processing  | Spring Batch (chunk-oriented CSV import)                       |
+| Build             | Gradle 8.14.2 (Groovy DSL)                                     |
+| Code Formatting   | Spotless (Google Java Format)                                  |
+| Resilience        | Resilience4j (Circuit Breaker, Retry, Rate Limiter)            |
+| Reactive Client   | WebClient + Reactor Netty (non-blocking HTTP)                  |
+| SQL Database      | PostgreSQL (7 databases, one per service)                      |
+| NoSQL Database    | MongoDB (price history, event sourcing, TTL indexes)           |
+| Cache             | Redis (@Cacheable + RedisTemplate + manual opsForValue)        |
 | Message Broker    | Apache Kafka (KRaft mode, event-driven rewards, notifications) |
-| CDC               | Debezium (PostgreSQL WAL → Kafka via Outbox Event Router) |
-| Security          | Spring Security + JWT (later Keycloak/OAuth2) |
-| API Gateway       | Spring Cloud Gateway (WebFlux, Eureka-aware lb://) |
-| Service Discovery | Netflix Eureka (prefer-ip-address for Docker)  |
-| Config Management | Spring Cloud Config Server (Git-backed)        |
-| Inter-Service     | OpenFeign (declarative HTTP clients via Eureka) |
-| Observability     | Correlation ID (MDC + Gateway filter + Feign interceptor) |
-| Containerization  | Docker + Docker Compose (full stack)           |
-| Dev Email         | MailHog (SMTP trap on port 1025, UI on 8025)   |
-| Monitoring        | Prometheus + Grafana (planned — Phase 9)       |
-| Orchestration     | Kubernetes (planned — Phase 10)                |
-| API Docs          | SpringDoc OpenAPI (planned)                    |
-| Testing           | JUnit 5, Mockito, Testcontainers (planned)     |
+| CDC               | Debezium (PostgreSQL WAL → Kafka via Outbox Event Router)      |
+| Security          | Spring Security + JWT (later Keycloak/OAuth2)                  |
+| API Gateway       | Spring Cloud Gateway (WebFlux, Eureka-aware lb://)             |
+| Service Discovery | Netflix Eureka (prefer-ip-address for Docker)                  |
+| Config Management | Spring Cloud Config Server (Git-backed)                        |
+| Inter-Service     | OpenFeign (declarative HTTP clients via Eureka)                |
+| Observability     | Correlation ID + Micrometer metrics + distributed tracing      |
+| Containerization  | Docker + Docker Compose (full stack)                           |
+| Dev Email         | MailHog (SMTP trap on port 1025, UI on 8025)                   |
+| Monitoring        | Prometheus + Grafana + Zipkin + Grafana Alerts                 |
+| Orchestration     | Kubernetes (planned — Phase 10)                                |
+| API Docs          | SpringDoc OpenAPI (planned)                                    |
+| Testing           | JUnit 5, Mockito, Testcontainers (planned)                     |
 
 ## Implemented Features
 
@@ -263,6 +263,24 @@ equitycart/
 - **Docker Compose** — fully containerized stack (10 services + 6 infrastructure), two-file split (infra vs apps), start scripts with readiness polling
 - **Build Pipeline** — Gradle bootJar → Dockerfile → Docker image (one per service), build-images.sh script
 
+### Phase 8 — Security Hardening (Complete)
+
+- **Per-service authentication** — every business service can independently validate JWT
+- **Keycloak integration** — OAuth2/OIDC-based token validation with JWKS
+- **Gateway security chain** — reactive auth + authorization + token relay
+- **Rate limiting** — Redis token-bucket at gateway edge
+- **OWASP headers** — centralized hardening via gateway global filter
+
+### Phase 9 — Observability (Complete)
+
+- **Structured logging** — Log4j2 JSON logs per service (console + rolling file)
+- **Prometheus metrics** — actuator + Micrometer metrics scraped across services
+- **Grafana dashboards** — pre-provisioned datasource/dashboard wiring
+- **Distributed tracing** — Micrometer tracing exported to Zipkin
+- **Business metrics** — order, portfolio, and notification domain metrics
+- **Operational alerts** — service-down, error-rate, and p99 latency alert rules
+- **Centralized log fallback** — EFK/Fluentd blocked by enterprise network policy; `core-loglens` + JSON logs used
+
 ## API Endpoints
 
 ### Authentication
@@ -276,22 +294,22 @@ equitycart/
 
 ### Cart
 
-| Method | Endpoint                    | Access | Description              |
-| ------ | --------------------------- | ------ | ------------------------ |
-| POST   | `/api/cart/items`           | Auth   | Add item to cart         |
-| GET    | `/api/cart`                 | Auth   | Get current user's cart  |
-| DELETE | `/api/cart/items/{productId}` | Auth | Remove item from cart    |
-| DELETE | `/api/cart`                 | Auth   | Clear entire cart        |
+| Method | Endpoint                      | Access | Description             |
+| ------ | ----------------------------- | ------ | ----------------------- |
+| POST   | `/api/cart/items`             | Auth   | Add item to cart        |
+| GET    | `/api/cart`                   | Auth   | Get current user's cart |
+| DELETE | `/api/cart/items/{productId}` | Auth   | Remove item from cart   |
+| DELETE | `/api/cart`                   | Auth   | Clear entire cart       |
 
 ### Orders
 
-| Method | Endpoint                     | Access | Description                          |
-| ------ | ---------------------------- | ------ | ------------------------------------ |
-| POST   | `/api/order`                 | Auth   | Place order from cart                |
-| GET    | `/api/order`                 | Auth   | Get all orders for current user      |
-| GET    | `/api/order/{orderId}`       | Auth   | Get order by ID                      |
-| PATCH  | `/api/order/{orderId}/status`| ADMIN  | Update order status (state machine)  |
-| PATCH  | `/api/order/{orderId}/return`| Auth   | Request return (owner only)          |
+| Method | Endpoint                      | Access | Description                         |
+| ------ | ----------------------------- | ------ | ----------------------------------- |
+| POST   | `/api/order`                  | Auth   | Place order from cart               |
+| GET    | `/api/order`                  | Auth   | Get all orders for current user     |
+| GET    | `/api/order/{orderId}`        | Auth   | Get order by ID                     |
+| PATCH  | `/api/order/{orderId}/status` | ADMIN  | Update order status (state machine) |
+| PATCH  | `/api/order/{orderId}/return` | Auth   | Request return (owner only)         |
 
 ### Products
 
@@ -334,40 +352,40 @@ equitycart/
 
 ### Market Data
 
-| Method | Endpoint                               | Access | Description                          |
-| ------ | -------------------------------------- | ------ | ------------------------------------ |
-| GET    | `/api/market-data/price/{symbol}`      | Auth   | Get current stock price              |
-| GET    | `/api/market-data/prices?symbols=A,B`  | Auth   | Batch price lookup                   |
-| GET    | `/api/market-data/history/{symbol}`    | Auth   | Historical prices (default 7 days)   |
-| GET    | `/api/market-data/health/{symbol}`     | Auth   | Company health score (0-100)         |
-| GET    | `/api/market-data/stream/{symbol}`     | Auth   | SSE live price stream (5s interval)  |
-| DELETE | `/api/market-data/price/{symbol}/cache`| ADMIN  | Evict price cache                    |
+| Method | Endpoint                                | Access | Description                         |
+| ------ | --------------------------------------- | ------ | ----------------------------------- |
+| GET    | `/api/market-data/price/{symbol}`       | Auth   | Get current stock price             |
+| GET    | `/api/market-data/prices?symbols=A,B`   | Auth   | Batch price lookup                  |
+| GET    | `/api/market-data/history/{symbol}`     | Auth   | Historical prices (default 7 days)  |
+| GET    | `/api/market-data/health/{symbol}`      | Auth   | Company health score (0-100)        |
+| GET    | `/api/market-data/stream/{symbol}`      | Auth   | SSE live price stream (5s interval) |
+| DELETE | `/api/market-data/price/{symbol}/cache` | ADMIN  | Evict price cache                   |
 
 ### Portfolio
 
-| Method | Endpoint                      | Access | Description                                |
-| ------ | ----------------------------- | ------ | ------------------------------------------ |
-| GET    | `/api/portfolio`              | Auth   | Get user's portfolio with all holdings     |
-| POST   | `/api/portfolio/holdings`     | Auth   | Add or update a holding                    |
-| POST   | `/api/portfolio/trade`        | Auth   | Execute BUY or SELL trade                  |
-| POST   | `/api/portfolio/sell-to-spend` | Auth  | Sell stock to fund a pending order         |
-| GET    | `/api/portfolio/rewards`      | Auth   | Get stock-back reward history              |
-| GET    | `/api/portfolio/analytics`    | Auth   | Portfolio analytics (cost basis, weights)  |
+| Method | Endpoint                       | Access | Description                               |
+| ------ | ------------------------------ | ------ | ----------------------------------------- |
+| GET    | `/api/portfolio`               | Auth   | Get user's portfolio with all holdings    |
+| POST   | `/api/portfolio/holdings`      | Auth   | Add or update a holding                   |
+| POST   | `/api/portfolio/trade`         | Auth   | Execute BUY or SELL trade                 |
+| POST   | `/api/portfolio/sell-to-spend` | Auth   | Sell stock to fund a pending order        |
+| GET    | `/api/portfolio/rewards`       | Auth   | Get stock-back reward history             |
+| GET    | `/api/portfolio/analytics`     | Auth   | Portfolio analytics (cost basis, weights) |
 
 ### Event Sourcing (Portfolio)
 
-| Method | Endpoint                                   | Access | Description                                     |
-| ------ | ------------------------------------------ | ------ | ----------------------------------------------- |
-| GET    | `/api/portfolio/events`                    | Auth   | Full event history for user (append-only log)   |
-| GET    | `/api/portfolio/events?type=X`             | Auth   | Filtered by event type                          |
-| GET    | `/api/portfolio/events/projection`         | Auth   | Rebuild current holdings from event replay      |
+| Method | Endpoint                           | Access | Description                                   |
+| ------ | ---------------------------------- | ------ | --------------------------------------------- |
+| GET    | `/api/portfolio/events`            | Auth   | Full event history for user (append-only log) |
+| GET    | `/api/portfolio/events?type=X`     | Auth   | Filtered by event type                        |
+| GET    | `/api/portfolio/events/projection` | Auth   | Rebuild current holdings from event replay    |
 
 ### Notifications
 
-| Method | Endpoint                                   | Access | Description                                     |
-| ------ | ------------------------------------------ | ------ | ----------------------------------------------- |
-| GET    | `/api/notifications`                       | Auth   | All notifications for user (most recent first)  |
-| GET    | `/api/notifications?type=TRADE_EXECUTED`   | Auth   | Filtered by notification type                   |
+| Method | Endpoint                                 | Access | Description                                    |
+| ------ | ---------------------------------------- | ------ | ---------------------------------------------- |
+| GET    | `/api/notifications`                     | Auth   | All notifications for user (most recent first) |
+| GET    | `/api/notifications?type=TRADE_EXECUTED` | Auth   | Filtered by notification type                  |
 
 ## How to Build & Run
 
@@ -414,11 +432,13 @@ sh start-services.sh
 ## Prerequisites
 
 ### For Docker Compose mode:
+
 - JDK 21 (for building)
 - Docker Desktop (with WSL2 backend on Windows)
 - ~8GB RAM allocated to Docker (10 services + 6 infrastructure containers)
 
 ### For local development:
+
 - JDK 21
 - PostgreSQL (running on localhost:5432, databases: equitycart_user, equitycart_order, etc.)
 - Redis (localhost:6379)
@@ -430,22 +450,22 @@ sh start-services.sh
 
 Key application properties (`app/src/main/resources/application.yml`):
 
-| Property                              | Description                               |
-| ------------------------------------- | ----------------------------------------- |
-| `spring.datasource.url`               | PostgreSQL connection URL                 |
-| `spring.jpa.hibernate.ddl-auto`       | Schema generation strategy (update)       |
-| `jwt.secret`                          | HMAC secret for signing JWT tokens        |
-| `jwt.access-token-expiry`             | Access token TTL in milliseconds          |
-| `jwt.refresh-token-expiry`            | Refresh token TTL in milliseconds         |
-| `spring.batch.jdbc.initialize-schema` | Auto-create Spring Batch metadata tables  |
-| `spring.batch.job.enabled`            | Disable auto-run of batch jobs on startup |
-| `spring.data.redis.host`              | Redis server hostname (default: localhost)|
-| `spring.data.redis.port`              | Redis server port (default: 6379)         |
-| `spring.cache.type`                   | Cache provider (redis)                    |
-| `spring.cache.redis.time-to-live`     | Default TTL for cache entries (ms)        |
-| `spring.data.mongodb.uri`             | MongoDB connection URI                    |
-| `alphavantage.base-url`               | Alpha Vantage API base URL                |
-| `alphaVantage.api-key`                | Alpha Vantage API key (env var)           |
+| Property                              | Description                                |
+| ------------------------------------- | ------------------------------------------ |
+| `spring.datasource.url`               | PostgreSQL connection URL                  |
+| `spring.jpa.hibernate.ddl-auto`       | Schema generation strategy (update)        |
+| `jwt.secret`                          | HMAC secret for signing JWT tokens         |
+| `jwt.access-token-expiry`             | Access token TTL in milliseconds           |
+| `jwt.refresh-token-expiry`            | Refresh token TTL in milliseconds          |
+| `spring.batch.jdbc.initialize-schema` | Auto-create Spring Batch metadata tables   |
+| `spring.batch.job.enabled`            | Disable auto-run of batch jobs on startup  |
+| `spring.data.redis.host`              | Redis server hostname (default: localhost) |
+| `spring.data.redis.port`              | Redis server port (default: 6379)          |
+| `spring.cache.type`                   | Cache provider (redis)                     |
+| `spring.cache.redis.time-to-live`     | Default TTL for cache entries (ms)         |
+| `spring.data.mongodb.uri`             | MongoDB connection URI                     |
+| `alphavantage.base-url`               | Alpha Vantage API base URL                 |
+| `alphaVantage.api-key`                | Alpha Vantage API key (env var)            |
 
 | `spring.kafka.bootstrap-servers`      | Kafka broker address (default: localhost:9092) |
 | `spring.kafka.consumer.group-id`      | Default consumer group ID                     |
@@ -457,29 +477,32 @@ Key application properties (`app/src/main/resources/application.yml`):
 
 ## Project Documents
 
-| File                            | Purpose                                           |
-| ------------------------------- | ------------------------------------------------- |
-| `equitycart-roadmap.md`         | Full 10-phase, 20-26 week development roadmap     |
-| `progress.md`                   | Current phase status, steps completed, next steps |
-| `learning_log.md`               | Roadblocks, concepts learned, and interview Q&A   |
-| `kafka-learning.md`             | Deep-dive Kafka concepts (topics, partitions, serialization, DLQ) |
-| `microservice-patterns.md`      | Microservice patterns (Outbox, Saga, Circuit Breaker) |
-| `test-commands.md`              | Consolidated curl test commands for all phases    |
-| `learning-instructor-agent.md`  | Agent system prompt and teaching methodology      |
-| `project-development-prompt.md` | Project vision, roles, and requirements           |
+| File                                | Purpose                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------ |
+| `equitycart-roadmap.md`             | Full 10-phase, 20-26 week development roadmap                            |
+| `progress.md`                       | Current phase status, steps completed, next steps                        |
+| `learning_log.md`                   | Roadblocks, concepts learned, and interview Q&A                          |
+| `phase-9-observability-learning.md` | Phase 9 deep-dive: architecture, trade-offs, issues, and interview notes |
+| `kafka-learning.md`                 | Deep-dive Kafka concepts (topics, partitions, serialization, DLQ)        |
+| `microservice-patterns.md`          | Microservice patterns (Outbox, Saga, Circuit Breaker)                    |
+| `test-commands.md`                  | Consolidated curl test commands for all phases                           |
+| `learning-instructor-agent.md`      | Agent system prompt and teaching methodology                             |
+| `project-development-prompt.md`     | Project vision, roles, and requirements                                  |
 
 ## Current Status
 
-| Phase   | Name                           | Status                                       |
-| ------- | ------------------------------ | -------------------------------------------- |
-| Phase 0 | Foundation & Setup             | COMPLETE                                     |
-| Phase 1 | User Service & Security        | COMPLETE (unit tests deferred)               |
-| Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)               |
-| Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)               |
-| Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)               |
-| Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE                                     |
-| Phase 6 | Event-Driven Architecture     | COMPLETE                                     |
-| Phase 7 | Microservices Decomposition    | COMPLETE (E2E testing deferred to Phase 8)   |
+| Phase   | Name                           | Status                                                                  |
+| ------- | ------------------------------ | ----------------------------------------------------------------------- |
+| Phase 0 | Foundation & Setup             | COMPLETE                                                                |
+| Phase 1 | User Service & Security        | COMPLETE (unit tests deferred)                                          |
+| Phase 2 | Product Catalog & Batch Import | COMPLETE (unit tests deferred)                                          |
+| Phase 3 | Order Service & Cart           | COMPLETE (unit tests deferred)                                          |
+| Phase 4 | Market Data Service (Reactive) | COMPLETE (unit tests deferred)                                          |
+| Phase 5 | Portfolio & Stock-Back Engine  | COMPLETE                                                                |
+| Phase 6 | Event-Driven Architecture      | COMPLETE                                                                |
+| Phase 7 | Microservices Decomposition    | COMPLETE (E2E testing deferred to Phase 8)                              |
+| Phase 8 | Security Hardening             | COMPLETE                                                                |
+| Phase 9 | Observability                  | COMPLETE (EFK/Fluentd image access blocked by policy; fallback adopted) |
 
 ## Known Issues
 
@@ -490,5 +513,4 @@ Key application properties (`app/src/main/resources/application.yml`):
 ## Roadmap Ahead
 
 - **Phase 8**: Security Hardening (OAuth2/Keycloak, per-service JWT validation, rate limiting)
-- **Phase 9**: Observability (Prometheus, Grafana, distributed tracing with Micrometer)
 - **Phase 10**: Advanced Features & Scale (Kubernetes, CI/CD, load testing)

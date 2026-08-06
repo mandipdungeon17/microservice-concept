@@ -292,11 +292,11 @@ spring:
 
 This was a reasonable first attempt: "add a header to every request." But it fails for three reasons:
 
-| Problem | Why it breaks |
-|---------|--------------|
-| **Wrong direction** | `AddResponseHeader` adds to the **response** (back to browser). It does NOT add to the **forwarded request** (to downstream services). Downstream services never see the header. |
-| **SpEL evaluated at startup** | `#{T(java.util.UUID).randomUUID().toString()}` is a Spring Expression evaluated once when the route configuration loads — not per request. Every request gets the same static UUID. |
-| **No conditional logic** | Even if you used `AddRequestHeader` (correct direction), YAML filters cannot express "if header missing, generate; else preserve existing." You'd always overwrite caller-supplied IDs. |
+| Problem                       | Why it breaks                                                                                                                                                                           |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Wrong direction**           | `AddResponseHeader` adds to the **response** (back to browser). It does NOT add to the **forwarded request** (to downstream services). Downstream services never see the header.        |
+| **SpEL evaluated at startup** | `#{T(java.util.UUID).randomUUID().toString()}` is a Spring Expression evaluated once when the route configuration loads — not per request. Every request gets the same static UUID.     |
+| **No conditional logic**      | Even if you used `AddRequestHeader` (correct direction), YAML filters cannot express "if header missing, generate; else preserve existing." You'd always overwrite caller-supplied IDs. |
 
 **The underlying distinction:**
 

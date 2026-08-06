@@ -147,11 +147,11 @@ An application that publishes messages to topics.
 ```
 
 **Producer guarantees (acks config):**
-| Setting | Behavior | Trade-off |
-|---------|----------|-----------|
-| `acks=0` | Fire and forget (don't wait for broker) | Fastest, may lose messages |
-| `acks=1` | Wait for leader to acknowledge | Balanced (default) |
-| `acks=all` | Wait for ALL replicas to acknowledge | Slowest, strongest durability |
+| Setting    | Behavior                                | Trade-off                     |
+| ---------- | --------------------------------------- | ----------------------------- |
+| `acks=0`   | Fire and forget (don't wait for broker) | Fastest, may lose messages    |
+| `acks=1`   | Wait for leader to acknowledge          | Balanced (default)            |
+| `acks=all` | Wait for ALL replicas to acknowledge    | Slowest, strongest durability |
 
 Spring Kafka default: `acks=1` (leader acknowledgement).
 
@@ -722,20 +722,20 @@ Message → @KafkaListener → Exception thrown
 
 ### Key Components
 
-| Component | Role |
-|-----------|------|
-| `DefaultErrorHandler` | Replaces Spring's default (infinite retry). Catches exceptions, manages retry count. |
-| `FixedBackOff(1000L, 3)` | Retry strategy: wait 1 second between attempts, max 3 retries. |
-| `DeadLetterPublishingRecoverer` | After retries exhausted, publishes the failed message (with error headers) to the DLT topic. |
-| `addNotRetryableExceptions(...)` | Exception types that skip retries entirely — sent to DLT immediately on first failure. |
+| Component                        | Role                                                                                         |
+| -------------------------------- | -------------------------------------------------------------------------------------------- |
+| `DefaultErrorHandler`            | Replaces Spring's default (infinite retry). Catches exceptions, manages retry count.         |
+| `FixedBackOff(1000L, 3)`         | Retry strategy: wait 1 second between attempts, max 3 retries.                               |
+| `DeadLetterPublishingRecoverer`  | After retries exhausted, publishes the failed message (with error headers) to the DLT topic. |
+| `addNotRetryableExceptions(...)` | Exception types that skip retries entirely — sent to DLT immediately on first failure.       |
 
 ### Retryable vs Non-Retryable
 
-| Retryable (temporary) | Non-Retryable (permanent) |
-|------------------------|---------------------------|
-| `DataAccessException` (DB hiccup) | `DeserializationException` (bad JSON) |
-| `TimeoutException` (network blip) | `NullPointerException` (code bug) |
-| `HttpServerErrorException` (upstream 500) | `ClassCastException` (wrong type) |
+| Retryable (temporary)                     | Non-Retryable (permanent)             |
+| ----------------------------------------- | ------------------------------------- |
+| `DataAccessException` (DB hiccup)         | `DeserializationException` (bad JSON) |
+| `TimeoutException` (network blip)         | `NullPointerException` (code bug)     |
+| `HttpServerErrorException` (upstream 500) | `ClassCastException` (wrong type)     |
 
 Non-retryable exceptions are configured explicitly:
 ```java
@@ -813,11 +813,11 @@ Spring Kafka's `ExponentialBackOffWithMaxRetries` does NOT include jitter native
 
 ### Spring Kafka Implementation
 
-| Class | Behavior |
-|-------|----------|
-| `FixedBackOff(interval, maxAttempts)` | Constant delay. Simple. Thundering herd risk. |
-| `ExponentialBackOff` | Growing delay. No max-retries (uses `maxElapsedTime`). |
-| `ExponentialBackOffWithMaxRetries(maxRetries)` | Growing delay + explicit retry cap. Recommended. |
+| Class                                          | Behavior                                               |
+| ---------------------------------------------- | ------------------------------------------------------ |
+| `FixedBackOff(interval, maxAttempts)`          | Constant delay. Simple. Thundering herd risk.          |
+| `ExponentialBackOff`                           | Growing delay. No max-retries (uses `maxElapsedTime`). |
+| `ExponentialBackOffWithMaxRetries(maxRetries)` | Growing delay + explicit retry cap. Recommended.       |
 
 ```java
 // ExponentialBackOffWithMaxRetries extends ExponentialBackOff
@@ -830,13 +830,13 @@ backOff.setMaxInterval(10000L);     // never exceed 10s per retry
 
 ### When to Use Which
 
-| Scenario | Strategy |
-|----------|----------|
-| Low-volume, single consumer | FixedBackOff (simplicity wins) |
-| Multiple consumers, shared DB | ExponentialBackOff (spread retries) |
-| High-volume production, many instances | Exponential + Jitter (eliminate synchronized storms) |
-| Idempotent consumers, fast recovery | Aggressive retries OK (lower multiplier, more attempts) |
-| Non-idempotent consumers | Fewer retries, alert quickly, manual DLT review |
+| Scenario                               | Strategy                                                |
+| -------------------------------------- | ------------------------------------------------------- |
+| Low-volume, single consumer            | FixedBackOff (simplicity wins)                          |
+| Multiple consumers, shared DB          | ExponentialBackOff (spread retries)                     |
+| High-volume production, many instances | Exponential + Jitter (eliminate synchronized storms)    |
+| Idempotent consumers, fast recovery    | Aggressive retries OK (lower multiplier, more attempts) |
+| Non-idempotent consumers               | Fewer retries, alert quickly, manual DLT review         |
 
 ---
 
@@ -846,13 +846,13 @@ backOff.setMaxInterval(10000L);     // never exceed 10s per retry
 
 The Outbox Poller (`OutboxPoller.java`) polls the database every 5 seconds for PENDING rows. This has trade-offs:
 
-| Aspect | Polling (OutboxPoller) | CDC (Debezium) |
-|--------|----------------------|----------------|
-| Latency | Up to poll interval (5s) | Near-real-time (ms) |
-| DB load | Repeated SELECT queries | Reads WAL stream (no queries) |
-| Complexity | Simple Java code | External infrastructure (Kafka Connect) |
-| Scaling | Multiple pollers need coordination | Single connector per table |
-| Recovery | Re-reads PENDING on restart | Resumes from WAL position (LSN) |
+| Aspect     | Polling (OutboxPoller)             | CDC (Debezium)                          |
+| ---------- | ---------------------------------- | --------------------------------------- |
+| Latency    | Up to poll interval (5s)           | Near-real-time (ms)                     |
+| DB load    | Repeated SELECT queries            | Reads WAL stream (no queries)           |
+| Complexity | Simple Java code                   | External infrastructure (Kafka Connect) |
+| Scaling    | Multiple pollers need coordination | Single connector per table              |
+| Recovery   | Re-reads PENDING on restart        | Resumes from WAL position (LSN)         |
 
 ### What Is Change Data Capture?
 
@@ -896,11 +896,11 @@ Client INSERT → WAL (append-only log on disk) → Background Writer → Table 
 
 **WAL Levels:**
 
-| Level | What's Logged | Use Case |
-|-------|---------------|----------|
-| `minimal` | Crash recovery only | Standalone, no replication |
-| `replica` (default) | + physical replication data | Streaming replicas |
-| `logical` | + row-level changes decoded | CDC, logical replication |
+| Level               | What's Logged               | Use Case                   |
+| ------------------- | --------------------------- | -------------------------- |
+| `minimal`           | Crash recovery only         | Standalone, no replication |
+| `replica` (default) | + physical replication data | Streaming replicas         |
+| `logical`           | + row-level changes decoded | CDC, logical replication   |
 
 CDC requires `wal_level = logical` — this adds decoded row data to the WAL that tools like Debezium can interpret.
 
@@ -1052,10 +1052,10 @@ OutboxPoller.java:
   public class OutboxPoller { ... }
 ```
 
-| Profile Active | OutboxPoller | Debezium | Who publishes to Kafka? |
-|----------------|-------------|----------|------------------------|
-| (none/default) | ENABLED | (not running) | OutboxPoller |
-| `cdc` | DISABLED | RUNNING | Debezium via WAL |
+| Profile Active | OutboxPoller | Debezium      | Who publishes to Kafka? |
+| -------------- | ------------ | ------------- | ----------------------- |
+| (none/default) | ENABLED      | (not running) | OutboxPoller            |
+| `cdc`          | DISABLED     | RUNNING       | Debezium via WAL        |
 
 **Outbox status in CDC mode:** With the poller, rows transition `PENDING → SENT`. With Debezium CDC, the status column stays `PENDING` forever — Debezium reads the WAL INSERT event and doesn't update the row. This is expected behavior. A separate cleanup job can mark old rows or delete them.
 
@@ -1111,12 +1111,12 @@ Consumer receives: 18110 → MismatchedInputException!
 
 **Fix:** Use `@Column(columnDefinition = "text")` — stores JSON inline in the row. Debezium reads the actual JSON content directly from the WAL.
 
-| | `@Lob` (OID) | `@Column(columnDefinition = "text")` |
-|---|---|---|
-| Storage | `pg_largeobject` catalog | Inline (TOAST if > 2KB) |
-| JPA reads | Transparent (follows OID) | Transparent |
-| Debezium/CDC reads | **Broken** (sees OID number) | Works (sees JSON) |
-| Max size | Unlimited | Unlimited |
+|                    | `@Lob` (OID)                 | `@Column(columnDefinition = "text")` |
+| ------------------ | ---------------------------- | ------------------------------------ |
+| Storage            | `pg_largeobject` catalog     | Inline (TOAST if > 2KB)              |
+| JPA reads          | Transparent (follows OID)    | Transparent                          |
+| Debezium/CDC reads | **Broken** (sees OID number) | Works (sees JSON)                    |
+| Max size           | Unlimited                    | Unlimited                            |
 
 ### `value.converter` — Kafka Connect Serialization Layer
 
@@ -1140,40 +1140,40 @@ For the Outbox Event Router (which already extracts the payload), `StringConvert
 
 When a Debezium connector starts for the first time, it performs an **initial snapshot** — reading all existing rows from the monitored table. For the outbox table, this means publishing ALL existing PENDING rows.
 
-| Mode | Behavior | When to Use |
-|------|----------|-------------|
-| `initial` (default) | Full table scan on first start, then WAL streaming | Need to capture existing data |
-| `never` | Skip snapshot, only stream new WAL changes | Outbox table (old rows already processed by poller) |
-| `always` | Snapshot on every connector restart | Recovery/debugging |
+| Mode                | Behavior                                           | When to Use                                         |
+| ------------------- | -------------------------------------------------- | --------------------------------------------------- |
+| `initial` (default) | Full table scan on first start, then WAL streaming | Need to capture existing data                       |
+| `never`             | Skip snapshot, only stream new WAL changes         | Outbox table (old rows already processed by poller) |
+| `always`            | Snapshot on every connector restart                | Recovery/debugging                                  |
 
 For the outbox pattern: `"snapshot.mode": "never"` — existing rows were already published by the OutboxPoller before switching to CDC. Only new INSERTs need capturing.
 
 ### Issues Faced and Resolutions
 
-| Issue | Root Cause | Resolution |
-|-------|-----------|------------|
-| Debezium can't connect to Kafka | `advertised.listeners=localhost:9092` — inside Debezium container, localhost = itself | Added dual-listener: DOCKER on port 29092 advertised as `host.docker.internal:29092` |
-| Connector FAILED: "aggregatetype is not a valid field name" | Hibernate snake_case columns vs Debezium's expected camelCase defaults | Added explicit `table.field.*` mappings for all snake_case columns |
-| Consumer infinite loop: "No type information in headers" | Debezium messages lack `__TypeId__` header that Spring's JsonDeserializer requires | Added `spring.json.value.default.type` property to each `@KafkaListener` |
-| InvalidTimestampException: "Timestamp out of range" | `created_at` column used as Kafka timestamp — host timezone (IST) vs Docker UTC | Removed `transforms.outbox.table.field.event.timestamp` from connector config |
-| Consumer receives number (18110) instead of JSON | `@Lob` stores OID reference — Debezium reads OID, not the referenced content | Replaced `@Lob` with `@Column(columnDefinition = "text")` for inline storage |
-| order-delivered-dlt auto-created immediately | Old poison messages on topic from failed snapshot attempts | Deleted topics, added `snapshot.mode=never`, re-registered connector |
-| Git Bash mangles docker exec paths | Git Bash converts `/opt/...` to Windows paths | Use PowerShell or Docker Desktop terminal instead |
+| Issue                                                       | Root Cause                                                                            | Resolution                                                                           |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Debezium can't connect to Kafka                             | `advertised.listeners=localhost:9092` — inside Debezium container, localhost = itself | Added dual-listener: DOCKER on port 29092 advertised as `host.docker.internal:29092` |
+| Connector FAILED: "aggregatetype is not a valid field name" | Hibernate snake_case columns vs Debezium's expected camelCase defaults                | Added explicit `table.field.*` mappings for all snake_case columns                   |
+| Consumer infinite loop: "No type information in headers"    | Debezium messages lack `__TypeId__` header that Spring's JsonDeserializer requires    | Added `spring.json.value.default.type` property to each `@KafkaListener`             |
+| InvalidTimestampException: "Timestamp out of range"         | `created_at` column used as Kafka timestamp — host timezone (IST) vs Docker UTC       | Removed `transforms.outbox.table.field.event.timestamp` from connector config        |
+| Consumer receives number (18110) instead of JSON            | `@Lob` stores OID reference — Debezium reads OID, not the referenced content          | Replaced `@Lob` with `@Column(columnDefinition = "text")` for inline storage         |
+| order-delivered-dlt auto-created immediately                | Old poison messages on topic from failed snapshot attempts                            | Deleted topics, added `snapshot.mode=never`, re-registered connector                 |
+| Git Bash mangles docker exec paths                          | Git Bash converts `/opt/...` to Windows paths                                         | Use PowerShell or Docker Desktop terminal instead                                    |
 
 ### CDC Drawbacks and Production Considerations
 
 While CDC eliminates polling overhead, it introduces its own failure modes:
 
-| Drawback | Why It Matters |
-|----------|---------------|
-| **WAL disk growth** | `wal_level=logical` generates more WAL data than `replica`. If consumers fall behind or replication slots stall, WAL accumulates and can fill disk. |
-| **Replication slot retention** | If Debezium goes down, PostgreSQL holds WAL segments indefinitely (won't recycle them). This can fill the disk in hours on write-heavy systems. |
+| Drawback                               | Why It Matters                                                                                                                                          |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **WAL disk growth**                    | `wal_level=logical` generates more WAL data than `replica`. If consumers fall behind or replication slots stall, WAL accumulates and can fill disk.     |
+| **Replication slot retention**         | If Debezium goes down, PostgreSQL holds WAL segments indefinitely (won't recycle them). This can fill the disk in hours on write-heavy systems.         |
 | **No delivery confirmation to source** | Unlike the poller (which marks rows SENT after Kafka ACK), CDC has no feedback mechanism to the outbox table. You can't query "was this row published?" |
-| **Operational complexity** | Kafka Connect is another distributed system to deploy, monitor, upgrade. Connector failures require manual restart via REST API. |
-| **Schema evolution** | Adding/renaming columns in the outbox table can break the Debezium connector if field mappings aren't updated simultaneously. |
-| **Snapshot poisoning** | Re-registering a connector triggers a full table scan (default `snapshot.mode=initial`), publishing stale rows that may have already been processed. |
-| **Timezone mismatches** | Docker containers default to UTC; host apps use local time. Any timestamp column used as Kafka message timestamp will mismatch. |
-| **Debugging difficulty** | Issues surface as Kafka Connect REST API errors or consumer failures — harder to trace than application-level exceptions in the poller. |
+| **Operational complexity**             | Kafka Connect is another distributed system to deploy, monitor, upgrade. Connector failures require manual restart via REST API.                        |
+| **Schema evolution**                   | Adding/renaming columns in the outbox table can break the Debezium connector if field mappings aren't updated simultaneously.                           |
+| **Snapshot poisoning**                 | Re-registering a connector triggers a full table scan (default `snapshot.mode=initial`), publishing stale rows that may have already been processed.    |
+| **Timezone mismatches**                | Docker containers default to UTC; host apps use local time. Any timestamp column used as Kafka message timestamp will mismatch.                         |
+| **Debugging difficulty**               | Issues surface as Kafka Connect REST API errors or consumer failures — harder to trace than application-level exceptions in the poller.                 |
 
 **When polling wins over CDC:**
 - Low event volume (< 100/min) — polling overhead is negligible
@@ -1229,15 +1229,15 @@ _This document will be expanded as Phase 6 progresses with: Saga patterns, exact
 
 ### Topic: `portfolio-notification`
 
-| Field | Value |
-|-------|-------|
-| Topic name | `portfolio-notification` |
-| Producer | NotificationPublisher (portfolio-service) |
-| Consumer | NotificationConsumer (notification-service) |
-| Consumer group | `equitycart-notification-group` |
-| Key | userId (String) |
-| Value | NotificationEvent (JSON) |
-| Delivery guarantee | Fire-and-forget (best-effort, no outbox) |
+| Field              | Value                                       |
+| ------------------ | ------------------------------------------- |
+| Topic name         | `portfolio-notification`                    |
+| Producer           | NotificationPublisher (portfolio-service)   |
+| Consumer           | NotificationConsumer (notification-service) |
+| Consumer group     | `equitycart-notification-group`             |
+| Key                | userId (String)                             |
+| Value              | NotificationEvent (JSON)                    |
+| Delivery guarantee | Fire-and-forget (best-effort, no outbox)    |
 
 ### Why fire-and-forget (no Outbox)?
 
@@ -1270,12 +1270,12 @@ NotificationLog entity persisted to PostgreSQL (audit trail)
 
 ### Event Types Published
 
-| Event Type | Publisher | Trigger |
-|-----------|-----------|---------|
-| TRADE_EXECUTED | TradeServiceImpl | After BUY or SELL trade completes |
-| REWARD_VESTED | VestingHelperImpl | After reward transitions to VESTED |
-| SELL_TO_SPEND_COMPLETED | SellToSpendSagaOrchestrator | Saga reaches COMPLETED state |
-| SELL_TO_SPEND_FAILED | SellToSpendSagaOrchestrator | Saga reaches terminal failure |
+| Event Type              | Publisher                   | Trigger                            |
+| ----------------------- | --------------------------- | ---------------------------------- |
+| TRADE_EXECUTED          | TradeServiceImpl            | After BUY or SELL trade completes  |
+| REWARD_VESTED           | VestingHelperImpl           | After reward transitions to VESTED |
+| SELL_TO_SPEND_COMPLETED | SellToSpendSagaOrchestrator | Saga reaches COMPLETED state       |
+| SELL_TO_SPEND_FAILED    | SellToSpendSagaOrchestrator | Saga reaches terminal failure      |
 
 ### Kafka in Docker — Single-Broker Configuration
 

@@ -922,14 +922,14 @@ http.authorizeHttpRequests(authz -> authz
 Both must allow access. Configuring management alone is insufficient when Spring Security is active.
 
 **Actuator endpoint exposure by role:**
-| Endpoint | Recommended access | Reason |
-|----------|-------------------|---------|
-| `/actuator/health` | Public | Load balancers, monitoring need this without auth |
-| `/actuator/info` | Public | CI/CD pipelines display version info |
-| `/actuator/metrics` | ADMIN | Exposes memory, GC, request rates |
-| `/actuator/env` | ADMIN (or disabled) | May expose environment variables with secrets |
-| `/actuator/configprops` | ADMIN (or disabled) | Shows all properties including passwords |
-| `/actuator/beans` | ADMIN (or disabled) | Internal Spring bean wiring — not for clients |
+| Endpoint                | Recommended access  | Reason                                            |
+| ----------------------- | ------------------- | ------------------------------------------------- |
+| `/actuator/health`      | Public              | Load balancers, monitoring need this without auth |
+| `/actuator/info`        | Public              | CI/CD pipelines display version info              |
+| `/actuator/metrics`     | ADMIN               | Exposes memory, GC, request rates                 |
+| `/actuator/env`         | ADMIN (or disabled) | May expose environment variables with secrets     |
+| `/actuator/configprops` | ADMIN (or disabled) | Shows all properties including passwords          |
+| `/actuator/beans`       | ADMIN (or disabled) | Internal Spring bean wiring — not for clients     |
 
 **EquityCart rule (applied in Phase 7):** Expose `health,metrics,info` in equitycart-config, allow `/actuator/**` in SecurityConfig for admin-only services. Public health check permitted for gateway.
 
@@ -991,24 +991,24 @@ order-service servlet thread
 
 ### Token Propagation vs Token Exchange
 
-| Aspect | Propagation (Phase 8 Steps 1-4) | Exchange (Phase 8 Step 6+) |
-|--------|----------------------------------|---------------------------|
-| **How** | Copy original JWT to outgoing request | Call IdP to get new scoped-down token |
-| **Extra latency** | 0 (just header copy) | 1 HTTP call to IdP per hop |
-| **Downstream sees** | Full user identity + ALL roles | Only the permissions needed for that call |
-| **If service compromised** | Attacker gets full user token | Attacker gets limited-scope token |
-| **Implementation** | 3 lines in RequestInterceptor | OAuth2 Token Exchange grant (RFC 8693) |
-| **When to use** | Same team, same trust boundary | Cross-org, different security zones |
+| Aspect                     | Propagation (Phase 8 Steps 1-4)       | Exchange (Phase 8 Step 6+)                |
+| -------------------------- | ------------------------------------- | ----------------------------------------- |
+| **How**                    | Copy original JWT to outgoing request | Call IdP to get new scoped-down token     |
+| **Extra latency**          | 0 (just header copy)                  | 1 HTTP call to IdP per hop                |
+| **Downstream sees**        | Full user identity + ALL roles        | Only the permissions needed for that call |
+| **If service compromised** | Attacker gets full user token         | Attacker gets limited-scope token         |
+| **Implementation**         | 3 lines in RequestInterceptor         | OAuth2 Token Exchange grant (RFC 8693)    |
+| **When to use**            | Same team, same trust boundary        | Cross-org, different security zones       |
 
 ### Thread Safety: Where Propagation Breaks
 
-| Context | RequestContextHolder | Why | Solution |
-|---------|---------------------|-----|----------|
-| Servlet request thread | Available ✓ | FrameworkServlet stores it | FeignAuthorizationInterceptor works |
-| Kafka consumer thread | NULL ✗ | No HTTP request originated this thread | Use service-account token (client-credentials) |
-| @Async child thread | NULL ✗ | Plain ThreadLocal doesn't propagate to child threads | Extract token before spawning async, or use DelegatingSecurityContextExecutor |
-| @Scheduled thread | NULL ✗ | Scheduler threads have no request | Use service-account token |
-| WebSocket handler | NULL ✗ | After initial handshake, no per-message HTTP request | Store token during handshake, inject manually |
+| Context                | RequestContextHolder | Why                                                  | Solution                                                                      |
+| ---------------------- | -------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Servlet request thread | Available ✓          | FrameworkServlet stores it                           | FeignAuthorizationInterceptor works                                           |
+| Kafka consumer thread  | NULL ✗               | No HTTP request originated this thread               | Use service-account token (client-credentials)                                |
+| @Async child thread    | NULL ✗               | Plain ThreadLocal doesn't propagate to child threads | Extract token before spawning async, or use DelegatingSecurityContextExecutor |
+| @Scheduled thread      | NULL ✗               | Scheduler threads have no request                    | Use service-account token                                                     |
+| WebSocket handler      | NULL ✗               | After initial handshake, no per-message HTTP request | Store token during handshake, inject manually                                 |
 
 ### SecurityContext vs RequestContextHolder: Two Separate Thread-Local Stores
 
@@ -1078,15 +1078,15 @@ The gateway acts as a **security perimeter** (edge firewall). It rejects obvious
 
 ### Reactive Gateway vs Servlet Services — Two Different Worlds
 
-| Aspect | api-gateway (Reactive/WebFlux) | order-service (Servlet/MVC) |
-|--------|-------------------------------|----------------------------|
-| **Runtime** | Netty event loop | Tomcat thread pool |
-| **Threading** | ~4 event loop threads handle ALL requests | 1 thread per request (200 default) |
-| **Request object** | ServerHttpRequest (immutable) | HttpServletRequest (mutable) |
-| **Filter interface** | GlobalFilter → Mono<Void> | OncePerRequestFilter → void |
-| **Blocking allowed?** | NO — blocks event loop → all requests stall | YES — each thread is independent |
-| **Error response** | DataBuffer + writeWith(Mono.just(buffer)) | response.setStatus() + writer.write() |
-| **Security framework** | Cannot use servlet SecurityFilterChain | Uses commons SecurityAutoConfig |
+| Aspect                 | api-gateway (Reactive/WebFlux)              | order-service (Servlet/MVC)           |
+| ---------------------- | ------------------------------------------- | ------------------------------------- |
+| **Runtime**            | Netty event loop                            | Tomcat thread pool                    |
+| **Threading**          | ~4 event loop threads handle ALL requests   | 1 thread per request (200 default)    |
+| **Request object**     | ServerHttpRequest (immutable)               | HttpServletRequest (mutable)          |
+| **Filter interface**   | GlobalFilter → Mono<Void>                   | OncePerRequestFilter → void           |
+| **Blocking allowed?**  | NO — blocks event loop → all requests stall | YES — each thread is independent      |
+| **Error response**     | DataBuffer + writeWith(Mono.just(buffer))   | response.setStatus() + writer.write() |
+| **Security framework** | Cannot use servlet SecurityFilterChain      | Uses commons SecurityAutoConfig       |
 
 ### Filter Execution Order at Gateway
 
@@ -1152,14 +1152,14 @@ Key insight: returning `writeWith()` from the filter method means "I'm done, don
 
 ### What This Manual Filter Does NOT Handle (Fixed by OAuth2 in Step 7)
 
-| Concern | Manual filter | OAuth2 Resource Server |
-|---------|---------------|----------------------|
-| Key rotation | Must restart gateway | JWKS endpoint auto-refreshes keys |
-| Issuer validation | Not checked | Validates `iss` claim matches configured issuer |
-| Audience validation | Not checked | Validates `aud` claim matches this service |
-| Clock skew tolerance | 0 tolerance | Configurable (default 60s) |
-| Key caching | Parses key from config every request | NimbusJwtDecoder caches decoded key |
-| Multiple issuers | Not supported | Configurable multi-tenant issuers |
+| Concern              | Manual filter                        | OAuth2 Resource Server                          |
+| -------------------- | ------------------------------------ | ----------------------------------------------- |
+| Key rotation         | Must restart gateway                 | JWKS endpoint auto-refreshes keys               |
+| Issuer validation    | Not checked                          | Validates `iss` claim matches configured issuer |
+| Audience validation  | Not checked                          | Validates `aud` claim matches this service      |
+| Clock skew tolerance | 0 tolerance                          | Configurable (default 60s)                      |
+| Key caching          | Parses key from config every request | NimbusJwtDecoder caches decoded key             |
+| Multiple issuers     | Not supported                        | Configurable multi-tenant issuers               |
 
 ### Interview Questions
 
@@ -1242,15 +1242,15 @@ This section traces the ENTIRE path from "security code exists" to "requests are
 
 ### Failure Points — "Security Not Working" Debugging Checklist
 
-| Symptom | Root Cause | Layer Failed |
-|---------|-----------|--------------|
-| All requests return 200 (no auth) | @ComponentScan doesn't include `com.equitycart.commons` | Layer 2 |
-| All requests return 200 (no auth) | `equitycart.security.enabled` not set to `true` | Layer 3 |
-| Startup fails: `NoSuchBeanDefinition: JwtAuthenticationFilter` | Filter class not scanned (wrong package) | Layer 2 |
-| Startup fails: `Could not resolve placeholder 'jwt.secret'` | Config Server unreachable or property missing | Layer 4 |
-| Requests return 403 (not 401) | Token valid but missing required role for @PreAuthorize | Layer 6 |
-| Feign inter-service calls return 401 | FeignAuthorizationInterceptor not propagating token | Layer 2 (interceptor not scanned) |
-| Gateway passes, service rejects | Different jwt.secret values (split-brain config) | Layer 4 |
+| Symptom                                                        | Root Cause                                              | Layer Failed                      |
+| -------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------- |
+| All requests return 200 (no auth)                              | @ComponentScan doesn't include `com.equitycart.commons` | Layer 2                           |
+| All requests return 200 (no auth)                              | `equitycart.security.enabled` not set to `true`         | Layer 3                           |
+| Startup fails: `NoSuchBeanDefinition: JwtAuthenticationFilter` | Filter class not scanned (wrong package)                | Layer 2                           |
+| Startup fails: `Could not resolve placeholder 'jwt.secret'`    | Config Server unreachable or property missing           | Layer 4                           |
+| Requests return 403 (not 401)                                  | Token valid but missing required role for @PreAuthorize | Layer 6                           |
+| Feign inter-service calls return 401                           | FeignAuthorizationInterceptor not propagating token     | Layer 2 (interceptor not scanned) |
+| Gateway passes, service rejects                                | Different jwt.secret values (split-brain config)        | Layer 4                           |
 
 ### Two-Layer Defense-in-Depth — Complete Request Flow
 
@@ -1311,13 +1311,13 @@ This section traces the ENTIRE path from "security code exists" to "requests are
 
 ### Why Both Layers Are Needed
 
-| Scenario | Gateway only | Service only | Both (our design) |
-|----------|-------------|-------------|-------------------|
-| Bad token via browser/curl | Rejected at edge ✓ | Reaches service, rejected there | Rejected at edge (fast-fail) |
-| Feign call between services (bypasses gateway) | Not checked! | Rejected at service ✓ | Rejected at service |
-| Gateway misconfigured/bypassed | No protection! | Still protected ✓ | Still protected |
-| Valid token, expired mid-flight | Gateway may pass (clock skew) | Service rejects ✓ | Belt and suspenders |
-| DDoS with invalid tokens | Rejected at edge (saves resources) ✓ | All services waste CPU | Rejected at edge |
+| Scenario                                       | Gateway only                         | Service only                    | Both (our design)            |
+| ---------------------------------------------- | ------------------------------------ | ------------------------------- | ---------------------------- |
+| Bad token via browser/curl                     | Rejected at edge ✓                   | Reaches service, rejected there | Rejected at edge (fast-fail) |
+| Feign call between services (bypasses gateway) | Not checked!                         | Rejected at service ✓           | Rejected at service          |
+| Gateway misconfigured/bypassed                 | No protection!                       | Still protected ✓               | Still protected              |
+| Valid token, expired mid-flight                | Gateway may pass (clock skew)        | Service rejects ✓               | Belt and suspenders          |
+| DDoS with invalid tokens                       | Rejected at edge (saves resources) ✓ | All services waste CPU          | Rejected at edge             |
 
 **Key principle:** The gateway is an **optimization** (save network hops); per-service validation is the **security guarantee** (zero trust within service mesh).
 
@@ -1386,12 +1386,12 @@ Non-HTTP Thread → FeignAuthorizationInterceptor → no RequestContext?
 
 **Key Design Constraints (discovered through trial and error):**
 
-| Constraint | Why | What Breaks Otherwise |
-|-----------|-----|----------------------|
-| Subject must be numeric ("0") | `JwtTokenValidatorImpl.extractUserId()` does `Long.parseLong(subject)` | NumberFormatException on "SYSTEM" |
-| Roles must be `List<String>` | `extractRoles()` casts claim to `List<String>` | ClassCastException on plain String "SERVICE" |
-| Expiry is mandatory | `JwtAuthenticationFilter` calls `isTokenExpired()` — returns true for no-expiry tokens in JJWT 0.12.6 | Token rejected as expired |
-| Same signing key | Downstream validates with shared `jwt.secret` | SignatureException |
+| Constraint                    | Why                                                                                                   | What Breaks Otherwise                        |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Subject must be numeric ("0") | `JwtTokenValidatorImpl.extractUserId()` does `Long.parseLong(subject)`                                | NumberFormatException on "SYSTEM"            |
+| Roles must be `List<String>`  | `extractRoles()` casts claim to `List<String>`                                                        | ClassCastException on plain String "SERVICE" |
+| Expiry is mandatory           | `JwtAuthenticationFilter` calls `isTokenExpired()` — returns true for no-expiry tokens in JJWT 0.12.6 | Token rejected as expired                    |
+| Same signing key              | Downstream validates with shared `jwt.secret`                                                         | SignatureException                           |
 
 **Why subject="0"?** Auto-increment IDs start at 1. Using 0 as a sentinel means it can never collide with a real user, and the `Long.parseLong()` contract is satisfied. Any controller that does `@PreAuthorize("hasRole('CUSTOMER')")` naturally excludes service tokens (role=SERVICE), while `anyRequest().authenticated()` permits them.
 
@@ -1724,17 +1724,17 @@ And Spring auto-discovers the JWKS URI, issuer, algorithms — zero hardcoded UR
 
 ### Keycloak vs Competitors — Industry Landscape
 
-| Product | Type | License | Best For | Notable Users |
-|---------|------|---------|----------|---------------|
-| **Keycloak** | Self-hosted IdP | Apache 2.0 (open source) | Full control, on-prem, learning | Red Hat, government agencies, banks |
-| **Auth0** | Cloud IdP (SaaS) | Proprietary (free tier) | SaaS apps, quick setup, dev teams | Atlassian, Mozilla, Mazda |
-| **Okta** | Cloud IdP (Enterprise) | Proprietary (paid) | Enterprise SSO, workforce identity | FedEx, T-Mobile, Splunk |
-| **AWS Cognito** | Cloud IdP (AWS-native) | AWS pricing model | AWS-centric apps, mobile backends | N/A (AWS customers) |
-| **Azure AD / Entra ID** | Cloud IdP (Microsoft) | Microsoft licensing | Microsoft ecosystem, O365 integration | Most Fortune 500 |
-| **Firebase Auth** | Cloud IdP (Google) | Free (Google ecosystem) | Mobile apps, quick prototyping | Startups, mobile-first |
-| **Spring Authorization Server** | Library (embedded) | Apache 2.0 | Custom IdP in Spring ecosystem | Spring-based orgs |
-| **Ory Hydra** | Self-hosted IdP | Apache 2.0 | Headless OAuth2/OIDC (no UI) | Privacy-focused apps |
-| **FusionAuth** | Self-hosted + Cloud | Community (free) + paid | Self-hosted with commercial support | GitHub, IBM |
+| Product                         | Type                   | License                  | Best For                              | Notable Users                       |
+| ------------------------------- | ---------------------- | ------------------------ | ------------------------------------- | ----------------------------------- |
+| **Keycloak**                    | Self-hosted IdP        | Apache 2.0 (open source) | Full control, on-prem, learning       | Red Hat, government agencies, banks |
+| **Auth0**                       | Cloud IdP (SaaS)       | Proprietary (free tier)  | SaaS apps, quick setup, dev teams     | Atlassian, Mozilla, Mazda           |
+| **Okta**                        | Cloud IdP (Enterprise) | Proprietary (paid)       | Enterprise SSO, workforce identity    | FedEx, T-Mobile, Splunk             |
+| **AWS Cognito**                 | Cloud IdP (AWS-native) | AWS pricing model        | AWS-centric apps, mobile backends     | N/A (AWS customers)                 |
+| **Azure AD / Entra ID**         | Cloud IdP (Microsoft)  | Microsoft licensing      | Microsoft ecosystem, O365 integration | Most Fortune 500                    |
+| **Firebase Auth**               | Cloud IdP (Google)     | Free (Google ecosystem)  | Mobile apps, quick prototyping        | Startups, mobile-first              |
+| **Spring Authorization Server** | Library (embedded)     | Apache 2.0               | Custom IdP in Spring ecosystem        | Spring-based orgs                   |
+| **Ory Hydra**                   | Self-hosted IdP        | Apache 2.0               | Headless OAuth2/OIDC (no UI)          | Privacy-focused apps                |
+| **FusionAuth**                  | Self-hosted + Cloud    | Community (free) + paid  | Self-hosted with commercial support   | GitHub, IBM                         |
 
 **Why Keycloak for EquityCart?**
 1. **Open source** — aligns with project's 100% open-source tech stack requirement
@@ -2808,23 +2808,23 @@ echo $SERVICE_TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | jq .
 
 #### 13.1.10: What Keycloak Has Given Us (vs Custom Auth Comparison)
 
-| Concern | Custom Auth (Steps 1-4) | Keycloak (Step 5+) |
-|---------|------------------------|-------------------|
-| **Token signing** | HS256 (symmetric, shared secret) | RS256 (asymmetric, private key only at IdP) |
-| **Key compromise impact** | ANY service can forge tokens | Only Keycloak can forge tokens |
-| **Key rotation** | Change secret → restart ALL services | Generate new key pair → zero downtime |
-| **Key distribution** | Config Server YAML (plaintext) | JWKS endpoint (auto-discovery, cached) |
-| **Token revocation** | Impossible (JWT valid until expiry) | Session invalidation at IdP level |
-| **User management** | Custom code (UserService, BCrypt) | Admin console, REST API, LDAP federation |
-| **Password policy** | None (beyond BCrypt storage) | Length, complexity, history, lockout |
-| **Brute force protection** | None | Built-in (account lockout after N failures) |
-| **MFA** | Not available | TOTP, WebAuthn, SMS (configurable per realm) |
-| **Social login** | Not available | Google, GitHub, Facebook, etc. (pre-built) |
-| **Standards compliance** | Custom (no standard) | OIDC, OAuth2, SAML 2.0 certified |
-| **Discovery endpoint** | None (hardcoded config) | `.well-known/openid-configuration` |
-| **Refresh tokens** | Custom table (AuthService) | IdP-managed with rotation |
-| **Service-to-service** | Self-signed JWT (ServiceTokenProvider) | Client Credentials flow (proper) |
-| **Audit trail** | Application logs only | Keycloak events (login, token, admin actions) |
+| Concern                    | Custom Auth (Steps 1-4)                | Keycloak (Step 5+)                            |
+| -------------------------- | -------------------------------------- | --------------------------------------------- |
+| **Token signing**          | HS256 (symmetric, shared secret)       | RS256 (asymmetric, private key only at IdP)   |
+| **Key compromise impact**  | ANY service can forge tokens           | Only Keycloak can forge tokens                |
+| **Key rotation**           | Change secret → restart ALL services   | Generate new key pair → zero downtime         |
+| **Key distribution**       | Config Server YAML (plaintext)         | JWKS endpoint (auto-discovery, cached)        |
+| **Token revocation**       | Impossible (JWT valid until expiry)    | Session invalidation at IdP level             |
+| **User management**        | Custom code (UserService, BCrypt)      | Admin console, REST API, LDAP federation      |
+| **Password policy**        | None (beyond BCrypt storage)           | Length, complexity, history, lockout          |
+| **Brute force protection** | None                                   | Built-in (account lockout after N failures)   |
+| **MFA**                    | Not available                          | TOTP, WebAuthn, SMS (configurable per realm)  |
+| **Social login**           | Not available                          | Google, GitHub, Facebook, etc. (pre-built)    |
+| **Standards compliance**   | Custom (no standard)                   | OIDC, OAuth2, SAML 2.0 certified              |
+| **Discovery endpoint**     | None (hardcoded config)                | `.well-known/openid-configuration`            |
+| **Refresh tokens**         | Custom table (AuthService)             | IdP-managed with rotation                     |
+| **Service-to-service**     | Self-signed JWT (ServiceTokenProvider) | Client Credentials flow (proper)              |
+| **Audit trail**            | Application logs only                  | Keycloak events (login, token, admin actions) |
 
 **The fundamental shift:** With custom auth, the jwt.secret is a "skeleton key" — any entity that has it can impersonate anyone. With Keycloak + RS256, services can only VERIFY tokens (public key), never FORGE them (private key stays at Keycloak). This is the difference between "trust because you could attack me" and "trust because cryptography proves your identity."
 
@@ -2865,12 +2865,12 @@ Your microservices (order, product, portfolio, etc.) are **Resource Servers**. T
 
 Adding `api 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'` to `commons/build.gradle` pulls in:
 
-| Library | What it does |
-|---------|-------------|
+| Library                                  | What it does                                                                                                                 |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `spring-security-oauth2-resource-server` | Core resource server support: `BearerTokenAuthenticationFilter`, `JwtAuthenticationProvider`, exception handling for 401/403 |
-| `spring-security-oauth2-jose` | JWT handling: `NimbusJwtDecoder` (validates RS256/RS384/RS512/ES256), JWKS key fetching and caching |
-| `nimbus-jose-jwt` (transitive) | Low-level JOSE library that does the actual RSA signature math |
-| `spring-security-oauth2-core` | Core OAuth2 concepts: `OAuth2TokenValidator`, `JwtIssuerValidator`, `JwtTimestampValidator` |
+| `spring-security-oauth2-jose`            | JWT handling: `NimbusJwtDecoder` (validates RS256/RS384/RS512/ES256), JWKS key fetching and caching                          |
+| `nimbus-jose-jwt` (transitive)           | Low-level JOSE library that does the actual RSA signature math                                                               |
+| `spring-security-oauth2-core`            | Core OAuth2 concepts: `OAuth2TokenValidator`, `JwtIssuerValidator`, `JwtTimestampValidator`                                  |
 
 **Critical auto-configuration triggered by the starter:**
 
@@ -2907,10 +2907,10 @@ spring:
 
 **`jwk-set-uri` vs `issuer-uri` — when to use which:**
 
-| Property | What Spring does | Issuer validation | Auto-discovery | Use when |
-|----------|-----------------|-------------------|----------------|----------|
-| `jwk-set-uri` | Fetches keys directly from the URL you provide | NO (doesn't check `iss` claim) | NO (you specify the full URL) | Dev environments, when issuer URL differs between Docker/local |
-| `issuer-uri` | Fetches `{value}/.well-known/openid-configuration`, finds `jwks_uri` from that JSON | YES (rejects tokens where `iss` ≠ this value) | YES (auto-discovers all endpoints) | Production, when issuer URL is consistent |
+| Property      | What Spring does                                                                    | Issuer validation                             | Auto-discovery                     | Use when                                                       |
+| ------------- | ----------------------------------------------------------------------------------- | --------------------------------------------- | ---------------------------------- | -------------------------------------------------------------- |
+| `jwk-set-uri` | Fetches keys directly from the URL you provide                                      | NO (doesn't check `iss` claim)                | NO (you specify the full URL)      | Dev environments, when issuer URL differs between Docker/local |
+| `issuer-uri`  | Fetches `{value}/.well-known/openid-configuration`, finds `jwks_uri` from that JSON | YES (rejects tokens where `iss` ≠ this value) | YES (auto-discovers all endpoints) | Production, when issuer URL is consistent                      |
 
 We use `jwk-set-uri` because in Docker the services see Keycloak at `http://keycloak:8080` but Keycloak puts `iss: http://localhost:8180/realms/equitycart` in tokens (because that's how the browser accessed it). This mismatch would cause issuer validation failure with `issuer-uri`.
 
@@ -3265,16 +3265,16 @@ This is fine because:
 
 A: Both do the same job: extract Bearer token → validate → set SecurityContext. The differences:
 
-| Aspect | Custom Filter | OAuth2 Resource Server |
-|--------|--------------|----------------------|
-| Signing algorithm | HS256 (symmetric, shared secret) | RS256 (asymmetric, JWKS) |
-| Key source | `@Value("${jwt.secret}")` at startup | JWKS endpoint (fetched, cached, auto-refreshed) |
-| Key rotation | Requires restart of ALL services | Automatic (cache refresh on unknown kid) |
-| Issuer validation | Not checked | Validates `iss` claim (when using issuer-uri) |
-| Clock skew | 0 tolerance (exact expiry) | 60s tolerance (configurable) |
-| Token type | Only your custom format | Any OIDC-compliant JWT |
-| Error responses | Custom JSON (your code) | RFC 6750 standard WWW-Authenticate header |
-| Code to maintain | ~80 lines (filter + validator) | 0 lines (framework handles it) |
+| Aspect            | Custom Filter                        | OAuth2 Resource Server                          |
+| ----------------- | ------------------------------------ | ----------------------------------------------- |
+| Signing algorithm | HS256 (symmetric, shared secret)     | RS256 (asymmetric, JWKS)                        |
+| Key source        | `@Value("${jwt.secret}")` at startup | JWKS endpoint (fetched, cached, auto-refreshed) |
+| Key rotation      | Requires restart of ALL services     | Automatic (cache refresh on unknown kid)        |
+| Issuer validation | Not checked                          | Validates `iss` claim (when using issuer-uri)   |
+| Clock skew        | 0 tolerance (exact expiry)           | 60s tolerance (configurable)                    |
+| Token type        | Only your custom format              | Any OIDC-compliant JWT                          |
+| Error responses   | Custom JSON (your code)              | RFC 6750 standard WWW-Authenticate header       |
+| Code to maintain  | ~80 lines (filter + validator)       | 0 lines (framework handles it)                  |
 
 **Q: "How does NimbusJwtDecoder validate RS256 internally?"**
 
@@ -4043,16 +4043,16 @@ A: HTTP headers and body are flushed together when the `Mono<Void>` chain comple
 
 ### 17.1: Test Categories and What Each Proves
 
-| Category | Test | Expected | What it validates |
-|----------|------|----------|-------------------|
-| Missing token | `GET /api/products` (no header) | 401 | `anyExchange().authenticated()` enforced |
-| Invalid token | Bearer with bad signature | 401 | JWKS RS256 validation rejects forgeries |
-| Expired token | Valid token past `exp` | 401 | NimbusJwtDecoder checks `exp` claim |
-| Wrong role | CUSTOMER token → `POST /api/products` | 403 | `@PreAuthorize("hasRole('SELLER')")` enforced |
-| Rate limit | 25 rapid requests with same token | 200×20, 429×5 | Redis token bucket depleted |
-| Security headers | Any valid GET | 200 + headers present | SecurityHeadersGlobalFilter active |
-| Token propagation | Gateway → product-service | Request logged at service | Bearer header forwarded unchanged |
-| Full flow | Register → Login → Order → Portfolio | 201 / 200 | Full auth chain end-to-end |
+| Category          | Test                                  | Expected                  | What it validates                             |
+| ----------------- | ------------------------------------- | ------------------------- | --------------------------------------------- |
+| Missing token     | `GET /api/products` (no header)       | 401                       | `anyExchange().authenticated()` enforced      |
+| Invalid token     | Bearer with bad signature             | 401                       | JWKS RS256 validation rejects forgeries       |
+| Expired token     | Valid token past `exp`                | 401                       | NimbusJwtDecoder checks `exp` claim           |
+| Wrong role        | CUSTOMER token → `POST /api/products` | 403                       | `@PreAuthorize("hasRole('SELLER')")` enforced |
+| Rate limit        | 25 rapid requests with same token     | 200×20, 429×5             | Redis token bucket depleted                   |
+| Security headers  | Any valid GET                         | 200 + headers present     | SecurityHeadersGlobalFilter active            |
+| Token propagation | Gateway → product-service             | Request logged at service | Bearer header forwarded unchanged             |
+| Full flow         | Register → Login → Order → Portfolio  | 201 / 200                 | Full auth chain end-to-end                    |
 
 ---
 
@@ -4210,17 +4210,17 @@ Kafka consumer (e.g., NotificationEventConsumer)
 
 **Security properties achieved:**
 
-| Property | Mechanism | Covers |
-|----------|-----------|--------|
-| Authentication | RS256 JWT via JWKS (oauth2) or HS256 (custom) | All 7 services + gateway |
-| Authorization | @PreAuthorize + path matchers | Per-endpoint, per-role |
-| Edge enforcement | SecurityWebFilterChain at gateway | Fast-fail before network hop |
-| Defense in depth | Each service validates independently | Service-to-service, direct access |
-| Token propagation | Authorization header forwarded + FeignAuthorizationInterceptor | HTTP + Feign calls |
-| Rate limiting | Redis token bucket per userId/IP | DoS, brute force |
-| Browser protection | OWASP headers on every response | XSS, clickjacking, MITM |
-| Key security | RS256 asymmetric (only Keycloak holds private key) | Token forgery impossible |
-| Secrets management | `${ENV_VAR:default}` in YAML, env vars in Docker compose | Credentials not in git |
+| Property           | Mechanism                                                      | Covers                            |
+| ------------------ | -------------------------------------------------------------- | --------------------------------- |
+| Authentication     | RS256 JWT via JWKS (oauth2) or HS256 (custom)                  | All 7 services + gateway          |
+| Authorization      | @PreAuthorize + path matchers                                  | Per-endpoint, per-role            |
+| Edge enforcement   | SecurityWebFilterChain at gateway                              | Fast-fail before network hop      |
+| Defense in depth   | Each service validates independently                           | Service-to-service, direct access |
+| Token propagation  | Authorization header forwarded + FeignAuthorizationInterceptor | HTTP + Feign calls                |
+| Rate limiting      | Redis token bucket per userId/IP                               | DoS, brute force                  |
+| Browser protection | OWASP headers on every response                                | XSS, clickjacking, MITM           |
+| Key security       | RS256 asymmetric (only Keycloak holds private key)             | Token forgery impossible          |
+| Secrets management | `${ENV_VAR:default}` in YAML, env vars in Docker compose       | Credentials not in git            |
 
 ---
 

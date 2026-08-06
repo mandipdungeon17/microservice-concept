@@ -292,7 +292,7 @@ A: The Spring Boot plugin creates a `bootJar` task that packages a fat/uber JAR 
 - Fix: Added `final`.
 - Lesson: `@RequiredArgsConstructor` = constructor for `final` fields only. This is the standard pattern for Spring constructor injection with Lombok.
 
-**20. Single Wildcard `*` vs Double Wildcard `**` in URL Patterns (2026-04-20)**
+**20. Single Wildcard `*` vs Double Wildcard `**` in URL Patterns (2026-04-20)\*\*
 
 - Problem: `/api/auth/*` only matches one path segment (`/api/auth/login`) but not nested paths (`/api/auth/token/refresh`).
 - Fix: Changed to `/api/auth/**` which matches any number of path segments.
@@ -323,11 +323,13 @@ A: The Spring Boot plugin creates a `bootJar` task that packages a fat/uber JAR 
 **1. Session-Based vs JWT Authentication**
 
 Session:
+
 - Server stores session in memory, sends session ID cookie to client
 - Every request: server looks up session ID in memory to identify user
 - Problem for microservices: session lives on ONE server. Multiple instances need sticky sessions or shared store (Redis)
 
 JWT:
+
 - Server creates signed token containing user info, sends to client
 - Client sends token in Authorization header on every request
 - Server verifies signature only — NO database/memory lookup needed
@@ -359,27 +361,27 @@ JWT:
 **5. Six Query Methods in Spring/JPA**
 
 (a) Derived Queries — method naming convention, Spring generates SQL:
-    findByEmail(String email) -> SELECT * FROM users WHERE email = ?
-    Use for: 60-70% of queries (simple conditions)
+findByEmail(String email) -> SELECT \* FROM users WHERE email = ?
+Use for: 60-70% of queries (simple conditions)
 
 (b) JPQL — @Query with entity/field names (not table/column):
-    @Query("SELECT u FROM User u JOIN u.roles r WHERE r.name = :roleName")
-    Use for: joins, aggregations. Database-agnostic.
+@Query("SELECT u FROM User u JOIN u.roles r WHERE r.name = :roleName")
+Use for: joins, aggregations. Database-agnostic.
 
 (c) Native SQL — @Query with nativeQuery=true, real SQL:
-    @Query(value = "SELECT * FROM users WHERE ...", nativeQuery = true)
-    Use for: DB-specific features (JSONB, window functions), performance-critical queries
+@Query(value = "SELECT \* FROM users WHERE ...", nativeQuery = true)
+Use for: DB-specific features (JSONB, window functions), performance-critical queries
 
 (d) Criteria API — programmatic query building:
-    CriteriaBuilder + Predicate + Root. Very verbose.
-    Use for: dynamic queries (but prefer Specifications)
+CriteriaBuilder + Predicate + Root. Very verbose.
+Use for: dynamic queries (but prefer Specifications)
 
 (e) Specifications — clean, composable Criteria API:
-    hasEmail("x").and(isEnabled()).and(hasRole("CUSTOMER"))
-    Use for: dynamic search/filter (admin dashboards, search pages)
+hasEmail("x").and(isEnabled()).and(hasRole("CUSTOMER"))
+Use for: dynamic search/filter (admin dashboards, search pages)
 
 (f) QueryDSL — third-party, generates Q-classes, compile-time safe:
-    Use for: large enterprise projects. Not using in EquityCart.
+Use for: large enterprise projects. Not using in EquityCart.
 
 **6. Entity Design Principles Applied**
 
@@ -423,14 +425,14 @@ JWT:
 
 **11. Gradle Dependency Scopes — Complete Picture (2026-04-13)**
 
-| Scope | Compile? | Runtime? | Visible to consumers? | Example in EquityCart |
-|---|---|---|---|---|
-| `implementation` | Yes | Yes | No | `starter-web` in user-service |
-| `api` | Yes | Yes | Yes | `starter-data-jpa` in commons |
-| `compileOnly` | Yes | No | No | Lombok (generates code at compile, not needed at runtime) |
-| `runtimeOnly` | No | Yes | No | PostgreSQL driver, jjwt-impl, jjwt-jackson |
-| `annotationProcessor` | Compile only | No | No | Lombok processor (actually processes @Getter etc.) |
-| `testImplementation` | Yes (tests) | Yes (tests) | No | spring-boot-starter-test |
+| Scope                 | Compile?     | Runtime?    | Visible to consumers? | Example in EquityCart                                     |
+| --------------------- | ------------ | ----------- | --------------------- | --------------------------------------------------------- |
+| `implementation`      | Yes          | Yes         | No                    | `starter-web` in user-service                             |
+| `api`                 | Yes          | Yes         | Yes                   | `starter-data-jpa` in commons                             |
+| `compileOnly`         | Yes          | No          | No                    | Lombok (generates code at compile, not needed at runtime) |
+| `runtimeOnly`         | No           | Yes         | No                    | PostgreSQL driver, jjwt-impl, jjwt-jackson                |
+| `annotationProcessor` | Compile only | No          | No                    | Lombok processor (actually processes @Getter etc.)        |
+| `testImplementation`  | Yes (tests)  | Yes (tests) | No                    | spring-boot-starter-test                                  |
 
 - `compileOnly` makes Lombok available to import; `annotationProcessor` makes it actually run and generate code. Both are needed.
 - `runtimeOnly` for JDBC driver: your code never writes `import org.postgresql.Driver` — Spring auto-config loads it via `Class.forName()`.
@@ -438,12 +440,14 @@ JWT:
 **12. JPA Relationship Mappings (2026-04-13)**
 
 Four relationship types:
+
 - `@OneToOne` — 1:1 (User ↔ UserProfile, User ↔ KycDetail, User ↔ WalletAccount)
 - `@ManyToOne` — N:1 (RefreshToken → User, UserRole → User, UserRole → Role)
 - `@OneToMany` — 1:N (inverse of ManyToOne, use `mappedBy`)
 - `@ManyToMany` — N:N (avoided — use explicit join entity like UserRole instead)
 
 Unidirectional vs Bidirectional:
+
 - Unidirectional: only ONE entity has the relationship field. UserProfile → User but User has no profile field.
 - Bidirectional: BOTH entities know about each other. Requires `mappedBy` on the inverse side.
 - `mappedBy = "user"` means: "I don't own the FK. Go look at the `user` field in the other entity."
@@ -510,6 +514,7 @@ History: Before Spring Data (2011), every DAO (Data Access Object) required 50+ 
 History: In the early 2000s, EJB 2.x Entity Beans were horrendously complex. Gavin King created Hibernate (2001) as a simpler alternative. In 2006, JPA 1.0 was standardized (heavily inspired by Hibernate) as part of Java EE. When Oracle donated Java EE to Eclipse Foundation (2017), `javax.persistence.*` was renamed to `jakarta.persistence.*` due to trademark restrictions.
 
 The layer stack in EquityCart:
+
 ```
 Your Code (entities use @Entity, @Id, @Column)
     ↓ annotations from
@@ -530,6 +535,7 @@ spring-boot-starter-data-jpa                      ← STARTER (pulls all above t
 History: In Java 1.0 (1996), annotations didn't exist (added in Java 5, 2004). Designers needed a way to "tag" classes with metadata. Solution: an empty interface with zero methods. Implementing it signals a capability — the interface "marks" the class.
 
 What it physically looks like — the actual JDK source:
+
 ```java
 public interface Serializable {
     // literally nothing — zero methods
@@ -537,22 +543,26 @@ public interface Serializable {
 ```
 
 Three classic Java marker interfaces:
+
 - `Serializable` — "I can be converted to bytes." Checked at runtime by ObjectOutputStream via `instanceof`.
 - `Cloneable` — "I allow .clone() to work." Checked at runtime by Object.clone().
 - `RandomAccess` — "I support fast index-based access (ArrayList, not LinkedList)." Checked at runtime by Collections utilities.
 
 **At COMPILE TIME — Type Safety:**
+
 - Compiler uses it to enforce type constraints
 - A method `sendOverNetwork(Serializable data)` rejects non-Serializable objects at compile time
 - Generics: `<T extends Serializable>` constrains type parameters — annotations CANNOT do this
 - Example: `sendOverNetwork(new User())` → compiles if User implements Serializable; compile error if not
 
 **At RUNTIME — Behavior Gating:**
+
 - JVM/framework checks `instanceof` to decide behavior
 - ObjectOutputStream internally does: `if (!(obj instanceof Serializable)) throw new NotSerializableException()`
 - This is fast — `instanceof` is a JVM-native operation, much faster than reflection-based annotation checks
 
 **At RUNTIME — Spring Data Proxy Generation:**
+
 - `Repository<T, ID>` is a marker interface — completely empty, zero methods
 - At startup, Spring scans classpath for all interfaces extending `Repository`
 - Uses `Repository.class.isAssignableFrom(clazz)` to detect them
@@ -561,13 +571,13 @@ Three classic Java marker interfaces:
 
 **Marker Interface vs Annotation — When to Use Which:**
 
-| Feature | Marker Interface | Annotation |
-|---|---|---|
-| Compile-time type checking | Yes (`instanceof`, generics) | No |
-| Runtime detection | `instanceof` (fast, JVM-native) | `isAnnotationPresent()` (reflection, slower) |
-| Can constrain generics | Yes: `<T extends Serializable>` | No |
-| Can carry metadata/values | No (it's empty) | Yes: `@Column(nullable = false)` |
-| Introduced in | Java 1.0 (1996) | Java 5 (2004) |
+| Feature                    | Marker Interface                | Annotation                                   |
+| -------------------------- | ------------------------------- | -------------------------------------------- |
+| Compile-time type checking | Yes (`instanceof`, generics)    | No                                           |
+| Runtime detection          | `instanceof` (fast, JVM-native) | `isAnnotationPresent()` (reflection, slower) |
+| Can constrain generics     | Yes: `<T extends Serializable>` | No                                           |
+| Can carry metadata/values  | No (it's empty)                 | Yes: `@Column(nullable = false)`             |
+| Introduced in              | Java 1.0 (1996)                 | Java 5 (2004)                                |
 
 Rule of thumb: Use marker interface when you need compile-time type constraints. Use annotations when you need to attach configuration data to a class.
 
@@ -607,11 +617,13 @@ History: In Spring 1.x (2004), every bean was declared in XML: `<bean id="passwo
 History: `@Autowired` field injection (Spring 2.5, 2007) was the norm for years. The Spring team now recommends constructor injection (since ~2016) for better immutability and explicit dependencies.
 
 Three injection methods in Spring:
+
 - Constructor injection (`@RequiredArgsConstructor` + `private final`): dependencies explicit, immutable, compile-time safe if manually constructed
 - Field injection (`@Autowired` on fields): less boilerplate, but dependencies hidden, fields mutable, missing mocks cause runtime NPE not compile error
 - Setter injection (`@Autowired` on setters): rarely used, for optional dependencies only
 
 Both field and constructor injection are testable with Mockito (@Mock + @InjectMocks works with both). The real difference:
+
 - Constructor: missing dependency = compile error when constructing manually (`new AuthService(missingArg)`)
 - Field: missing mock = silent null → runtime NullPointerException during test
 
@@ -644,6 +656,7 @@ History: In the late 1990s, developers put business logic in Servlets (controlle
 History: JJWT (Java JWT) was created by Les Hazlewood (co-founder of Apache Shiro) in 2014 as a fluent, developer-friendly JWT library for Java. The 0.12.x series (2023) modernized the API — replacing deprecated methods like `signWith(key, algorithm)` with `signWith(key)` (algorithm auto-detected from key type).
 
 Key methods:
+
 - `Jwts.builder()` — creates a JWT builder. Chain: `.subject(userId)`, `.claim("roles", list)`, `.issuedAt(date)`, `.expiration(date)`, `.signWith(key)`, `.compact()` → returns the token string
 - `Jwts.parser().verifyWith(key).build().parseSignedClaims(token)` — validates signature + expiry, returns `Jws<Claims>`
 - `getSigningKey()`: decodes base64 secret → `Keys.hmacShaKeyFor(bytes)` → `SecretKey` for HMAC-SHA256
@@ -685,11 +698,12 @@ History: Servlet Filters were introduced in Servlet 2.3 (2001) — they intercep
 - 3-arg constructor `(principal, credentials, authorities)` → authenticated (verified user)
 - For JWT: principal = userId, credentials = null (JWT already proved identity), authorities = roles
 - `SimpleGrantedAuthority("ROLE_CUSTOMER")` — Spring Security's standard authority implementation
-- "ROLE_" prefix convention: `hasRole("CUSTOMER")` internally checks for `"ROLE_CUSTOMER"`. Dates back to Spring Security 1.0 (2004) when roles and fine-grained authorities were separated.
+- "ROLE\_" prefix convention: `hasRole("CUSTOMER")` internally checks for `"ROLE_CUSTOMER"`. Dates back to Spring Security 1.0 (2004) when roles and fine-grained authorities were separated.
 
 **35. @Component vs @Service vs @Repository vs @Controller (2026-04-20)**
 
 All four are stereotype annotations that register a class as a Spring bean. The hierarchy:
+
 - `@Component` — generic bean (infrastructure, utilities, filters)
 - `@Service` — specialization for business logic (service layer)
 - `@Repository` — specialization for data access (adds automatic exception translation for persistence exceptions)
@@ -844,8 +858,8 @@ A: `OncePerRequestFilter` is a Spring base class that guarantees the filter exec
 **Q28: "How does Spring Security store the authenticated user?" (2026-04-20)**
 A: `SecurityContextHolder` → `SecurityContext` → `Authentication`. The context is stored in a ThreadLocal, so each request thread has its own authenticated user. In the JWT filter, after validating the token, you create a `UsernamePasswordAuthenticationToken` (3-arg constructor for authenticated) and set it via `SecurityContextHolder.getContext().setAuthentication()`. Downstream code — controllers, `@PreAuthorize`, etc. — reads from this context.
 
-**Q29: "Why does Spring Security use the 'ROLE_' prefix?" (2026-04-20)**
-A: Spring Security distinguishes between "roles" (coarse-grained: CUSTOMER, ADMIN) and "authorities" (fine-grained: READ_PRODUCTS, DELETE_USERS). The `ROLE_` prefix is the convention (since Spring Security 1.0, 2004) to identify role-type authorities. `hasRole("CUSTOMER")` internally checks for `ROLE_CUSTOMER`. `hasAuthority("ROLE_CUSTOMER")` checks the exact string. When creating `SimpleGrantedAuthority`, you add the prefix yourself: `"ROLE_" + roleName`.
+**Q29: "Why does Spring Security use the 'ROLE\_' prefix?" (2026-04-20)**
+A: Spring Security distinguishes between "roles" (coarse-grained: CUSTOMER, ADMIN) and "authorities" (fine-grained: READ*PRODUCTS, DELETE_USERS). The `ROLE*`prefix is the convention (since Spring Security 1.0, 2004) to identify role-type authorities.`hasRole("CUSTOMER")`internally checks for`ROLE*CUSTOMER`. `hasAuthority("ROLE_CUSTOMER")`checks the exact string. When creating`SimpleGrantedAuthority`, you add the prefix yourself: `"ROLE*" + roleName`.
 
 **Q30: "Why disable CSRF for JWT-based APIs?" (2026-04-20)**
 A: CSRF (Cross-Site Request Forgery) attacks trick a browser into sending cookies automatically to your server. CSRF protection works by requiring a secret token in the request that the attacker can't forge. But JWT is sent in the `Authorization` header — browsers don't automatically attach headers. So CSRF attacks can't work against JWT APIs, and the protection is unnecessary. Leaving it enabled would block all POST/PUT/DELETE requests that don't carry a CSRF token.
@@ -974,12 +988,14 @@ A: Unexpected exceptions can contain internal details: SQL queries, file paths, 
 History: Records were added in Java 14 (2020, preview) and finalized in Java 16 (2021). Inspired by Kotlin's `data class` and Scala's `case class`. Motivation: a simple DTO used to require 50+ lines (fields, constructor, getters, equals, hashCode, toString). Records generate all of this from a single line.
 
 What the compiler generates from `public record Foo(String a, int b) {}`:
+
 - `private final` fields for each component
 - Canonical (all-args) constructor
 - Accessor methods: `a()`, `b()` (NOT `getA()` — not JavaBean convention)
 - `equals()`, `hashCode()`, `toString()`
 
 Limitations:
+
 1. **Immutable** — fields are `final`, no setters, no modification after creation
 2. **Cannot extend a class** — implicitly extends `java.lang.Record` (single inheritance)
 3. **Can implement interfaces** — accessor methods can satisfy interface contracts
@@ -989,6 +1005,7 @@ Limitations:
 7. **Spring/Jakarta annotations work** — `@Valid`, `@NotBlank`, `@Email`, `@JsonProperty`, `@RequestBody` all work. Annotations go on constructor parameters in the component list
 
 Compact constructor — validation without re-declaring parameters:
+
 ```java
 public record PriceRange(double min, double max) {
     public PriceRange {  // no parentheses — "compact"
@@ -999,6 +1016,7 @@ public record PriceRange(double min, double max) {
 ```
 
 Static factory method — the record alternative to `@Builder`:
+
 ```java
 public record ErrorResponse(int status, String error, String message, LocalDateTime timestamp) {
     public static ErrorResponse of(HttpStatus httpStatus, String message) {
@@ -1026,6 +1044,7 @@ History: Bean Validation started as JSR 303 (Java EE 6, 2009), evolved to JSR 38
 Flow: Client sends JSON → `@RequestBody` deserializes → `@Valid` triggers validation → valid: proceed to controller → invalid: `MethodArgumentNotValidException` thrown → `@RestControllerAdvice` catches → 400 response.
 
 Key annotations:
+
 - `@NotNull` — not null (allows empty `""`)
 - `@NotBlank` — not null, not empty, not whitespace (use for strings)
 - `@Email` — valid email format
@@ -1071,6 +1090,7 @@ A: Single Responsibility. `ErrorResponse` represents a simple error — one mess
 History: Filter chain architecture introduced in Spring Security 3.0 (2009), replacing interceptor-based approach.
 
 Request flow:
+
 1. Tomcat receives request, assigns thread
 2. `DelegatingFilterProxy` (Spring 1.0, 2004) — bridges Servlet container ↔ Spring beans. Servlet containers don't know about Spring beans, so this proxy delegates to Spring's `FilterChainProxy`.
 3. `FilterChainProxy` — Spring Security's entry point. Looks up matching `SecurityFilterChain` bean and runs its filters in order.
@@ -1105,6 +1125,7 @@ When to use: server-side rendered apps (Thymeleaf, JSP), admin panels.
 When NOT to use: REST APIs consumed by SPAs/mobile (use JWT), microservice-to-microservice (use OAuth2 client credentials).
 
 `UsernamePasswordAuthenticationFilter` handles form login:
+
 1. Checks: is this a POST to `/login`? If no → does nothing, passes through.
 2. Extracts username + password from form parameters (not JSON body).
 3. Creates unauthenticated `UsernamePasswordAuthenticationToken` (2-arg).
@@ -1118,6 +1139,7 @@ In EquityCart's JWT API, `UsernamePasswordAuthenticationFilter` never activates 
 **43. FilterChainProxy and SecurityFilterChain Registration (2026-04-24)**
 
 How `FilterChainProxy` finds your `SecurityFilterChain`:
+
 1. Spring Boot auto-configures `DelegatingFilterProxy` as a Servlet filter named `"springSecurityFilterChain"`.
 2. `DelegatingFilterProxy` looks up a Spring bean with that name → finds `FilterChainProxy` (auto-configured by `@EnableWebSecurity`).
 3. `FilterChainProxy` holds a `List<SecurityFilterChain>` — your `@Bean SecurityFilterChain` is added during context startup.
@@ -1147,6 +1169,7 @@ Filters and Servlets are separate concepts in the Java Servlet spec (1997). Filt
 **45. How Unhandled Exceptions Reach GlobalExceptionHandler (2026-04-24)**
 
 When a service method (e.g., `UserServiceImpl.logout()`) doesn't throw custom exceptions, infrastructure exceptions can still occur:
+
 - Database down → `DataAccessException` (Spring's wrapper around JDBC/Hibernate exceptions)
 - Connection timeout → `DataAccessException`
 - Constraint violation → `DataIntegrityViolationException`
@@ -1178,6 +1201,7 @@ A: Infrastructure exceptions (database down → `DataAccessException`, constrain
 History: RBAC as a formal model was defined by NIST in 1992 (Ferraiolo & Kuhn). In Spring Security 1.x (2004), all authorization was URL-based in XML. Method-level `@Secured` came in 2.0 (2008). `@PreAuthorize` with SpEL came in 3.0 (2009). `@EnableMethodSecurity` replaced `@EnableGlobalMethodSecurity` in 5.6 (2022).
 
 Two complementary approaches:
+
 - **URL-based** (in SecurityFilterChain): coarse-grained, path-prefix-level rules. `requestMatchers("/api/admin/**").hasRole("ADMIN")`. Evaluated by `AuthorizationFilter` in the filter chain.
 - **Method-level** (`@PreAuthorize`): fine-grained, per-method rules. `@PreAuthorize("hasRole('ADMIN')")`. Evaluated by Spring AOP proxy wrapping the bean. Requires `@EnableMethodSecurity` on a `@Configuration` class.
 
@@ -1235,20 +1259,21 @@ A: `@EnableMethodSecurity` registers a Spring AOP `MethodInterceptor`. When a be
 
 History: Java EE had `@Transactional` since JTA (Java Transaction API, 1999) — originally `javax.transaction.Transactional`, now `jakarta.transaction.Transactional`. Spring created its own in Spring Framework 1.0 (2004) because the JTA version was designed for Java EE application servers (JBoss, WebLogic) and too limited for standalone apps.
 
-| Feature | Spring (`org.springframework.transaction.annotation`) | Jakarta (`jakarta.transaction`) |
-|---|---|---|
-| `readOnly` | Yes — hints to DB driver | No |
-| `propagation` | 7 options (REQUIRED, REQUIRES_NEW, NESTED, etc.) | 3 options |
-| `isolation` | Yes (READ_COMMITTED, REPEATABLE_READ, etc.) | No |
-| `rollbackFor` | Yes — specify exception classes | Limited |
-| `timeout` | Yes | No |
-| Works without app server | Yes | Originally needed Java EE container |
+| Feature                  | Spring (`org.springframework.transaction.annotation`) | Jakarta (`jakarta.transaction`)     |
+| ------------------------ | ----------------------------------------------------- | ----------------------------------- |
+| `readOnly`               | Yes — hints to DB driver                              | No                                  |
+| `propagation`            | 7 options (REQUIRED, REQUIRES_NEW, NESTED, etc.)      | 3 options                           |
+| `isolation`              | Yes (READ_COMMITTED, REPEATABLE_READ, etc.)           | No                                  |
+| `rollbackFor`            | Yes — specify exception classes                       | Limited                             |
+| `timeout`                | Yes                                                   | No                                  |
+| Works without app server | Yes                                                   | Originally needed Java EE container |
 
 Rule: In Spring Boot, always use `org.springframework.transaction.annotation.Transactional`. Jakarta's version works (Spring bridges it) but with fewer features. Watch for IDE auto-import picking the wrong one.
 
 **52. When @Transactional Is Needed — Multi-Write Consistency (2026-04-24)**
 
 `refreshToken()` needs `@Transactional` because:
+
 1. Revoke old token (write)
 2. Generate + save new token (write)
 
@@ -1616,11 +1641,11 @@ A: With Spring's default configuration, if Redis is unreachable, `@Cacheable` th
 
 **30. Filter Chain vs Proxy vs Framework Loop — Comparison (2026-04-30)**
 
-| Mechanism | Spring's Trick | Your Code's Role | When it fires | Self-call problem? |
-|-----------|---------------|-----------------|---------------|-------------------|
-| Servlet Filter Chain | Ordered filter list in servlet context | Filter in the chain (JwtAuthFilter) | Every HTTP request, before Controller | NO — filters run before any method |
-| CGLIB Proxy | Runtime subclass with interceptors | The method being proxied (@Cacheable/@Transactional) | Every external method call on the bean | YES — `this` bypasses proxy |
-| Framework Loop | Batch framework calls your beans | Components plugged into the loop (Reader/Processor/Writer) | When JobLauncher.run() is called | NO — framework calls you, not the reverse |
+| Mechanism            | Spring's Trick                         | Your Code's Role                                           | When it fires                          | Self-call problem?                        |
+| -------------------- | -------------------------------------- | ---------------------------------------------------------- | -------------------------------------- | ----------------------------------------- |
+| Servlet Filter Chain | Ordered filter list in servlet context | Filter in the chain (JwtAuthFilter)                        | Every HTTP request, before Controller  | NO — filters run before any method        |
+| CGLIB Proxy          | Runtime subclass with interceptors     | The method being proxied (@Cacheable/@Transactional)       | Every external method call on the bean | YES — `this` bypasses proxy               |
+| Framework Loop       | Batch framework calls your beans       | Components plugged into the loop (Reader/Processor/Writer) | When JobLauncher.run() is called       | NO — framework calls you, not the reverse |
 
 **31. @EnableCaching Internal Flow (2026-04-30)**
 
@@ -1681,11 +1706,11 @@ A: Both create proxy objects at runtime. **JDK Dynamic Proxy** (Java 1.3, 2000):
 
 **34. Same Proxy, Different Interceptor Behavior — Comparison (2026-05-01)**
 
-| Annotation | Does method run? | Proxy BEFORE | Proxy AFTER | ThreadLocal concerns |
-|-----------|-----------------|-------------|------------|---------------------|
-| `@Cacheable` | Only on MISS | Check Redis for key | Store result in Redis | N/A — same thread |
-| `@Transactional` | ALWAYS | Open transaction, bind connection to ThreadLocal | Commit or rollback | Connection shared via ThreadLocal |
-| `@Async` | ALWAYS (different thread) | Submit to thread pool, return immediately | Nothing — already returned | SecurityContext and Transaction NOT carried over |
+| Annotation       | Does method run?          | Proxy BEFORE                                     | Proxy AFTER                | ThreadLocal concerns                             |
+| ---------------- | ------------------------- | ------------------------------------------------ | -------------------------- | ------------------------------------------------ |
+| `@Cacheable`     | Only on MISS              | Check Redis for key                              | Store result in Redis      | N/A — same thread                                |
+| `@Transactional` | ALWAYS                    | Open transaction, bind connection to ThreadLocal | Commit or rollback         | Connection shared via ThreadLocal                |
+| `@Async`         | ALWAYS (different thread) | Submit to thread pool, return immediately        | Nothing — already returned | SecurityContext and Transaction NOT carried over |
 
 **35. ThreadLocal Connection Binding — Why Repository Calls "Just Work" (2026-05-01)**
 
@@ -1863,7 +1888,7 @@ A: All three use CGLIB proxy interception — Spring generates a subclass that o
 
 - Problem: Used `InsufficientStockException` when product wasn't found, and `ResourceNotFoundException` when stock was too low. Both technically "work" but confuse API consumers — HTTP 400 for "product not found" makes no sense.
 - Fix: Product not found → `ResourceNotFoundException` (404). Insufficient stock → `InsufficientStockException` (400).
-- Lesson: Exception types define HTTP semantics. Choose the exception that matches the *actual failure reason*, not just the first one you import.
+- Lesson: Exception types define HTTP semantics. Choose the exception that matches the _actual failure reason_, not just the first one you import.
 
 **9. @GetMapping Path Variable Without Curly Braces (2026-05-04)**
 
@@ -1900,25 +1925,25 @@ A: All three use CGLIB proxy interception — Spring generates a subclass that o
 - **In Spring/JPA**: `@Lock(LockModeType.PESSIMISTIC_WRITE)` on a repository method + `@Transactional` on the service caller. JPA translates to `SELECT ... FOR UPDATE`.
 - **Sequence**: Thread A acquires lock → reads stock=1 → decrements → commits → releases lock. Thread B was blocked → now reads stock=0 → throws InsufficientStockException. No oversell.
 - **Trade-offs**: Simple reasoning (impossible to get wrong), guarantees consistency, no retry logic needed. BUT: reduces throughput (blocked threads idle), deadlock risk (circular waits), doesn't scale across distributed systems (DB-specific).
-- **Historical context**: Oldest concurrency strategy, inherited from mainframe-era databases (1970s-80s, IBM System R). Name reflects the assumption: conflicts are *likely*, so prevent them upfront.
+- **Historical context**: Oldest concurrency strategy, inherited from mainframe-era databases (1970s-80s, IBM System R). Name reflects the assumption: conflicts are _likely_, so prevent them upfront.
 
 **13. Optimistic Locking — Detect-and-Retry at Write Time (2026-05-04)**
 
 - **How it works**: No lock acquired during read. Each row has a `@Version` column (integer). On UPDATE, SQL includes: `WHERE id = ? AND version = ?`. If another transaction already changed the row (bumped version), zero rows match → `OptimisticLockException` → application retries.
 - **In Spring/JPA**: Add `@Version private Long version;` to the entity. Hibernate automatically includes version check in every UPDATE.
 - **Trade-offs**: No blocking (max throughput under low contention), works across distributed systems, no deadlocks. BUT: requires retry logic in application code, cascading retries under high contention degrade performance worse than pessimistic, more complex to implement correctly.
-- **Historical context**: Gained popularity in 1990s-2000s with web applications — many users reading, few writing same row simultaneously. Name reflects assumption: conflicts are *unlikely*.
+- **Historical context**: Gained popularity in 1990s-2000s with web applications — many users reading, few writing same row simultaneously. Name reflects assumption: conflicts are _unlikely_.
 
 **14. When to Use Pessimistic vs Optimistic (2026-05-04)**
 
-| Scenario | Choice | Reason |
-|----------|--------|--------|
+| Scenario                    | Choice      | Reason                                                                        |
+| --------------------------- | ----------- | ----------------------------------------------------------------------------- |
 | E-commerce checkout (stock) | Pessimistic | High contention on popular items, overselling catastrophic, short transaction |
-| User profile edit | Optimistic | Rare concurrent edits to same profile |
-| Wiki/document editing | Optimistic | Conflicts detectable, user can merge |
-| Bank transfer | Pessimistic | Financial correctness > throughput |
-| Cart updates | Neither | Redis is single-threaded, no concurrent mutation |
-| Distributed microservices | Optimistic | Can't hold DB locks across service boundaries |
+| User profile edit           | Optimistic  | Rare concurrent edits to same profile                                         |
+| Wiki/document editing       | Optimistic  | Conflicts detectable, user can merge                                          |
+| Bank transfer               | Pessimistic | Financial correctness > throughput                                            |
+| Cart updates                | Neither     | Redis is single-threaded, no concurrent mutation                              |
+| Distributed microservices   | Optimistic  | Can't hold DB locks across service boundaries                                 |
 
 **15. Idempotency Keys — Preventing Duplicate Side Effects (2026-05-05)**
 
@@ -1928,7 +1953,7 @@ A: All three use CGLIB proxy interception — Spring generates a subclass that o
 - **Who generates it**: Always the CLIENT. It's in the request body, not generated server-side. Common approaches: `UUID.randomUUID()`, or deterministic: `userId + cartHash + timestamp`.
 - **Implementation pattern**: Unique constraint on `idempotency_key` column. First line of `placeOrder()`: check DB for existing order with this key → return it if found. This is the "check-before-create" pattern.
 - **Historical context**: Popularized by Stripe (~2015) via `Idempotency-Key` HTTP header after merchants reported double-charges during timeouts. Now standard in all financial APIs (Stripe, Razorpay, PayPal). Mathematical origin: idempotent operations satisfy f(f(x)) = f(x) — applying them multiple times produces the same result as once.
-- **Difference from database unique constraint on orderId**: Unique constraint on `orderId` prevents duplicate IDs (a database concern). Idempotency key prevents duplicate *business operations* (an application concern). They operate at different levels.
+- **Difference from database unique constraint on orderId**: Unique constraint on `orderId` prevents duplicate IDs (a database concern). Idempotency key prevents duplicate _business operations_ (an application concern). They operate at different levels.
 
 **16. Order Status State Machine — EnumSet Transition Rules (2026-05-04)**
 
@@ -1982,6 +2007,7 @@ A: PUT semantics mean "replace the ENTIRE resource with this payload" — the cl
 A: Spring uses the annotation purely for routing (matching incoming requests to handlers). It doesn't validate your method body matches the verb semantics. But the HTTP method choice matters for infrastructure beyond Spring: (1) Caches (CDN, browser) only cache GET — POST responses are never cached; (2) Load balancers may auto-retry GET/PUT/DELETE (idempotent) but never POST (might create duplicates); (3) CORS preflight is triggered for PUT/PATCH/DELETE, not simple GET/POST; (4) The method communicates a contract — API consumers, Swagger docs, and monitoring tools all interpret semantics from the verb.
 
 ---
+
 A: Redis Hash maps field → value within a single key. For a cart: `Cart:user123` → `{prod1: json, prod2: json}`. Each field operation (HSET/HDEL) is atomic at the field level — two concurrent "add to cart" for different products don't conflict. With a String key (entire cart as JSON), every modification requires GET → deserialize → modify → serialize → SET — a read-modify-write cycle with race conditions (last write wins, items lost). Hash also uses compact encoding (listpack) for small objects, saving memory.
 
 **Q99: "What is ObjectMapper and when should you use it vs letting Spring handle serialization?" (2026-05-03)**
@@ -2022,14 +2048,14 @@ A: Spring Data's property expression parser splits the method name on camelCase 
 - `RestTemplate` (Spring 3.0, 2009) was synchronous — one thread per HTTP call, blocked until response arrived. At scale (50 stock price fetches), 50 threads sit blocked.
 - `WebClient` (Spring 5, 2017) is built on Reactor Netty, uses non-blocking I/O. Returns `Mono<T>` (0-or-1 result) or `Flux<T>` (0-to-N stream).
 - **Restaurant analogy**: RestTemplate = "dedicated waiter" (stands in kitchen waiting for each dish). WebClient = "buzzer model" (waiter gives you a buzzer/`Mono`, goes to serve other tables, buzzer vibrates when dish is ready).
-- **Critical insight**: Adding `spring-boot-starter-webflux` alongside `spring-boot-starter-web` does NOT switch the server to Netty. Spring Boot detects `web` is present and stays on Tomcat. You only get the reactive *client* libraries.
+- **Critical insight**: Adding `spring-boot-starter-webflux` alongside `spring-boot-starter-web` does NOT switch the server to Netty. Spring Boot detects `web` is present and stays on Tomcat. You only get the reactive _client_ libraries.
 - **`.block()` at service boundary**: MVC controllers expect synchronous return values. `.block()` waits for the Mono to complete and unwraps the value. Even with `.block()`, the underlying HTTP call still uses non-blocking I/O — the Netty event loop thread is freed while waiting.
 - `RestTemplate` was officially deprecated in Spring 5.0 docs ("prefer WebClient") though not removed for backward compatibility.
 
 **3. Mono<T> — A Promise of Future Data (2026-05-08)**
 
 - `Mono<T>` = "a container that will eventually hold 0 or 1 value, or an error." Nothing happens until someone subscribes or calls `.block()`.
-- Writing `webClient.get().uri(...).retrieve().bodyToMono(...)` builds a *pipeline description*, not an execution. Like writing a recipe without cooking.
+- Writing `webClient.get().uri(...).retrieve().bodyToMono(...)` builds a _pipeline description_, not an execution. Like writing a recipe without cooking.
 - `.map(fn)` = transform the value when it arrives (like Stream.map). Can only produce a value.
 - `.flatMap(fn)` = transform the value into ANOTHER Mono (like Stream.flatMap). Can return `Mono.error()` to signal failure, which `.map()` cannot.
 - This is why `AlphaVantageClient` uses `.flatMap()` for JSON parsing — it needs to return `Mono.error()` when the response is invalid.
@@ -2102,12 +2128,14 @@ A: Both navigate the JSON tree. `.get("key")` returns `null` if the key doesn't 
 Spring has **two different AOP mechanisms** that look identical from the outside (both create CGLIB proxies) but work differently internally:
 
 **Spring's Native Advisor System (used by @Transactional, @Cacheable):**
+
 - Spring registers `Advisor` + `MethodInterceptor` classes programmatically via auto-configurations (`TransactionAutoConfiguration`, `CacheAutoConfiguration`)
 - These use Spring's built-in `AbstractAutoProxyCreator` which lives in the `spring-aop` module
 - `spring-aop` is already on the classpath — pulled in transitively by `spring-context`, which is in every Spring Boot starter
 - Chain: `spring-boot-starter-web` → `spring-context` → `spring-aop` → native AOP works
 
 **AspectJ @Aspect System (used by Resilience4j, custom aspects):**
+
 - Third-party libraries define `@Aspect`-annotated classes (e.g., `CircuitBreakerAspect`, `RetryAspect`)
 - Spring needs `AnnotationAwareAspectJAutoProxyCreator` to detect and process `@Aspect` classes
 - This creator is activated by `@EnableAspectJAutoProxy`, which is auto-configured by `AopAutoConfiguration`
@@ -2147,6 +2175,7 @@ Step 4: Spring registers PROXY in ApplicationContext
 ```
 
 Memory layout:
+
 ```
 MarketDataServiceImpl
   .alphaVantageClient ──→ CGLIB Proxy
@@ -2162,6 +2191,7 @@ At runtime: `serviceImpl.alphaVantageClient.getStockQuote("AAPL")` → hits prox
 **9. Private Fallback Methods Work Via Reflection (2026-05-09)**
 
 When the circuit breaker catches a failure and needs to invoke the fallback:
+
 1. The `CircuitBreakerAspect` uses `targetClass.getDeclaredMethod("getStockQuoteFallback", String.class, Throwable.class)`
 2. Calls `fallbackMethod.setAccessible(true)` — bypasses Java's access modifier check
 3. Invokes `fallbackMethod.invoke(targetObject, symbol, exception)` on the **real object** (not through proxy)
@@ -2328,6 +2358,7 @@ This section traces exactly what happens in the market-data module from applicat
 **1. Gradle Resolves Dependencies (build time)**
 
 When you run `./gradlew build`, Gradle reads `market-data/build.gradle` and resolves:
+
 - `spring-boot-starter-webflux` → pulls in Reactor Netty (non-blocking HTTP client), `spring-webflux` (reactive web layer), `reactor-core` (Mono/Flux types)
 - `spring-boot-starter-data-mongodb` → pulls in MongoDB Java driver, Spring Data MongoDB (`MongoRepository`, `@Document` support)
 - `spring-boot-starter-data-redis` → pulls in Lettuce (Redis client), `StringRedisTemplate`
@@ -2401,9 +2432,9 @@ Step 8: MarketDataController
 resilience4j:
   circuitbreaker:
     instances:
-      alphaVantage:                    # ← name must match @CircuitBreaker(name = "alphaVantage")
-        sliding-window-size: 10        # track last 10 calls
-        failure-rate-threshold: 50     # open if 50%+ fail
+      alphaVantage: # ← name must match @CircuitBreaker(name = "alphaVantage")
+        sliding-window-size: 10 # track last 10 calls
+        failure-rate-threshold: 50 # open if 50%+ fail
         wait-duration-in-open-state: 30s
   retry:
     instances:
@@ -2413,9 +2444,9 @@ resilience4j:
   ratelimiter:
     instances:
       alphaVantage:
-        limit-for-period: 5           # max 5 calls per 60s window
+        limit-for-period: 5 # max 5 calls per 60s window
         limit-refresh-period: 60s
-        timeout-duration: 0s          # fail immediately if limit reached
+        timeout-duration: 0s # fail immediately if limit reached
 ```
 
 Spring reads this YAML, creates named instances in CircuitBreakerRegistry/RetryRegistry/RateLimiterRegistry. The `@CircuitBreaker(name = "alphaVantage")` annotation matches the YAML key exactly.
@@ -2715,6 +2746,7 @@ Steps 1-6 same, then:
 ### RESILIENCE SCENARIOS — What Happens When Things Fail
 
 **Scenario A: Alpha Vantage returns 500 (server error)**
+
 ```
 Attempt 1 → WebClient gets 500 → Mono signals error
 @Retry catches → waits 2 seconds → Attempt 2
@@ -2727,6 +2759,7 @@ Service catches error → returns 500 to client
 ```
 
 **Scenario B: Circuit breaker trips OPEN (too many failures)**
+
 ```
 After 5+ failures in last 10 calls (>50% failure rate):
 @CircuitBreaker state → OPEN
@@ -2739,6 +2772,7 @@ If fails → state → OPEN again (30s wait restarts)
 ```
 
 **Scenario C: Rate limit exceeded (>5 calls in 60s)**
+
 ```
 Call 6 within 60-second window:
 @RateLimiter checks → 0 permits remaining
@@ -2800,6 +2834,7 @@ After 60s window resets → 5 new permits available
 History: Before annotations (pre-Spring 2.0, ~2006), transaction boundaries were declared in XML (`<tx:advice>` blocks mapping method name patterns to attributes). Spring 2.0 introduced `@Transactional` annotations — same AOP proxy mechanism, more readable metadata.
 
 Class-level `@Transactional` sets a default for ALL public methods in that class. Method-level overrides the class default for that specific method. Common patterns:
+
 - Class-level `@Transactional` (REQUIRED) — most methods do read-write work
 - Override with `@Transactional(readOnly = true)` on query-only methods
 - Override with `@Transactional(propagation = REQUIRES_NEW)` for independent commits
@@ -2808,15 +2843,15 @@ Key: the annotation only works when the call comes through the Spring AOP proxy.
 
 **69. Transaction Propagation — All 7 Types (2026-05-12)**
 
-| Propagation | Existing Tx? | No Tx? | Use case |
-|---|---|---|---|
-| REQUIRED (default) | Join it | Create new | 90% of cases |
-| REQUIRES_NEW | Suspend it, create new | Create new | Independent commit (audit logs, per-item processing) |
-| SUPPORTS | Join it | Run without | Optional participation (reads that benefit from repeatable-read if tx exists) |
-| NOT_SUPPORTED | Suspend it | Run without | Long HTTP calls that shouldn't hold a DB connection |
-| MANDATORY | Join it | THROW | Safety guard — "never call me without a transaction" |
-| NEVER | THROW | Run without | Anti-transaction guard — "I must never be in a transaction" |
-| NESTED | Savepoint | Create new | Partial rollback within outer tx — **JPA does not support this**, JDBC only |
+| Propagation        | Existing Tx?           | No Tx?      | Use case                                                                      |
+| ------------------ | ---------------------- | ----------- | ----------------------------------------------------------------------------- |
+| REQUIRED (default) | Join it                | Create new  | 90% of cases                                                                  |
+| REQUIRES_NEW       | Suspend it, create new | Create new  | Independent commit (audit logs, per-item processing)                          |
+| SUPPORTS           | Join it                | Run without | Optional participation (reads that benefit from repeatable-read if tx exists) |
+| NOT_SUPPORTED      | Suspend it             | Run without | Long HTTP calls that shouldn't hold a DB connection                           |
+| MANDATORY          | Join it                | THROW       | Safety guard — "never call me without a transaction"                          |
+| NEVER              | THROW                  | Run without | Anti-transaction guard — "I must never be in a transaction"                   |
+| NESTED             | Savepoint              | Create new  | Partial rollback within outer tx — **JPA does not support this**, JDBC only   |
 
 "Suspend" means the outer transaction is paused (not rolled back) while the inner one runs. When the inner completes, the outer resumes.
 
@@ -2834,6 +2869,7 @@ Self-invocation: real.method() → this.helper()                      ✗ (proxy
 ```
 
 Solutions:
+
 1. Extract into separate @Service bean (what we did — cleanest)
 2. Inject self: `@Lazy @Autowired private PortfolioService self;` then call `self.method()` (works but hacky)
 3. Use `TransactionTemplate` programmatically (no proxy needed)
@@ -2842,6 +2878,7 @@ Solutions:
 **71. @Transactional(readOnly=true) — What It Actually Does (2026-05-12)**
 
 Two effects:
+
 1. **Hibernate level**: Sets FlushMode to MANUAL. Hibernate skips dirty-checking on all managed entities in that session. Fewer CPU cycles, no accidental writes.
 2. **JDBC/Driver level**: Passes a hint to the DB driver. PostgreSQL can use this to route queries to read-replicas (if configured), or optimize the transaction for read-only workload (no undo log entries needed).
 
@@ -2852,6 +2889,7 @@ Does NOT enforce immutability — you can still call `entity.setField()` and Hib
 `@Version` on an entity field makes Hibernate include `WHERE version = ?` in UPDATE statements. If another transaction incremented the version between your read and write, 0 rows are updated → Hibernate throws `OptimisticLockingFailureException` (Spring wraps the JPA `OptimisticLockException`).
 
 Manual retry pattern:
+
 ```
 for (int i = 0; i < maxRetries; i++) {
     try {
@@ -2873,22 +2911,26 @@ Alternative: `@Retryable(OptimisticLockingFailureException.class, maxAttempts=3)
 Real-world analogy: "cash-back" credit cards give back money; "stock-back" gives fractional shares of stock.
 
 Lifecycle:
+
 1. User completes order → order-service publishes event
 2. Portfolio-service grants reward: PENDING status, vesting date = now + 30 days
 3. 30 days pass → scheduled job finds eligible rewards → credits shares to holding → VESTED
 4. User now owns real shares — can sell for cash anytime
 
 Why the delay (vesting period):
+
 - If user returns the product within 30 days, reward is CANCELLED — no shares granted
 - Without delay, you'd need to "claw back" already-vested shares (legally complex, operationally messy)
 
 Two distinct dollar values:
+
 - `Holding.averageBuyPrice`: what the user PAID per share (zero for free shares — correct)
 - `StockBackReward.dollarValue`: what the shares were WORTH at grant time (for tax reporting — IRS treats stock compensation as income at fair market value)
 
 **74. Proxy Commit-Time Exception Propagation (2026-05-12)**
 
 With `@Transactional`, the AOP proxy wraps the method call:
+
 ```
 proxy.vestSingleReward(reward):
   1. Begin transaction
@@ -2930,6 +2972,7 @@ History: The Facade pattern comes from the Gang of Four book (1994). The name is
 What it is: a simplified interface over a complex subsystem. The client (controller) calls one method and gets back a ready-to-use result without knowing the internal structure.
 
 In EquityCart:
+
 ```
 Without facade:  Controller must know about PortfolioService + entity-to-DTO mapping logic
 With facade:     Controller calls one method, gets back a ready-to-use DTO
@@ -2946,6 +2989,7 @@ Where facades really shine: coordinating multiple services in one call. For exam
 Design decision: service methods accept primitives/entities and return entities. DTOs are a controller-boundary concern handled by the facade.
 
 This matters because the same service method can be called from multiple entry points:
+
 - `addOrUpdateHolding(userId, ticker, qty, price)` is called by:
   1. The facade (from a controller POST request)
   2. VestingHelperImpl (internal vesting — no DTO involved)
@@ -2965,13 +3009,16 @@ A: Services should work with entities and primitives — DTOs are a controller-b
 History: Circular dependencies have plagued DI containers since early Spring (2004). Spring originally resolved them silently via early reference exposure — bean A is partially created (constructor done, fields not yet set), its reference is exposed, then bean B is created and receives the partial A, then A finishes initialization. Spring Boot 2.6 (Nov 2021) changed the default to **prohibit** circular references (`spring.main.allow-circular-references=false`), forcing developers to design them out or use explicit `@Lazy`.
 
 The problem in EquityCart:
+
 ```
 PortfolioServiceImpl → injects VestingHelper
 VestingHelperImpl    → injects PortfolioService
 ```
+
 Spring can't construct either bean first — each needs the other to be ready.
 
 The fix attempt that **didn't work**: putting `@Lazy` on the field while using `@RequiredArgsConstructor`:
+
 ```java
 @RequiredArgsConstructor
 public class VestingHelperImpl {
@@ -2982,6 +3029,7 @@ public class VestingHelperImpl {
 Why it fails: `@RequiredArgsConstructor` generates a constructor with all `final` fields as parameters. Spring Boot uses **constructor injection** when a constructor exists. `@Lazy` on the **field** is a field-level hint — but Spring never does field injection here because it sees a constructor. The annotation needs to be on the **constructor parameter** for Spring to inject a lazy proxy instead of the real bean. Lombok doesn't copy field annotations to constructor parameters by default.
 
 Three valid fixes:
+
 1. **Manual constructor** — write the constructor yourself, put `@Lazy` on the parameter:
    ```java
    public VestingHelperImpl(@Lazy PortfolioService portfolioService, ...) { }
@@ -2992,11 +3040,13 @@ Three valid fixes:
 Chosen approach: Option 3. `@Lazy @Autowired` field injection on `portfolioService` in VestingHelperImpl.
 
 Field injection vs constructor injection tradeoff:
+
 - Constructor injection: explicit dependencies, immutable (`final`), fails fast, recommended by Spring team as default.
 - Field injection: allows `@Lazy` without manual constructors, but dependencies are hidden, fields can't be `final`, harder to unit test (need reflection or `@InjectMocks`).
 - Field injection with `@Lazy` is a legitimate escape hatch for circular dependencies — pragmatic fix when the alternative is restructuring the class graph.
 
 How `@Lazy` proxy works at runtime:
+
 ```
 1. Spring creates VestingHelperImpl
 2. For the @Lazy field, Spring injects a CGLIB proxy (not the real PortfolioServiceImpl)
@@ -3005,6 +3055,7 @@ How `@Lazy` proxy works at runtime:
 5. ...the proxy resolves the real PortfolioServiceImpl bean from the context
 6. From that point on, the proxy delegates all calls to the real bean
 ```
+
 The cycle is broken because VestingHelperImpl can finish construction without PortfolioServiceImpl being ready — it only needs the real bean at method-call time.
 
 **Q68: "Your Spring Boot app fails to start with a circular dependency. How do you fix it?" (2026-05-13)**
@@ -3020,6 +3071,7 @@ Why `reduceHolding` doesn't take a sell price:
 The sell price doesn't affect the cost basis of remaining shares. `averageBuyPrice` tracks what you **paid** for the shares you still hold. If you bought 10 AAPL at $150 avg and sell 3 at $200, the remaining 7 shares still cost $150 each. The sell price is irrelevant to the holding.
 
 Where the sell price matters (outside reduceHolding):
+
 1. P&L calculation: `profit = (sellPrice - averageBuyPrice) × qtySold`
 2. Ledger entry: wallet credit = `sellPrice × qtySold`
 
@@ -3055,6 +3107,7 @@ History: Double-entry bookkeeping dates to 1494 when Luca Pacioli published its 
 In EquityCart, every trade creates a balanced DEBIT+CREDIT pair via LedgerService.recordTransaction(). The entries share a UUID transactionId for correlation.
 
 Trade ledger entries (from the user's perspective):
+
 ```
 BUY 10 AAPL @ $150:
   DEBIT  HOLDING_ASSET  $1500  (asset increases — user now owns shares)
@@ -3074,6 +3127,7 @@ Why record ledger entries alongside trades? The holding table tracks current sta
 What is it: A payment method where the user sells stock from their portfolio to fund a pending order. Real-world examples: Robinhood's "Stock Round-Up," Revolut's auto-sell at checkout.
 
 User journey:
+
 ```
 1. User browses products → adds to cart
 2. User places order → Order status: CREATED (placed, awaiting payment)
@@ -3087,6 +3141,7 @@ Why CREATED state only: CREATED means "order placed, awaiting payment." CONFIRME
 Why require full payment (proceeds ≥ order total): Partial payment would require tracking `amountRemaining` on the order, supporting multiple payment rounds, multi-source reconciliation — that's a payments-platform domain, not a portfolio feature. For EquityCart: sell enough stock to cover the full order, or the request fails. Excess proceeds stay as CASH in the ledger.
 
 Cross-module coordination:
+
 ```
 SellToSpendServiceImpl orchestrates:
   1. OrderService.getOrderById()       → validate ownership + status
@@ -3098,11 +3153,13 @@ SellToSpendServiceImpl orchestrates:
 All four calls are wrapped in one `@Transactional`. If step 4 fails (e.g., invalid status transition), steps 2 and 3 roll back — the shares are restored, the ledger entry is not persisted. This is the monolith advantage: one database, one transaction manager, automatic atomicity.
 
 Preview of what breaks in microservices: When portfolio, ledger, and order are separate services with separate databases, `@Transactional` can't span them. You'd need a **Saga pattern** — a sequence of local transactions with compensating actions:
+
 ```
 Saga: sell shares → if ledger fails, re-add shares
       record ledger → if order fails, reverse ledger + re-add shares
       confirm order → done
 ```
+
 Each service commits independently and publishes an event. If a downstream step fails, upstream services execute compensating transactions to undo their work. This is Phase 6 territory (Event-Driven Architecture).
 
 Guard clause pattern: SellToSpendServiceImpl uses early-return validation (guard clauses) instead of nested if-else. Each validation failure throws immediately, so the happy path flows straight down without indentation. This is more readable than deeply nested conditionals.
@@ -3110,6 +3167,7 @@ Guard clause pattern: SellToSpendServiceImpl uses early-return validation (guard
 **82. Cross-Module Dependencies in a Monolith (2026-05-14)**
 
 portfolio/build.gradle now depends on both `:ledger-service` and `:order-service`. This creates cross-module coupling:
+
 ```
 portfolio → ledger   (for recording financial events)
 portfolio → order    (for confirming orders via sell-to-spend)
@@ -3147,6 +3205,7 @@ Controller receives ← one combined DTO
 ```
 
 Why this belongs in the facade (not a new service):
+
 - No new domain logic — it's computation over existing data (sums, percentages, counts)
 - No new repository calls — uses existing service methods
 - No side effects — pure read + compute + assemble
@@ -3159,6 +3218,7 @@ If this needed market-data integration (current price × quantity = live portfol
 Bug pattern: `costBasis.divide(totalCostBasis, RoundingMode.HALF_UP)` — this uses the dividend's scale (which could be 10+ from BigDecimal multiplication), producing results like `33.3333333300`.
 
 The 2-argument `divide(BigDecimal, RoundingMode)` inherits scale from `this`. For clean API responses, use the 3-argument form with explicit scale:
+
 ```java
 costBasis.multiply(BigDecimal.valueOf(100))
          .divide(totalCostBasis, 2, RoundingMode.HALF_UP)  // → 33.33
@@ -3181,6 +3241,7 @@ A: If it's pure computation over data from existing services (sums, percentages,
 Phase 5 built all the **infrastructure** for the stock-back reward loop, but left one critical step unimplemented: the **grant trigger**. Here's what exists vs what's missing:
 
 **Implemented (Phase 5):**
+
 - `StockBackReward` entity with PENDING/VESTED/CANCELLED lifecycle
 - `grantReward()` in PortfolioService — creates a PENDING reward (idempotent via orderId check)
 - `VestingHelper` + `@Scheduled` job — converts PENDING rewards to VESTED holdings
@@ -3188,6 +3249,7 @@ Phase 5 built all the **infrastructure** for the stock-back reward loop, but lef
 - Portfolio holdings, trades, analytics — all functional
 
 **Not implemented (deferred to Phase 6):**
+
 - The **trigger** that calls `grantReward()` when an order reaches DELIVERED status
 - This requires a cross-module event chain: Order (DELIVERED event) → Product (look up brand) → BrandTickerMapping (get ticker + stockBackPercentage) → MarketData (get current price) → Portfolio (calculate shares, create PENDING reward)
 
@@ -3201,6 +3263,7 @@ A: The `@Scheduled` vesting job queries `findByStatusAndVestingDateBefore(PENDIN
 
 **Q78: "What does the reward grant calculation look like?" (2026-05-16)**
 A: When an order is delivered:
+
 1. Look up each order item's product → brand → `BrandTickerMapping` → `tickerSymbol` + `stockBackPercentage`
 2. Calculate reward dollar value: `orderItemTotal × stockBackPercentage / 100`
 3. Fetch current stock price from market-data service (or Redis cache)
@@ -3221,6 +3284,7 @@ The idempotency check (`findByOrderId`) ensures one reward per order, even if th
 Kafka is a distributed commit log (not a traditional message queue). Built by LinkedIn in 2010 to replace N×N service-to-service spaghetti with a single event backbone. Key differences from RabbitMQ: messages are durable (retained for days, not deleted on consumption), replayable (reset offset to re-read), and pull-based (consumer controls read rate).
 
 Core vocabulary:
+
 - **Topic** — named stream of messages (like a DB table, but append-only)
 - **Partition** — unit of parallelism within a topic. Messages with same key go to same partition (ordered). Across partitions, no ordering guarantee.
 - **Offset** — sequential ID per message within a partition. Consumer tracks "I've read up to offset N" (committed offset).
@@ -3298,6 +3362,7 @@ A: Spring's `JsonSerializer` writes the `__TypeId__` header based on the Java ob
 **94. The Outbox Is Infrastructure, Not Domain Logic (2026-05-19)**
 
 The outbox table doesn't care whether an event represents a delivery or a return. Its sole job: "relay this JSON blob to this Kafka topic." Therefore:
+
 - ONE status lifecycle: `PENDING → SENT` (no `RETURNED`, `CANCELLED`, etc.)
 - ONE generic poller method that handles ALL event types using `Class.forName(payloadType)`
 - The `payloadType` column (FQCN) enables dynamic deserialization without if-else chains
@@ -3560,10 +3625,12 @@ A: No — they are separate patterns that complement each other well but are ind
 They are often used together because Event Sourcing naturally produces a write model (event store) that is optimized for appends but awkward for reads — so you build separate read-optimized projections (CQRS). But you can do CQRS without Event Sourcing (e.g., separate read replicas + write master in PostgreSQL), and you can do Event Sourcing without CQRS (single model that both writes events and queries the same store).
 
 **What EquityCart implements:**
+
 - Event Sourcing: Yes — MongoDB append-only event log captures all portfolio mutations as immutable facts
 - CQRS: Partially ("CQRS Lite") — the write path goes to PostgreSQL (current state), while the read/audit path queries MongoDB (event timeline + projections). Two different stores optimized for different access patterns, but not a full CQRS architecture (which would have completely separate command and query services with eventual consistency between them)
 
 **Full CQRS would look like:**
+
 ```
 Command Side                              Query Side
 ┌─────────────┐    publish    ┌─────────────────────────┐
@@ -3591,27 +3658,28 @@ Command Side                              Query Side
 
 **Why Event Sourcing matters (what it solves):**
 
-| Problem with CRUD | How Event Sourcing Solves It |
-|-------------------|-----------------------------|
-| Overwritten state — no history of HOW you got here | Every mutation recorded as immutable fact; complete chronology |
-| "What was the portfolio on May 1st?" — impossible | Replay events up to that timestamp (temporal query) |
-| Debugging "why is my holding wrong?" — log archaeology | `/projection/validate` pinpoints exactly which event caused drift |
-| Bug in calculation logic — requires data fix | Fix projection code + replay from scratch — events are immutable facts |
-| Analytics require querying live DB | Query event store directly without touching production state |
-| New requirement needs historical data that wasn't tracked | Write new projection over existing events — data was always there |
+| Problem with CRUD                                         | How Event Sourcing Solves It                                           |
+| --------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Overwritten state — no history of HOW you got here        | Every mutation recorded as immutable fact; complete chronology         |
+| "What was the portfolio on May 1st?" — impossible         | Replay events up to that timestamp (temporal query)                    |
+| Debugging "why is my holding wrong?" — log archaeology    | `/projection/validate` pinpoints exactly which event caused drift      |
+| Bug in calculation logic — requires data fix              | Fix projection code + replay from scratch — events are immutable facts |
+| Analytics require querying live DB                        | Query event store directly without touching production state           |
+| New requirement needs historical data that wasn't tracked | Write new projection over existing events — data was always there      |
 
 **Real-world domains that use Event Sourcing:**
 
-| Domain | Why | Example |
-|--------|-----|---------|
-| Banking/Finance | Regulatory: must explain every balance change | Each debit/credit is an event; account balance = sum of events |
-| E-commerce | Complex order lifecycle needs full audit | Order placed → paid → picked → shipped → delivered → returned |
-| Healthcare | Legally mandated audit trail | Every patient record change must be traceable to who/when/why |
-| Gaming | Replay & undo capability | Chess move history, real-time game state sync, replays |
-| IoT/Telemetry | High-volume append-only sensor data | Temperature readings, GPS pings — never overwritten |
-| Version Control | Git IS event sourcing | Commits are immutable events; working directory is the projection |
+| Domain          | Why                                           | Example                                                           |
+| --------------- | --------------------------------------------- | ----------------------------------------------------------------- |
+| Banking/Finance | Regulatory: must explain every balance change | Each debit/credit is an event; account balance = sum of events    |
+| E-commerce      | Complex order lifecycle needs full audit      | Order placed → paid → picked → shipped → delivered → returned     |
+| Healthcare      | Legally mandated audit trail                  | Every patient record change must be traceable to who/when/why     |
+| Gaming          | Replay & undo capability                      | Chess move history, real-time game state sync, replays            |
+| IoT/Telemetry   | High-volume append-only sensor data           | Temperature readings, GPS pings — never overwritten               |
+| Version Control | Git IS event sourcing                         | Commits are immutable events; working directory is the projection |
 
 **When NOT to use Event Sourcing:**
+
 - Simple CRUD with no audit requirements (blog posts, user settings)
 - When storage cost of retaining all events outweighs the audit value
 - When your team cannot maintain the added complexity (projections, eventual consistency, event versioning/upcasting)
@@ -3619,15 +3687,15 @@ Command Side                              Query Side
 
 **How EquityCart's implementation demonstrates each principle:**
 
-| Principle | Implementation |
-|-----------|---------------|
-| Immutable facts | `PortfolioEvent` document — no update/delete methods exist anywhere |
-| Deterministic replay | `rebuildHoldings()` — same events always produce identical state |
-| Ordering guarantee | `sequenceNumber` — monotonically increasing per user |
-| Graceful degradation | `try-catch` in `PortfolioEventStoreImpl` — MongoDB down ≠ broken trades |
-| Consistency validation | `/projection/validate` — proves events and state store agree |
-| Temporal queries | `?from=...&to=...` filter — query events within any time range |
-| Metadata flexibility | `Map<String, Object>` — each event type carries its own context (orderId, sagaId, reason) |
+| Principle              | Implementation                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------------- |
+| Immutable facts        | `PortfolioEvent` document — no update/delete methods exist anywhere                       |
+| Deterministic replay   | `rebuildHoldings()` — same events always produce identical state                          |
+| Ordering guarantee     | `sequenceNumber` — monotonically increasing per user                                      |
+| Graceful degradation   | `try-catch` in `PortfolioEventStoreImpl` — MongoDB down ≠ broken trades                   |
+| Consistency validation | `/projection/validate` — proves events and state store agree                              |
+| Temporal queries       | `?from=...&to=...` filter — query events within any time range                            |
+| Metadata flexibility   | `Map<String, Object>` — each event type carries its own context (orderId, sagaId, reason) |
 
 ### Step 13: Notification Service — Observer Pattern via Kafka Pub/Sub (2026-05-31)
 
@@ -4184,6 +4252,7 @@ Single entry point that proxies requests to N downstream services. Enables: (1) 
 **5. Management vs Security Layer Independence**
 
 Two independent access control mechanisms in Spring Boot:
+
 - Management: `management.endpoints.web.exposure.include` — which actuator endpoints exist
 - Security: `SecurityFilterChain` — who can access any URL
 
@@ -4209,11 +4278,12 @@ A: `http://localhost:8081` is a hardcoded URL. If service moves or scales, you m
 
 A: Yes for new deployments, no for running services. Running services cache configs in memory — transient Config Server outages don't break them. New services or restarted services fail if Config Server is down. Mitigations: (1) cluster Config Server (multiple instances, same Git repo), (2) use `optional:configserver:` for graceful degradation, (3) set client retry/timeout properties for transient failures.
 
-
 ---
+
 ## Phase 7 Step 4: Extract User-Service as Standalone Microservice
 
 ### Date: 2026-06-03
+
 ---
 
 ### Roadblocks & Issues Faced
@@ -4259,6 +4329,7 @@ Named after the strangler fig tree that grows around and replaces its host. In s
 **2. Dual Gradle Plugin Pattern**
 
 During Strangler Fig extraction from a multi-module monorepo:
+
 - `java-library` alone: library, no executable, can be depended on
 - `org.springframework.boot` alone: executable bootJar, BUT disables plain jar by default
 - Both together + `jar { enabled = true }`: produces both plain jar AND bootJar
@@ -4295,7 +4366,6 @@ A: Intentional temporary duplication. JWT secret, database credentials, and othe
 **Q116: "Why is ddl-auto: validate in base config but update in service config?" (2026-06-03)**
 
 A: Base config models production-safe defaults. `validate` means Hibernate checks entity-schema alignment but never auto-modifies DDL — safe for production where schema changes must go through Flyway/Liquibase migrations. Service-specific YAML overrides with `update` for developer convenience (new schema starts empty, Hibernate creates tables automatically). Config Server merge hierarchy makes this clean: service YAML wins over base YAML, so dev gets `update` without touching the prod-safe base config.
-
 
 ## Phase 7 Step 7: Extract Portfolio-Service as Standalone (2026-06-06)
 
@@ -4506,6 +4576,7 @@ Phase 7 is **COMPLETE** — all 12 implementation steps finished. Step 13 (end-t
 ### Key Architectural Lesson: Strangler Fig Transitional Coupling
 
 **Observation**: After decomposition, portfolio-service's `build.gradle` still contains:
+
 ```
 implementation project(':ledger-service')
 implementation project(':market-data-service')
@@ -4516,13 +4587,13 @@ This contradicts the microservice ideal of only sharing a thin commons library.
 
 **Why it's acceptable in Phase 7**: The Strangler Fig Pattern is an **incremental migration strategy**. Services are extracted in phases — the pattern explicitly permits transitional coupling during the migration window. At this stage, portfolio-service calls ledger and market-data via direct bean injection (same JVM), not HTTP. The target state (post-Phase 8+) is:
 
-| Pair | Current (Phase 7) | Target (Phase 9+) |
-|------|------|------|
-| portfolio → product | ✅ Feign (HTTP) | ✅ No change |
-| portfolio → order | ✅ Feign (HTTP) | ✅ No change |
-| order → product | ✅ Feign (HTTP) | ✅ No change |
-| portfolio → ledger | ❌ Direct import | Feign (HTTP) |
-| portfolio → market-data | ❌ Direct import | Feign (HTTP) |
+| Pair                       | Current (Phase 7)           | Target (Phase 9+)       |
+| -------------------------- | --------------------------- | ----------------------- |
+| portfolio → product        | ✅ Feign (HTTP)             | ✅ No change            |
+| portfolio → order          | ✅ Feign (HTTP)             | ✅ No change            |
+| order → product            | ✅ Feign (HTTP)             | ✅ No change            |
+| portfolio → ledger         | ❌ Direct import            | Feign (HTTP)            |
+| portfolio → market-data    | ❌ Direct import            | Feign (HTTP)            |
 | portfolio → order entities | ❌ EntityScan (OutboxEvent) | Outbox moved to commons |
 
 **Rule for production microservices**: Each service's `build.gradle` should import ONLY `implementation project(':commons')`. Any other service dependency means the services cannot be deployed independently — they share a classloader and lifecycle.
@@ -4540,6 +4611,7 @@ A: **Big-Bang**: Rebuild everything in the new architecture simultaneously, swit
 **Strangler Fig** (Martin Fowler, 2004 — named after Australian fig trees that grow around host trees and gradually replace them): Incrementally migrate one capability at a time while the old system continues running. Each increment is independently deployable and testable. The old monolith "shrinks" as functionality moves out.
 
 Key tradeoffs:
+
 - Big-Bang is faster IF nothing goes wrong (rare for complex systems)
 - Strangler Fig is slower but each step is reversible and validates independently
 - Strangler Fig explicitly permits **transitional coupling** — some components temporarily depend on both old and new, and that's expected (not a design flaw)
@@ -4547,6 +4619,7 @@ Key tradeoffs:
 **Q144: "In a microservices build, why shouldn't service A import service B's Gradle module?" (2026-06-12)**
 
 A: Gradle `implementation project(':service-B')` means A and B share a classloader, compile together, and produce a single deployment artifact. This defeats the purpose of microservices:
+
 1. **Independent deployment** impossible — changing B requires rebuilding A
 2. **Separate scaling** impossible — they're the same JAR
 3. **Fault isolation** lost — B's OOM kills A too
@@ -4587,6 +4660,7 @@ A: `void` means "do it now, synchronously." `Mono<Void>` means "something will c
 **Objective:** Distribute JWT validation from user-service to ALL downstream services + gateway edge validation.
 
 **Key Deliverables:**
+
 - Commons: JwtTokenValidator interface + HMAC-SHA256 impl, JwtAuthenticationFilter, SecurityAutoConfig (@ConditionalOnProperty gated)
 - Commons: FeignAuthorizationInterceptor (propagates Authorization header via RequestContextHolder ThreadLocal)
 - Gateway: JwtValidationGatewayFilter (reactive GlobalFilter, validates before routing, defense-in-depth)
@@ -4595,6 +4669,7 @@ A: `void` means "do it now, synchronously." `Mono<Void>` means "something will c
 **Critical Discovery:** @ComponentScan was missing from order, product, notification, ledger services. All commons @Component beans (including GlobalExceptionHandler, MdcCorrelationFilter, KafkaConsumerConfig) were NEVER loading throughout Phase 7. @EntityScan (which was present) only discovers JPA entities — it does NOT register @Component/@Configuration beans. Services started fine because Spring Boot's defaults handle basic cases; the missing commons beans caused silent degradation (no structured errors, no correlation propagation, no security).
 
 **Architecture:**
+
 - Gateway: fast-fail for invalid tokens (saves 1 network hop for bad requests)
 - Each service: independent validation via SecurityAutoConfig (zero-trust, Feign calls bypass gateway)
 - Both layers use same jwt.secret from shared application.yml via Config Server
@@ -4667,6 +4742,7 @@ A: When extracting from monolith to microservices, the property `equitycart.sell
 **Objective:** Run Keycloak 26.0 as Identity Provider in Docker, configure equitycart realm with roles, clients, protocol mappers, and test users for upcoming OAuth2 Resource Server migration.
 
 **Key Deliverables:**
+
 - docker-pets.yml: Keycloak container (quay.io, port 8180, shared PostgreSQL, realm import volume mount)
 - init-db.sh: keycloak database added
 - equitycart-realm.json: complete realm export (roles, 3 clients, mappers, test users)
@@ -4707,6 +4783,7 @@ A: `serviceAccountRealmRoles` is NOT a field in Keycloak's `ClientRepresentation
 **Concepts covered:** spring-boot-starter-oauth2-resource-server, NimbusJwtDecoder, JwtAuthenticationConverter, jwk-set-uri vs issuer-uri, BearerTokenAuthenticationFilter, dual-mode security config, @ConditionalOnProperty switching.
 
 **Files created/modified:**
+
 - commons/build.gradle: added `api 'spring-boot-starter-oauth2-resource-server'`
 - commons/.../security/impl/KeycloakJwtAuthenticationConverter.java: Converter<Jwt, AbstractAuthenticationToken>
 - commons/.../config/OAuth2ResourceServerConfig.java: @ConditionalOnProperty(mode=oauth2) SecurityFilterChain
@@ -4795,3 +4872,33 @@ A: `chain.filter(exchange)` executes the entire downstream chain (auth, routing,
 **Q189: "How does `@Component` behave differently on a WebFlux GlobalFilter vs a Servlet OncePerRequestFilter?"**
 
 A: On a servlet `OncePerRequestFilter`: Spring Boot registers any `@Component`-annotated `Filter` as a real servlet filter via `FilterRegistrationBean`. This registration is OUTSIDE the `SecurityFilterChain`. The filter runs on every request regardless of which security mode is active. This caused a conflict: in `mode=oauth2`, the `JwtAuthenticationFilter` still ran as a standalone filter alongside Spring Security's `BearerTokenAuthenticationFilter`. Fix: remove `@Component` so it's only instantiated as a bean when explicitly wired into `SecurityAutoConfig`. On a WebFlux `GlobalFilter`: `@Component` only registers the bean; Spring Cloud Gateway's `GatewayAutoConfiguration` collects all `GlobalFilter` beans at startup and adds them to the global chain. No separate `FilterRegistrationBean` concept. If the bean exists → it's in the chain. If not → absent.
+
+---
+
+## Phase 9 — Observability (2026-08-07)
+
+**Scope completed:** structured logging, Prometheus metrics, Grafana dashboards, distributed tracing (Zipkin), custom business metrics, and alert rules.
+
+**Q190: "Why wasn't correlationId alone enough for observability?" (2026-08-07)**
+
+A: Correlation IDs help trace a single request across logs, but they do not provide aggregate health signals. You cannot answer "what is p99 latency over the last 30 minutes?" or "is error rate rising for one endpoint?" from correlation IDs alone without expensive log scans. Metrics provide aggregated time-series for trend detection and alerting, while tracing provides per-request timing decomposition. CorrelationId remained valuable but became one pillar in a three-signal model (logs + metrics + traces).
+
+**Q191: "Why did `/actuator/prometheus` fail even though actuator endpoints were exposed?" (2026-08-07)**
+
+A: Exposing endpoints in `management.endpoints.web.exposure.include` only controls visibility of endpoints that are already registered. The Prometheus endpoint is registered only when `micrometer-registry-prometheus` is on the classpath. Without that dependency, `/actuator/prometheus` is 404 even if actuator is enabled and exposure includes `prometheus`.
+
+**Q192: "Why did split docker-compose files cause service-discovery/connectivity issues?" (2026-08-07)**
+
+A: Separate compose projects create separate default networks by default. Infra containers from `docker-pets.yml` and app containers from `docker-compose-services.yml` could not resolve each other by service DNS names when launched independently. Fix: define and use one shared external network in both files, and create it before startup (automated in start scripts).
+
+**Q193: "What is the most common alert-rule mistake in Grafana for Prometheus data?" (2026-08-07)**
+
+A: Query shape mismatch causing NoData states. Dashboard panels may display transformed data, but alert queries can still return empty vectors due to label filters/window functions. Always test each alert query directly in Explore first, then configure NoData behavior intentionally (NoData vs Alerting) based on operational policy.
+
+**Q194: "Why was EFK/Fluentd skipped, and why is that still acceptable?" (2026-08-07)**
+
+A: Elastic images were blocked by enterprise Zscaler policy (`docker.elastic.co` pull denied). This was an infrastructure policy constraint, not an application defect. We adopted a pragmatic fallback: structured JSON log files per service plus `core-loglens` for cross-service analysis. Core observability objectives remained satisfied via metrics, tracing, alerting, and structured logs.
+
+**Q195: "Where should custom business metrics be instrumented for correctness?" (2026-08-07)**
+
+A: At business-transaction boundaries where outcome is definitive (success/failure/latency finalization), not at controller entry. This avoids counting requests that fail before domain execution and prevents double counting on retries or idempotent short-circuit paths. Example: in order placement, mark idempotent duplicate-return path as success before early return so failure counters are not polluted.

@@ -594,10 +594,10 @@ In null cases, the interceptor falls back to `ServiceTokenProvider.getServiceTok
 
 ### Two Interceptors, Two Concerns
 
-| Interceptor | Reads from | Writes to | Survives across threads? |
-|-------------|-----------|-----------|--------------------------|
-| FeignCorrelationInterceptor | MDC ThreadContext (InheritableThreadLocal) | X-Correlation-Id header | YES — InheritableThreadLocal |
-| FeignAuthorizationInterceptor | RequestContextHolder (plain ThreadLocal) | Authorization header | NO — plain ThreadLocal (fallback: ServiceTokenProvider) |
+| Interceptor                   | Reads from                                 | Writes to               | Survives across threads?                                |
+| ----------------------------- | ------------------------------------------ | ----------------------- | ------------------------------------------------------- |
+| FeignCorrelationInterceptor   | MDC ThreadContext (InheritableThreadLocal) | X-Correlation-Id header | YES — InheritableThreadLocal                            |
+| FeignAuthorizationInterceptor | RequestContextHolder (plain ThreadLocal)   | Authorization header    | NO — plain ThreadLocal (fallback: ServiceTokenProvider) |
 
 This difference is intentional: correlation IDs are lightweight tracing data safe to propagate anywhere; auth tokens are sensitive and should NOT leak to unrelated threads.
 
@@ -627,13 +627,13 @@ Spring Cloud OpenFeign auto-detects feign-hc5 on the classpath and replaces the 
 
 ### HTTP Client Evolution in Feign
 
-| Dependency | HTTP Client | PATCH Support | Notes |
-|-----------|-------------|:---:|---|
-| (none — default) | java.net.HttpURLConnection | ✗ | JDK built-in, ~1997 |
-| feign-httpclient | Apache HttpClient 4 | ✓ | Legacy, works fine |
-| feign-okhttp | OkHttp 3/4 | ✓ | Popular, good HTTP/2 |
-| feign-hc5 | Apache HttpClient 5 | ✓ | Current recommendation |
-| feign-java11 | java.net.http.HttpClient | ✓ | JDK 11+, modern but less battle-tested |
+| Dependency       | HTTP Client                | PATCH Support | Notes                                  |
+| ---------------- | -------------------------- | :-----------: | -------------------------------------- |
+| (none — default) | java.net.HttpURLConnection | ✗             | JDK built-in, ~1997                    |
+| feign-httpclient | Apache HttpClient 4        | ✓             | Legacy, works fine                     |
+| feign-okhttp     | OkHttp 3/4                 | ✓             | Popular, good HTTP/2                   |
+| feign-hc5        | Apache HttpClient 5        | ✓             | Current recommendation                 |
+| feign-java11     | java.net.http.HttpClient   | ✓             | JDK 11+, modern but less battle-tested |
 
 ### Interview Questions
 

@@ -781,19 +781,19 @@ WebFlux SecurityWebFilterChain (API Gateway):
 
 ### 2.13 Pattern Summary Table
 
-| Pattern               | Category   | Where Used                                              | Key Benefit                            |
-| --------------------- | ---------- | ------------------------------------------------------- | -------------------------------------- |
-| Strategy              | Behavioral | Notification channels                                   | Runtime algorithm swap                 |
-| Observer              | Behavioral | Kafka Pub/Sub notifications                             | Decoupled event reactions              |
-| Facade                | Structural | PortfolioFacade                                         | Simplified controller interface        |
-| Builder               | Creational | Entity/DTO construction (@Builder)                      | Readable multi-field construction      |
-| State                 | Behavioral | OrderStatus, SagaStatus enums                           | Enforced valid transitions             |
-| Decorator             | Structural | Resilience4j stacking, ServerHttpResponseDecorator      | Layered cross-cutting concerns         |
-| Template Method       | Behavioral | Spring Batch chunk processing                           | Framework controls skeleton            |
-| Repository            | Domain     | Spring Data JPA interfaces                              | Collection-like data access            |
-| Singleton             | Creational | All Spring beans (default scope)                        | One instance, DI-managed               |
-| Saga                  | Enterprise | SellToSpendSagaOrchestrator                             | Distributed transaction recovery       |
-| Outbox                | Enterprise | OutboxEvent + OutboxPoller                              | Reliable event publishing              |
+| Pattern                 | Category   | Where Used                                            | Key Benefit                                                |
+| ----------------------- | ---------- | ----------------------------------------------------- | ---------------------------------------------------------- |
+| Strategy                | Behavioral | Notification channels                                 | Runtime algorithm swap                                     |
+| Observer                | Behavioral | Kafka Pub/Sub notifications                           | Decoupled event reactions                                  |
+| Facade                  | Structural | PortfolioFacade                                       | Simplified controller interface                            |
+| Builder                 | Creational | Entity/DTO construction (@Builder)                    | Readable multi-field construction                          |
+| State                   | Behavioral | OrderStatus, SagaStatus enums                         | Enforced valid transitions                                 |
+| Decorator               | Structural | Resilience4j stacking, ServerHttpResponseDecorator    | Layered cross-cutting concerns                             |
+| Template Method         | Behavioral | Spring Batch chunk processing                         | Framework controls skeleton                                |
+| Repository              | Domain     | Spring Data JPA interfaces                            | Collection-like data access                                |
+| Singleton               | Creational | All Spring beans (default scope)                      | One instance, DI-managed                                   |
+| Saga                    | Enterprise | SellToSpendSagaOrchestrator                           | Distributed transaction recovery                           |
+| Outbox                  | Enterprise | OutboxEvent + OutboxPoller                            | Reliable event publishing                                  |
 | Chain of Responsibility | Behavioral | SecurityFilterChain, SecurityWebFilterChain (Phase 8) | Ordered security processing, short-circuit on auth failure |
 
 ---
@@ -835,3 +835,41 @@ WebFlux SecurityWebFilterChain (API Gateway):
 | `Map.of()` for small immutable maps  | `Collections.unmodifiableMap(new HashMap<>())` (verbose) |
 | Stream + collect for transformations | Manual loops for filter/map/reduce                       |
 | `EnumSet` for flag/transition sets   | `HashSet<MyEnum>` (EnumSet is bit-vector, faster)        |
+
+---
+
+## Part 4: Phase 9 Java APIs and Implementation Notes (Observability)
+
+### 4.1 Metrics Instrumentation APIs
+
+- `io.micrometer.core.instrument.MeterRegistry`
+- `Counter` for monotonic event totals (success/failure/channel counts)
+- `Timer` for latency measurements (request/business operation timing)
+
+**Rule:** Counters should be incremented at definitive business outcome points, not at method entry.
+
+### 4.2 Tracing APIs and Context
+
+- Micrometer tracing auto-instrumentation handles trace/span lifecycle for HTTP flows.
+- Correlation context remains in logging MDC/ThreadContext for log-level stitching.
+- Trace context and log correlation context serve related but different diagnostic needs.
+
+### 4.3 Log4j2 Runtime APIs
+
+- `LogManager.getLogger(...)` for logger creation
+- `ThreadContext.put/remove` for per-request contextual fields in logs
+- `log4j2-spring.xml` controls structured JSON layout and rolling policies
+
+### 4.4 Defensive Metric Design Patterns (from Phase 9)
+
+1. **Idempotency-aware counting:** duplicate request return paths must not inflate failure metrics.
+2. **Single-finalization timing:** timer stop should occur once in a `finally`-style completion point.
+3. **Label discipline:** keep label cardinality bounded (avoid userId/orderId labels in metrics).
+
+### 4.5 Interview Questions
+
+**Q: "Why should high-cardinality labels be avoided in Prometheus metrics?"**  
+A: High-cardinality labels (userId, orderId, sessionId) explode time-series count, increase memory/storage use, and degrade query performance. Use low-cardinality dimensions (service, endpoint, status, channel).
+
+**Q: "When do you use Counter vs Timer?"**  
+A: Counter tracks event totals (how many). Timer tracks duration distribution (how long) and also provides count/rate over time.

@@ -10,6 +10,7 @@ import com.equitycart.portfolio.enums.TradeType;
 import com.equitycart.portfolio.event.NotificationPublisher;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
+import com.equitycart.portfolio.metrics.PortfolioMetrics;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.TradeService;
 import java.math.BigDecimal;
@@ -43,6 +44,7 @@ public class TradeServiceImpl implements TradeService {
   private final LedgerService ledgerService;
   private final PortfolioEventStore portfolioEventStore;
   private final NotificationPublisher notificationPublisher;
+  private final PortfolioMetrics portfolioMetrics;
 
   /** {@inheritDoc} */
   @Override
@@ -85,6 +87,8 @@ public class TradeServiceImpl implements TradeService {
           price,
           amount,
           Map.of("tradeType", "BUY"));
+
+      portfolioMetrics.recordTrade("BUY");
     } else {
       holding = portfolioService.reduceHolding(userId, tickerSymbol, qty);
       ledgerService.recordTransaction(
@@ -111,6 +115,7 @@ public class TradeServiceImpl implements TradeService {
           price,
           amount,
           Map.of("tradeType", "SELL"));
+      portfolioMetrics.recordTrade("SELL");
     }
 
     NotificationEvent notificationEvent =

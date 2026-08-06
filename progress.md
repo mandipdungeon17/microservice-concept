@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 8 - Security Hardening (COMPLETE) → Phase 9 Next
+## Status: Phase 9 - Observability (COMPLETE) → Phase 10 Next
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market
@@ -442,22 +442,23 @@
 
 ### Step Plan (derived from equitycart-roadmap.md Phase 5 deliverables)
 
-| Step | Deliverable | Status |
-|------|-------------|--------|
-| 1 | Ledger entity + double-entry bookkeeping (committed in prior session) | COMPLETE |
-| 2 | Design: Portfolio entities, stock-back concept, relationships | COMPLETE |
-| 3 | Dependencies (portfolio build.gradle) | COMPLETE |
-| 4 | Portfolio, Holding, StockBackReward entities + VestingStatus enum | COMPLETE |
-| 5 | Repositories + PortfolioService + VestingHelper (with REQUIRES_NEW) | COMPLETE |
-| 6 | PortfolioController (REST API) + DTOs + Facade | COMPLETE |
-| 7 | BUY/SELL Trade APIs (TradeService — manual trading) | COMPLETE |
-| 8 | Ledger Integration + "Sell to Spend" atomic transaction | COMPLETE |
-| 9 | Portfolio Analytics (cost basis, weights, reward summary) | COMPLETE |
-| 10 | End-to-end testing + end-of-phase re-audit | PENDING |
+| Step | Deliverable                                                           | Status   |
+| ---- | --------------------------------------------------------------------- | -------- |
+| 1    | Ledger entity + double-entry bookkeeping (committed in prior session) | COMPLETE |
+| 2    | Design: Portfolio entities, stock-back concept, relationships         | COMPLETE |
+| 3    | Dependencies (portfolio build.gradle)                                 | COMPLETE |
+| 4    | Portfolio, Holding, StockBackReward entities + VestingStatus enum     | COMPLETE |
+| 5    | Repositories + PortfolioService + VestingHelper (with REQUIRES_NEW)   | COMPLETE |
+| 6    | PortfolioController (REST API) + DTOs + Facade                        | COMPLETE |
+| 7    | BUY/SELL Trade APIs (TradeService — manual trading)                   | COMPLETE |
+| 8    | Ledger Integration + "Sell to Spend" atomic transaction               | COMPLETE |
+| 9    | Portfolio Analytics (cost basis, weights, reward summary)             | COMPLETE |
+| 10   | End-to-end testing + end-of-phase re-audit                            | PENDING  |
 
 Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phase 6 (Event-Driven Architecture) per roadmap alignment.
 
 ### Design Completed
+
 - [x] Portfolio entity design: Portfolio → Holdings (1:N via CascadeType.ALL + orphanRemoval)
 - [x] Holding: composite unique (portfolio_id + ticker_symbol), @Version for optimistic locking, BigDecimal precision (scale=6 qty, scale=4 price)
 - [x] StockBackReward: one-per-order (unique orderId), vesting lifecycle (PENDING → VESTED | CANCELLED), 30-day delay for return window
@@ -467,6 +468,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [x] Stock-back reward concept: fractional share rewards on order completion, zero cost-basis, dollarValue for tax reporting
 
 ### Implementation Completed
+
 - [x] Step 1: Ledger-service (committed dac0aae) — COMPLETE
   - LedgerEntry entity with double-entry bookkeeping (DEBIT/CREDIT)
   - AccountType enum (WALLET, STOCK, REWARD, PLATFORM)
@@ -504,6 +506,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - BUILD SUCCESSFUL
 
 ### Concepts Learned (Phase 5 so far)
+
 - @Transactional class-level vs method-level: class sets default, method overrides for specific propagation/readOnly
 - All 7 propagation types: REQUIRED, REQUIRES_NEW, SUPPORTS, NOT_SUPPORTED, MANDATORY, NEVER, NESTED
 - REQUIRES_NEW suspends outer transaction, commits independently (used for per-reward isolation)
@@ -527,6 +530,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - BUILD SUCCESSFUL
 
 ### Phase 5 Remaining
+
 - [x] Step 7: BUY/SELL Trade APIs — COMPLETE (2026-05-13)
   - TradeType enum (BUY, SELL), TradeRequest/TradeResponse DTOs (Java records, String tradeType for DTO-enum decoupling)
   - TradeService interface (returns Holding entity) + TradeServiceImpl: delegates BUY to addOrUpdateHolding, SELL to reduceHolding
@@ -571,6 +575,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
   - Error paths verified: InsufficientSharesException (400), ResourceNotFoundException (404), invalid trade type (400), insufficient proceeds (400), already-confirmed order (400)
 
 ### Phase 5 Deferred to Phase 6
+
 - **Reward granting** (creating StockBackReward with PENDING status on order delivery): requires cross-module event flow (order → product → market-data → portfolio). This is the natural trigger for the Kafka event pipeline in Phase 6.
 - **Vesting job activation**: VestingHelper + @Scheduled job exist and are correct, but have no rewards to process since grant step is missing. Will activate naturally once reward granting is implemented in Phase 6.
 - These two items complete the stock-back loop: order delivered → reward granted (PENDING) → vesting job runs → reward vested → holding created.
@@ -579,23 +584,24 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 
 ### Step Plan
 
-| Step | Deliverable | Status |
-|------|-------------|--------|
-| 1 | Kafka Infrastructure + Dependencies (Docker KRaft, spring-kafka, application.yml config) | COMPLETE |
-| 2 | Event DTOs in commons (OrderDeliveredEvent, OrderItemEvent, OrderReturnedEvent) | COMPLETE |
-| 3 | Kafka Producer in order-service (OrderEventPublisher + wire into OrderServiceImpl) | COMPLETE |
-| 4 | Stock-Back Reward Consumer in portfolio-service (StockBackRewardConsumer — grant per ticker) | COMPLETE |
-| 5 | Reward Cancellation Consumer (handleOrderReturned — cancel PENDING rewards) | COMPLETE |
-| 6 | Outbox Pattern for reliable event publishing (OutboxEvent entity, OutboxPoller, generic relay) | COMPLETE |
-| 7 | Dead Letter Queue — DLQ (KafkaConsumerConfig with retry + DeadLetterPublishingRecoverer) | COMPLETE |
-| 8 | End-to-end testing + end-of-phase re-audit | COMPLETE |
-| 9 | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig) | COMPLETE |
-| 10 | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect) | COMPLETE |
-| 11 | Saga Orchestrator for "Sell to Spend" flow (compensating transactions) | COMPLETE |
-| 12 | Event Sourcing for Portfolio changes (MongoDB append-only event log) | COMPLETE |
-| 13 | Notification Service (new module — email/webhook on trade, vesting) | COMPLETE |
+| Step | Deliverable                                                                                    | Status   |
+| ---- | ---------------------------------------------------------------------------------------------- | -------- |
+| 1    | Kafka Infrastructure + Dependencies (Docker KRaft, spring-kafka, application.yml config)       | COMPLETE |
+| 2    | Event DTOs in commons (OrderDeliveredEvent, OrderItemEvent, OrderReturnedEvent)                | COMPLETE |
+| 3    | Kafka Producer in order-service (OrderEventPublisher + wire into OrderServiceImpl)             | COMPLETE |
+| 4    | Stock-Back Reward Consumer in portfolio-service (StockBackRewardConsumer — grant per ticker)   | COMPLETE |
+| 5    | Reward Cancellation Consumer (handleOrderReturned — cancel PENDING rewards)                    | COMPLETE |
+| 6    | Outbox Pattern for reliable event publishing (OutboxEvent entity, OutboxPoller, generic relay) | COMPLETE |
+| 7    | Dead Letter Queue — DLQ (KafkaConsumerConfig with retry + DeadLetterPublishingRecoverer)       | COMPLETE |
+| 8    | End-to-end testing + end-of-phase re-audit                                                     | COMPLETE |
+| 9    | Retry logic with exponential backoff (replace FixedBackOff in KafkaConsumerConfig)             | COMPLETE |
+| 10   | Debezium CDC (alternative outbox relay via PostgreSQL WAL + Kafka Connect)                     | COMPLETE |
+| 11   | Saga Orchestrator for "Sell to Spend" flow (compensating transactions)                         | COMPLETE |
+| 12   | Event Sourcing for Portfolio changes (MongoDB append-only event log)                           | COMPLETE |
+| 13   | Notification Service (new module — email/webhook on trade, vesting)                            | COMPLETE |
 
 ### Design Completed
+
 - [x] Plan approved: Kafka KRaft (no Zookeeper), event-driven reward granting, outbox pattern, DLQ
 - [x] Architecture: Kafka runs alongside monolith — producers/consumers are Spring beans in same JVM
 - [x] Event flow: Order DELIVERED → Kafka → StockBackRewardConsumer → grantReward(PENDING) → vesting job → VESTED → holding
@@ -604,6 +610,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [x] Composite unique constraint (orderId + tickerSymbol) — allows multi-ticker rewards per order
 
 ### Implementation Completed
+
 - [x] Step 1: Kafka Infrastructure + Dependencies — COMPLETE (2026-05-17)
   - Docker: apache/kafka:latest (KRaft mode, no ZooKeeper), port 9092 client, 9093 controller
   - app/build.gradle: added spring-kafka dependency
@@ -720,23 +727,24 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 
 ### Step Plan
 
-| Step | Deliverable | Status |
-|------|-------------|--------|
-| 1 | Eureka Discovery Server (new module, port 8761) | COMPLETE |
-| 2 | Config Server (new module, port 8888, Git-backed) | COMPLETE |
-| 3 | Spring Cloud Gateway (new module, port 8080, routing + filters) | COMPLETE |
-| 4 | Extract User-Service as standalone (port 8081, Eureka client) | COMPLETE |
-| 5 | Extract Market-Data-Service as standalone (port 8085) | COMPLETE |
-| 6 | Extract Order-Service as standalone (port 8088) | COMPLETE |
-| 7 | Extract Portfolio-Service as standalone (port 8084) | COMPLETE |
-| 8 | Extract Ledger-Service as standalone (port 8086) | COMPLETE |
-| 9 | Extract Notification-Service as standalone (port 8087) | COMPLETE |
-| 10 | OpenFeign clients (replace direct module deps with HTTP calls) | COMPLETE |
-| 11 | Correlation ID propagation (MDC + Gateway filter + Feign interceptor) | COMPLETE |
-| 12 | Docker Compose (full stack: all services + infrastructure) | COMPLETE |
-| 13 | End-to-end testing + re-audit | DEFERRED (requires Phase 8 auth) |
+| Step | Deliverable                                                           | Status                           |
+| ---- | --------------------------------------------------------------------- | -------------------------------- |
+| 1    | Eureka Discovery Server (new module, port 8761)                       | COMPLETE                         |
+| 2    | Config Server (new module, port 8888, Git-backed)                     | COMPLETE                         |
+| 3    | Spring Cloud Gateway (new module, port 8080, routing + filters)       | COMPLETE                         |
+| 4    | Extract User-Service as standalone (port 8081, Eureka client)         | COMPLETE                         |
+| 5    | Extract Market-Data-Service as standalone (port 8085)                 | COMPLETE                         |
+| 6    | Extract Order-Service as standalone (port 8088)                       | COMPLETE                         |
+| 7    | Extract Portfolio-Service as standalone (port 8084)                   | COMPLETE                         |
+| 8    | Extract Ledger-Service as standalone (port 8086)                      | COMPLETE                         |
+| 9    | Extract Notification-Service as standalone (port 8087)                | COMPLETE                         |
+| 10   | OpenFeign clients (replace direct module deps with HTTP calls)        | COMPLETE                         |
+| 11   | Correlation ID propagation (MDC + Gateway filter + Feign interceptor) | COMPLETE                         |
+| 12   | Docker Compose (full stack: all services + infrastructure)            | COMPLETE                         |
+| 13   | End-to-end testing + re-audit                                         | DEFERRED (requires Phase 8 auth) |
 
 ### Design Completed
+
 - [x] Phase 7 architecture designed: Eureka (service discovery), Config Server (centralized config), Gateway (routing/filtering), database-per-service pattern
 - [x] 13-step implementation plan created and approved
 - [x] Service extraction sequence determined (utility → business logic → complex)
@@ -745,6 +753,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 - [x] Correlation ID flow: MDC in logs, propagated via Gateway filter + Feign interceptor
 
 ### Implementation Completed
+
 - [x] Step 1: Eureka Discovery Server — COMPLETE (2026-06-01)
   - New module: `discovery-server/` with `DiscoveryServerApplication` main class
   - Port: 8761 (Eureka standard)
@@ -781,6 +790,7 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
     6. **Port conflict**: Both services initially on 8080 → changed to 8080 (gateway), 8082 (equitycart)
 
 ### Phase 7 Remaining
+
 - [x] Step 4: Extract User-Service as standalone (port 8081, Eureka client) — COMPLETE (2026-06-03)
   - New main class: `UserServiceApplication` with `@SpringBootApplication` + `@EnableDiscoveryClient`
   - Plugin changed from `java-library` to `org.springframework.boot` + `jar { enabled = true }` (dual artifact for transition)
@@ -876,11 +886,13 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 ### Phase 7 Architectural Notes (Strangler Fig — Remaining Coupling)
 
 **Fully decoupled (HTTP via Feign):**
+
 - Order → Product (ProductFeignClient: deductStock, restoreStock, getProductById)
 - Portfolio → Product (ProductFeignClient: getProductById, getTickerMappingsByBrandId)
 - Portfolio → Order (OrderFeignClient: getOrderById, updateOrderStatus)
 
 **Still coupled (same-JVM direct injection — to be resolved in Phase 10):**
+
 - Portfolio → Ledger: injects `LedgerServiceImpl` directly (needs LedgerFeignClient)
 - Portfolio → MarketData: injects `MarketDataServiceImpl` directly (needs MarketDataFeignClient)
 - Portfolio → Order entities: `@EntityScan`/`@EnableJpaRepositories` covers `com.equitycart.order` for `OutboxEvent` + `SagaOutboxWriter` (portfolio should own its own outbox table)
@@ -890,22 +902,23 @@ Note: Kafka Consumer (order-filled event → stock-back + holding) moved to Phas
 ## Phase 8: Security Hardening — COMPLETE (started 2026-06-12)
 
 ### Approach: Incremental (Custom JWT → OAuth2/Keycloak)
+
 Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT validation to all services (unblocks E2E testing immediately), then migrate to Keycloak + OAuth2 Resource Server (production-grade, asymmetric keys, JWKS). Dual-mode: custom auth stays alongside Keycloak for flexibility.
 
 ### Step Plan
 
-| # | Step | Status |
-|---|------|--------|
-| 1 | Extract JWT validation to commons (shared library) | COMPLETE |
-| 2 | Wire commons security into all 6 downstream services | COMPLETE |
-| 3 | Feign interceptor — propagate Authorization header | COMPLETE |
-| 4 | Gateway-level JWT pre-validation (GlobalFilter) | COMPLETE |
-| 5 | Keycloak Docker setup + realm/client/role configuration | COMPLETE |
-| 6 | Migrate to OAuth2 Resource Server (spring-boot-starter-oauth2-resource-server) | COMPLETE |
-| 7 | Gateway Token Relay (replace custom filter with Spring Security) | COMPLETE |
-| 8 | Rate limiting at Gateway (Redis-backed, token bucket) | COMPLETE |
-| 9 | OWASP security headers + secrets management (env vars) | COMPLETE |
-| 10 | E2E security integration tests (completes deferred Phase 7 Step 13) | DEFERRED |
+| #   | Step                                                                           | Status   |
+| --- | ------------------------------------------------------------------------------ | -------- |
+| 1   | Extract JWT validation to commons (shared library)                             | COMPLETE |
+| 2   | Wire commons security into all 6 downstream services                           | COMPLETE |
+| 3   | Feign interceptor — propagate Authorization header                             | COMPLETE |
+| 4   | Gateway-level JWT pre-validation (GlobalFilter)                                | COMPLETE |
+| 5   | Keycloak Docker setup + realm/client/role configuration                        | COMPLETE |
+| 6   | Migrate to OAuth2 Resource Server (spring-boot-starter-oauth2-resource-server) | COMPLETE |
+| 7   | Gateway Token Relay (replace custom filter with Spring Security)               | COMPLETE |
+| 8   | Rate limiting at Gateway (Redis-backed, token bucket)                          | COMPLETE |
+| 9   | OWASP security headers + secrets management (env vars)                         | COMPLETE |
+| 10  | E2E security integration tests (completes deferred Phase 7 Step 13)            | DEFERRED |
 
 ### Steps 1-4 Completion Summary (2026-06-18)
 
@@ -919,25 +932,26 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 
 ### Obstacles Encountered & Resolved
 
-| Obstacle | Root Cause | Fix |
-|----------|-----------|-----|
-| ReadOnlyHttpHeaders UnsupportedOperationException | `.then()` runs after response committed → headers sealed | ServerHttpResponseDecorator intercepts writeWith() before commit |
-| Invalid HTTP method: PATCH | HttpURLConnection (JDK default) predates RFC 5789 | Added feign-hc5 (Apache HttpClient 5) |
-| 403 on Feign from Kafka consumer | RequestContextHolder null on non-HTTP threads | ServiceTokenProvider generates machine-identity JWT |
-| ServiceToken NumberFormatException | subject="SYSTEM" → Long.parseLong() fails | Changed to subject="0" (sentinel userId) |
-| ServiceToken ClassCastException | roles="SERVICE" (String) → List cast fails | Changed to List.of("SERVICE") (JSON array) |
-| SecurityAutoConfig anyRequest() broken | Multiple anyRequest() calls — only first applies | Single anyRequest().authenticated() + @PreAuthorize for roles |
-| Sell-to-spend defaulting to transactional | Config migration gap — property not in Config Server | Added to equitycart-config/portfolio-service.yml |
-| PKIX path building failed in Docker | Zscaler TLS interception → private CA not in JVM truststore | keytool -importcert with ZscalerRootCA.pem in Dockerfile |
-| Docker COPY file not found | Build context = equitycart/, not docker/ | COPY docker/ZscalerRootCA.pem (context-relative path) |
-| .gitignore not working for cert | Pattern missing equitycart/ prefix | Used equitycart/docker/*.pem |
-| Docker PostgreSQL port conflict | Host port 5432 occupied by org setup | Mapped to 9432:5432 (host:container) |
-| JDBC URLs broken in Docker | Used host port (9432) inside container network | Changed to internal port (5432) for container-to-container |
-| StockBackRewardConsumer retry loop | Portfolio-service missing SPRING_DATA_REDIS_HOST | Added SPRING_DATA_REDIS_HOST=redis to docker-compose |
+| Obstacle                                          | Root Cause                                                  | Fix                                                              |
+| ------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------- |
+| ReadOnlyHttpHeaders UnsupportedOperationException | `.then()` runs after response committed → headers sealed    | ServerHttpResponseDecorator intercepts writeWith() before commit |
+| Invalid HTTP method: PATCH                        | HttpURLConnection (JDK default) predates RFC 5789           | Added feign-hc5 (Apache HttpClient 5)                            |
+| 403 on Feign from Kafka consumer                  | RequestContextHolder null on non-HTTP threads               | ServiceTokenProvider generates machine-identity JWT              |
+| ServiceToken NumberFormatException                | subject="SYSTEM" → Long.parseLong() fails                   | Changed to subject="0" (sentinel userId)                         |
+| ServiceToken ClassCastException                   | roles="SERVICE" (String) → List cast fails                  | Changed to List.of("SERVICE") (JSON array)                       |
+| SecurityAutoConfig anyRequest() broken            | Multiple anyRequest() calls — only first applies            | Single anyRequest().authenticated() + @PreAuthorize for roles    |
+| Sell-to-spend defaulting to transactional         | Config migration gap — property not in Config Server        | Added to equitycart-config/portfolio-service.yml                 |
+| PKIX path building failed in Docker               | Zscaler TLS interception → private CA not in JVM truststore | keytool -importcert with ZscalerRootCA.pem in Dockerfile         |
+| Docker COPY file not found                        | Build context = equitycart/, not docker/                    | COPY docker/ZscalerRootCA.pem (context-relative path)            |
+| .gitignore not working for cert                   | Pattern missing equitycart/ prefix                          | Used equitycart/docker/\*.pem                                    |
+| Docker PostgreSQL port conflict                   | Host port 5432 occupied by org setup                        | Mapped to 9432:5432 (host:container)                             |
+| JDBC URLs broken in Docker                        | Used host port (9432) inside container network              | Changed to internal port (5432) for container-to-container       |
+| StockBackRewardConsumer retry loop                | Portfolio-service missing SPRING_DATA_REDIS_HOST            | Added SPRING_DATA_REDIS_HOST=redis to docker-compose             |
 
 ### Step 5 Completion Summary (2026-06-23)
 
 **Step 5 — Keycloak Docker Setup + Realm Configuration:**
+
 - Keycloak 26.0 (quay.io/keycloak/keycloak:26.0) added to docker-pets.yml, sharing PostgreSQL container (keycloak database)
 - equitycart-realm.json created: auto-imported via `--import-realm` on first boot
   - 4 realm roles: CUSTOMER (default on registration), SELLER, ADMIN, SERVICE
@@ -950,6 +964,7 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 - Dual-mode architecture: Custom HS256 auth endpoints remain alongside Keycloak RS256 — services will accept EITHER issuer after Step 6
 
 **Obstacles:**
+
 - /health/ready not accessible on main port (8180) — Keycloak 24+ serves health on management port 9000; fixed by polling OIDC discovery endpoint instead
 - KEYCLOAK_ADMIN/KEYCLOAK_ADMIN_PASSWORD deprecated in 26.x — replaced with KC_BOOTSTRAP_ADMIN_USERNAME/KC_BOOTSTRAP_ADMIN_PASSWORD
 - --import-realm only imports if realm doesn't exist (common gotcha: editing JSON and restarting does nothing)
@@ -957,6 +972,7 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 ### Step 6 Completion Summary (2026-06-26)
 
 **Step 6 — OAuth2 Resource Server Migration (product-service first):**
+
 - Added `spring-boot-starter-oauth2-resource-server` to commons/build.gradle (api scope — transitive to all services)
 - Created `KeycloakJwtAuthenticationConverter` in security/impl/ — converts Spring's Jwt object to UsernamePasswordAuthenticationToken(Long userId, null, authorities), maintaining backward compat with `(Long) authentication.getPrincipal()`
 - Created `OAuth2ResourceServerConfig` in config/ — @ConditionalOnProperty(mode=oauth2), registers converter via `.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt.jwtAuthenticationConverter(...)))`
@@ -966,11 +982,13 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 - docker-compose-services.yml: added `KEYCLOAK_JWKS_URI` env var for product-service pointing to Keycloak JWKS certs endpoint
 
 **Key design decisions:**
+
 - Used `jwk-set-uri` (not `issuer-uri`) to avoid issuer mismatch between Docker DNS (keycloak:8080) and token's iss claim (localhost:8180)
 - Dual-mode via @ConditionalOnProperty: services can be individually switched from custom→oauth2
 - Converter uses @Component (not defined as @Bean in config) for simplicity of dependency injection
 
 **Obstacles:**
+
 - Wrong Converter interface imported (Jackson's Converter vs Spring's Converter) — Jackson has getInputType/getOutputType; Spring's has single convert() method
 - Wrong JWT type imported (Nimbus JWT vs Spring Security Jwt) — Spring's Jwt is the decoded/validated token object
 - Tried registering converter as servlet Filter (.addFilterBefore) — converter is not a Filter, it's wired inside .oauth2ResourceServer() config
@@ -980,11 +998,13 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 ### Step 7 Completion Summary (2026-06-28)
 
 **Step 7 — Gateway Reactive OAuth2 (replace HS256 filter with Spring Security WebFlux):**
+
 - Created `api-gateway/.../config/SecurityConfig.java` — `@EnableWebFluxSecurity`, `SecurityWebFilterChain` with `oauth2ResourceServer()` reactive DSL; private `keycloakReactiveConverter()` returning `Mono<AbstractAuthenticationToken>` (required by WebFlux `flatMap` composition)
 - Gateway now validates RS256 tokens via `NimbusReactiveJwtDecoder` auto-configured from `jwk-set-uri` in api-gateway.yml
 - Token forwarded unchanged via `ProxyExchange` to downstream services (defense in depth — services validate independently)
 
 **Bugs resolved**:
+
 - `JwtValidationGatewayFilter @Component`: HS256 filter ran before `SecurityWebFilterChain`, rejected all RS256 tokens → fix: commented out `@Component` (line 65)
 - `JwtAuthenticationFilter @Component`: Spring Boot's `FilterRegistrationBean` auto-registered it as standalone servlet filter in all services → double-validation in oauth2 mode → fix: commented out `@Component` (line 57)
 
@@ -993,6 +1013,7 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 ### Step 8 Completion Summary (2026-06-29)
 
 **Step 8 — Rate Limiting at Gateway (Redis token bucket):**
+
 - Created `api-gateway/.../config/RateLimiterConfig.java` — `@Bean KeyResolver userKeyResolver()`; extracts userId from `ReactiveSecurityContextHolder` for authenticated; `.defaultIfEmpty(remoteAddress)` falls back to IP for anonymous requests (brute-force protection on login endpoint)
 - api-gateway.yml: `RequestRateLimiter` default-filter — `replenishRate: 10`, `burstCapacity: 20`, `key-resolver: "#{@userKeyResolver}"` (SpEL bean reference)
 - Redis Lua script: atomic check-and-decrement prevents race condition across multiple gateway instances
@@ -1000,6 +1021,7 @@ Phase 8 follows a two-track approach: first distribute existing HMAC-SHA256 JWT 
 ### Step 9 Completion Summary (2026-06-30)
 
 **Step 9 — OWASP Security Headers:**
+
 - Created `api-gateway/.../filter/SecurityHeadersGlobalFilter.java` — `@Component GlobalFilter` at `LOWEST_PRECEDENCE`; `chain.filter(exchange).then(Mono.fromRunnable(...))` sets 6 OWASP headers after downstream response arrives but before Netty flushes
 - Headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Strict-Transport-Security: max-age=31536000`, `Content-Security-Policy: default-src 'self'`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`
 - Bug found and fixed: missing `@Component` → `GatewayAutoConfiguration` never collected the bean → headers never sent
@@ -1028,10 +1050,31 @@ API Gateway (port 8080, Netty/WebFlux)
 ```
 
 ### Phase 8 Remaining
+
 - [ ] Unit + Integration tests with Testcontainers (deferred to Phase 9+ maintenance period)
 - [ ] ServiceTokenProvider → Keycloak Client Credentials migration (latent: HS256 service tokens fail on oauth2-mode services when called from Kafka consumer → Feign fallback path)
 
+### Phase 9 Completion Summary (2026-08-07)
+
+**Phase 9 — Observability (Logging, Metrics, Tracing, Alerting):**
+
+- Structured logging standardized with per-service `log4j2-spring.xml` (console + rolling JSON file) and correlation context propagation.
+- Prometheus metrics scraping enabled via actuator endpoints and service-level Micrometer instrumentation.
+- Grafana dashboards provisioned and connected to Prometheus data source.
+- Distributed tracing enabled with Micrometer Tracing + Zipkin exporter and centralized trace UI.
+- Custom business metrics added:
+  - order placement success/failure + latency
+  - portfolio trade and reward metrics
+  - notification dispatch success/failure/channel counts
+- Alert rules configured in Grafana for:
+  - Service down (`up == 0`)
+  - Error-rate threshold breaches
+  - High p99 latency
+- Infra networking hardened for split-compose startup using a shared external Docker network and startup-time network creation.
+- Centralized EFK/Fluentd stack documented as **environment-blocked** by corporate Zscaler image access policy; accepted fallback is structured per-service logs + `core-loglens`.
+
 ## Phase Checklist
+
 - [x] Phase 0: Foundation & Setup (Week 1)
 - [~] Phase 1: User Service & Security (Weeks 2-3) — FUNCTIONAL COMPLETE (tests deferred)
 - [~] Phase 2: Product Catalog & Batch Import (Weeks 4-5) — FUNCTIONAL COMPLETE (tests deferred)
@@ -1041,13 +1084,15 @@ API Gateway (port 8080, Netty/WebFlux)
 - [x] Phase 6: Event-Driven Architecture (Weeks 13-15) — COMPLETE
 - [x] Phase 7: Microservices Decomposition (Weeks 16-18) — COMPLETE (E2E testing deferred to Phase 8)
 - [x] Phase 8: Security Hardening (Weeks 19-20) — COMPLETE (E2E integration tests deferred)
-- [ ] Phase 9: Observability (Weeks 21-22)
+- [x] Phase 9: Observability (Weeks 21-22) — COMPLETE (EFK/Fluentd blocked by enterprise network policy; fallback accepted)
 - [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
 
 ### Known Issues
+
 - 403 instead of 401 for unauthenticated requests — needs custom AuthenticationEntryPoint (future)
 
 ## Session Log
+
 - **2025-04-07**: Project conceived, domain finalized (Hybrid), roadmap created
 - **2025-04-07**: Phase 0 complete — Gradle multi-module skeleton built, all 7 modules compile, application.yml configured for PostgreSQL + MongoDB
 - **2025-04-09**: Phase 1 started — Entity design complete, security architecture decided (JWT), query methods studied, security deps added. Next: create entity classes.
@@ -1056,7 +1101,7 @@ API Gateway (port 8080, Netty/WebFlux)
 - **2026-04-20**: Step 4 complete — DTOs (records + validation), SecurityConfig (BCryptPasswordEncoder bean), AuthService with register/login/refresh. Fixed: @Autowired vs constructor injection, passwordEncoder.matches() arg order, raw strings → DTOs. BUILD SUCCESSFUL. Next: JwtService.
 - **2026-04-20**: Step 5 complete — JwtService (JJWT 0.12.6) + wired into AuthService. Fixed 5 issues: hardcoded expiry, extractRoles corruption, validateToken always-true, redundant isTokenExpired, YAML location. Refresh token rotation implemented. All TODO placeholders replaced. Next: JwtAuthFilter.
 - **2026-04-20**: Step 6 complete — JwtAuthFilter (OncePerRequestFilter). Extracts Bearer token, validates, sets SecurityContext. Fixed: null header NPE, @Service→@Component, unauthenticated 2-arg→authenticated 3-arg constructor. Next: SecurityConfig.
-- **2026-04-20**: Step 7 complete — SecurityConfig with SecurityFilterChain bean. CSRF disabled, STATELESS sessions, /api/auth/** public, all else authenticated. Fixed: missing final, non-lambda DSL, single-star wildcard, hardcoded URL. Next: AuthController.
+- **2026-04-20**: Step 7 complete — SecurityConfig with SecurityFilterChain bean. CSRF disabled, STATELESS sessions, /api/auth/\*\* public, all else authenticated. Fixed: missing final, non-lambda DSL, single-star wildcard, hardcoded URL. Next: AuthController.
 - **2026-04-20**: Step 8 complete — AuthController with 3 POST endpoints. Thin delegation to AuthService. Fixed: duplicate method names, duplicate path mappings, removed catch-all try-catch. Next: build and test.
 - **2026-04-21**: Step 9 complete — All 3 auth endpoints tested and working. Fixed: DB name case-sensitivity, data.sql not running (needed `sql.init.mode: always`), YAML indentation bug, understood Java field defaults vs DB seed data. Next: JSON-based DataSeeder, then @RestControllerAdvice.
 - **2026-04-21**: Step 10 complete — DataSeeder with CommandLineRunner + Jackson + roles.json. Removed data.sql approach. Learned: CommandLineRunner runs after full context (no ordering issues), inject ObjectMapper don't create it, TypeReference for generic deserialization. Next: @RestControllerAdvice.
@@ -1083,16 +1128,17 @@ API Gateway (port 8080, Netty/WebFlux)
 - **2026-05-16**: Phase 5 FUNCTIONAL COMPLETE — Step 10 re-audit done (20 files verified). test-commands.md created with all phases (1-5) + Docker/Redis/MongoDB/PostgreSQL CLI. Identified gap: reward granting (creating PENDING StockBackReward on order delivery) not implemented — requires cross-module event chain (order→product→market-data→portfolio). Deferred to Phase 6 as first Kafka event. Vesting job exists but idle until rewards are granted. Next: Phase 6 — Event-Driven Architecture.
 - **2026-05-20**: Phase 6 COMPLETE — All 8 steps done. Kafka KRaft (Docker), event DTOs, producer (outbox-based), StockBackRewardConsumer, cancellation consumer, Outbox Pattern (atomic dual-write), DLQ (DefaultErrorHandler + DeadLetterPublishingRecoverer). E2E tested: happy path, multi-ticker rewards, return cancellation, idempotency, Kafka CLI. Re-audit passed (14 files). Next: Phase 7 — Microservices Decomposition.
 - **2026-06-01**: Phase 7 started — Microservices Decomposition design approved. 13-step plan created. Step 1 COMPLETE — Eureka Discovery Server module created (port 8761). DiscoveryServerApplication with @SpringBootApplication + @EnableEurekaServer. application.yml configured (client.register-with-eureka=false, client.fetch-registry=false, server.enable-self-preservation=false for strict learning mode). Eureka dashboard accessible at http://localhost:8761. Next: Config Server (Step 2).
-- **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, __TypeId__ default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).
+- **2026-05-24**: Steps 9-10 done. Exponential backoff (ExponentialBackOffWithMaxRetries replaces FixedBackOff). Debezium CDC: WAL=logical, Kafka Connect + Outbox Event Router SMT, dual-listener Docker networking, @Profile("!cdc") toggle, @Lob→text fix, **TypeId** default type fix. Multiple issues debugged and resolved (OID storage, timestamp timezone, snapshot poisoning). E2E tested through full reward lifecycle (order → deliver → CDC → reward → vest → holding).
 - **2026-05-24**: Step 11 done. Saga Orchestrator for Sell-to-Spend: orchestration-based saga with state machine entity, compensating transactions (reverse ledger + re-add shares), @Scheduled timeout detector, lifecycle events via outbox to Kafka. @ConditionalOnProperty toggle between transactional and saga strategies. 7 new files (entity, enum, repo, orchestrator, service, outbox writer, event DTO), 3 files modified. BUILD SUCCESSFUL. Next: test end-to-end.
 - **2026-05-31**: Step 13 done. Notification Service — Observer Pattern (distributed via Kafka Pub/Sub) + Strategy Pattern (pluggable channels). New module: notification-service (14 Java files). NotificationPublisher in portfolio (fire-and-forget KafkaTemplate). 3 channel strategies (Log, Email via MailHog, Webhook via WebClient). NotificationDispatcher resolves channel from config via Spring Map<String, Bean> injection. NotificationLog audit entity. REST API: GET /api/notifications. Integrated into TradeServiceImpl, VestingHelperImpl, SagaOrchestrator. E2E tested: TRADE_EXECUTED notification logged + persisted + queryable. Re-audit: all 16 files have Javadoc + Log4j logger.
 - **2026-06-03**: Phase 7 Step 4 COMPLETE — User-Service extracted as standalone microservice (port 8081). UserServiceApplication created with @EnableDiscoveryClient. Dual Gradle plugin (java-library → org.springframework.boot + jar enabled for monolith compatibility). Local application.yml with spring.application.name + configserver import. user-service.yml expanded with full datasource/JPA/JWT/actuator/eureka config. Strangler Fig pattern implemented: gateway routes /api/auth/** and /api/users/** to lb://user-service while monolith still runs on 8082. Key learnings: ddl-auto hierarchy (validate in base = prod default, update in service = dev override), config duplication during extraction is intentional, defaultZone should always be explicit. Next: Step 5 — Extract Market-Data-Service (port 8085).
 - **2026-06-04**: Phase 7 Step 5 COMPLETE — Market-Data-Service extracted as standalone microservice (port 8085). MarketDataServiceApplication created with @EnableDiscoveryClient + full Javadoc. Root cause of transitive JPA issue identified (commons `api` scope → Gradle leaks JPA to all consumers → DataSourceAutoConfiguration fires and crashes). Fix: commented out commons dependency (market-data uses no commons types). Eureka Windows/Hyper-V hostname fix applied globally (prefer-ip-address: true + ip-address: 127.0.0.1 in equitycart-config/application.yml). Security gap documented: spring-security-core without full starter → no filter chain → all endpoints open; Phase 8 will add OAuth2 Resource Server per service. Javadoc + Log4j added to MarketDataServiceApplication.java. Sections 12 (transitive deps) and 13 (standalone security gap) added to springboot-reference.md. Q117–Q120 added to learning_log.md. Next: Step 6 — Extract Order-Service (port 8083).
 - **2026-06-05**: Phase 7 Step 6 COMPLETE — Order-Service extracted as standalone microservice (port 8088). Three debugging sessions: (1) ProductRepository bean not found → @EnableJpaRepositories + @EntityScan with explicit basePackages required when OrderServiceImpl has cross-module repository dependency; @ComponentScan alone doesn't fix JPA repository scanning; (2) port conflict with Debezium Kafka Connect (8083) → changed to 8088; (3) Gateway AND vs OR predicate behaviour → comma-separated Path predicate for multi-path routing. @EnableScheduling required for OutboxPoller. CDC profile must NOT be active until Debezium watches equitycart_order DB. Kafka producer config moved to base application.yml. Q121–Q123 added to learning_log.md. Next: Step 7 — Extract Portfolio-Service (port 8084).
-- **2026-06-06**: Phase 7 Step 7 COMPLETE — Portfolio-Service extracted as standalone microservice (port 8084). Required `@ComponentScan` (not `@EnableJpaRepositories`) because service layer beans (LedgerServiceImpl, MarketDataServiceImpl) needed, not just repositories. `excludeFilters = @Filter(SpringBootApplication.class)` required to prevent `OrderServiceApplication` from being loaded as a `@Configuration`, causing `BeanDefinitionOverrideException`. Runtime surprises: Spring Batch config required (product-service has spring-batch on classpath; `@ComponentScan` loads `ProductBatchConfig`; `BatchAutoConfiguration` fires) and alphavantage.* config required (market-data's `WebClientConfig` uses `@Value` injection). Core lesson: `@EnableJpaRepositories` is surgical, `@ComponentScan` is broad — broader scanner = more auto-configuration side effects. Q124–Q126 added to learning_log.md. Next: Step 8 — Extract Ledger-Service (port 8086).
+- **2026-06-06**: Phase 7 Step 7 COMPLETE — Portfolio-Service extracted as standalone microservice (port 8084). Required `@ComponentScan` (not `@EnableJpaRepositories`) because service layer beans (LedgerServiceImpl, MarketDataServiceImpl) needed, not just repositories. `excludeFilters = @Filter(SpringBootApplication.class)` required to prevent `OrderServiceApplication` from being loaded as a `@Configuration`, causing `BeanDefinitionOverrideException`. Runtime surprises: Spring Batch config required (product-service has spring-batch on classpath; `@ComponentScan` loads `ProductBatchConfig`; `BatchAutoConfiguration` fires) and alphavantage.\* config required (market-data's `WebClientConfig` uses `@Value` injection). Core lesson: `@EnableJpaRepositories` is surgical, `@ComponentScan` is broad — broader scanner = more auto-configuration side effects. Q124–Q126 added to learning_log.md. Next: Step 8 — Extract Ledger-Service (port 8086).
 - **2026-06-06**: Phase 7 Step 8 COMPLETE — Ledger-Service extracted as standalone (port 8086). Simplest extraction: only `@EntityScan` needed beyond `@SpringBootApplication + @EnableDiscoveryClient` — `BaseEntity` in commons is the sole out-of-scope class. No `@EnableJpaRepositories`, no `@ComponentScan` needed. No transitive contamination. No REST controllers (gateway route pre-wired for Phase 10). Q127–Q128 added. Next: Step 9 — Notification-Service (port 8087).
 - **2026-06-09**: Phase 7 Step 10 COMPLETE — OpenFeign migration. ProductFeignClient (4 methods) + BrandTickerMappingDTO + ProductDTO in commons. OrderFeignClient in portfolio module (cannot go in commons — circular dependency via order-service types). SellToSpendServiceImpl + SagaOrchestrator migrated from OrderService → OrderFeignClient. StockBackRewardConsumer migrated from ProductRepository → ProductFeignClient. Two startup errors debugged: (1) @ComponentScan("com.equitycart.order") loaded OrderServiceImpl which now requires ProductFeignClient — fix: remove order from @ComponentScan; (2) OutboxEventRepository proxy removed too aggressively — fix: keep order in @EnableJpaRepositories + @EntityScan. All 8 services UP on Eureka. Javadoc added to all uncommitted files. openfeign-guide.md created (12 sections). Q131–Q138 added to learning_log.md. Next: Step 11 — Correlation ID propagation. Same clean extraction pattern as ledger-service: `@EntityScan` for BaseEntity, no cross-module `@ComponentScan`. Key insights: product-service extraction deferred to Phase 10 (consumers must migrate to Feign first); saga strategy and timeout properties correctly omitted — `matchIfMissing=true` makes saga default-active, `@Value` inline `:30` default removes need for YAML entry. Q129–Q130 added. Next: Step 10 — OpenFeign clients.
 - **2026-06-10**: Phase 7 Step 11 COMPLETE — Correlation ID propagation. Three components: (1) MdcCorrelationFilter (OncePerRequestFilter in commons, ThreadContext put/remove lifecycle); (2) FeignCorrelationInterceptor (Feign RequestInterceptor, propagates ID to downstream Feign calls); (3) CorrelationIdGatewayFilter (GlobalFilter + Ordered in api-gateway, generates UUID at entry point, mutates immutable WebFlux exchange). Replaced org.slf4j.MDC with org.apache.logging.log4j.ThreadContext (Log4j2 native, no SLF4J bridge). Debugged: default-filters YAML approach fails (SpEL evaluated at startup + wrong direction); OrderedGatewayFilter inheritance wrong (wrapper for route-level filter, not GlobalFilter). mdc-correlation-guide.md created (line-by-line filter explanation, GlobalFilter vs default-filters, Netty vs Tomcat filter types, Correlation ID vs TraceId/SpanId). Javadoc on all 3 files + GatewayApplication updated. Next: Step 12 — Docker Compose.
 - **2026-06-12**: Phase 7 Step 12 COMPLETE — Docker Compose full stack. Two-file split: docker-pets.yml (infra) + docker-compose-services.yml (10 Spring Boot services). Start scripts with readiness polling. build-images.sh for all 10 images. Config pattern: `${ENV_VAR:local-default}` in equitycart-config works in both environments. Debugging sessions: (1) Kafka AccessDeniedException → `user: "0"`; (2) INVALID_REPLICATION_FACTOR → single-broker env vars; (3) ConfigClientFailFastException → placeholder in spring.config.import; (4) Eureka registration with Hyper-V hostname → `prefer-ip-address: true` (without explicit ip-address); (5) Git Bash MINGW64 path mangling → `sh -c '...'` wrapper; (6) Config-server DNS failure → `refresh-rate: 3600` (local cache still serves). Key learnings: spring.config.import is ADDITIVE (merges, doesn't override), config-server serves placeholders (client resolves), Docker DNS resolves service names on custom bridge networks, port mapping bridges host↔container worlds. All 10 services UP in Eureka, gateway routing verified. Next: Step 13 — End-to-end testing + re-audit.
 - **2026-06-23**: Phase 8 Step 5 COMPLETE — Keycloak Docker setup. Added Keycloak 26.0 (quay.io) to docker-pets.yml sharing existing PostgreSQL container. Created equitycart-realm.json: 4 realm roles (CUSTOMER/SELLER/ADMIN/SERVICE), 3 OAuth2 clients (equitycart-gateway confidential, equitycart-frontend public+PKCE, equitycart-services client-credentials), protocol mappers (roles flattener + userId attribute for backward compat), 3 test users with pre-assigned roles. Updated init-db.sh (+keycloak DB), start-pets.sh (OIDC discovery readiness check). Obstacles: (1) /health/ready on separate management port 9000, fixed by checking OIDC discovery endpoint instead; (2) KEYCLOAK_ADMIN deprecated in 26.x, replaced with KC_BOOTSTRAP_ADMIN_USERNAME; (3) --import-realm only runs on first boot (realm doesn't exist yet). Keycloak admin console accessible at http://localhost:8180. Token acquisition verified via ROPC flow. Conceptual foundation written to security-reference.md Section 13 (OAuth2/OIDC/Keycloak history, flows, RS256, JWKS, competitors). Next: Step 6 — OAuth2 Resource Server migration.
 - **2026-06-18**: Phase 8 Steps 1-4 COMPLETE — Per-service JWT validation distributed to all services via commons SecurityAutoConfig. 13 obstacles resolved during E2E testing: ReadOnlyHttpHeaders (ServerHttpResponseDecorator), PATCH unsupported (feign-hc5), Kafka consumer 403 (ServiceTokenProvider with subject=0, role=[SERVICE], 60s expiry), anyRequest() terminal matcher bug, Zscaler TLS interception (keytool CA import in Dockerfile), Docker port mapping (9432:5432), config migration gap (sell-to-spend strategy), .gitignore path resolution. Full business flow verified end-to-end: Register → Login → Browse → Cart → Order → Deliver → Stock-Back Reward → Vest → Trade → Sell-to-Spend. All 10 services running in Docker with auth enforced. Documentation updated: security-reference.md (Sections 11-12), microservice-patterns.md (Sections 12-13), springboot-reference.md (Sections 11-13), learning_log.md (Q155-Q163). Javadoc updated on ServiceTokenProvider, ServiceTokenProviderImpl, FeignAuthorizationInterceptor, SecurityAutoConfig, CorrelationIdGatewayFilter, Dockerfile. Next: Step 5 — Keycloak Docker setup.
+- **2026-08-07**: Phase 9 COMPLETE — observability rollout validated. Structured logging (Log4j2 JSON + correlation IDs), Prometheus scraping, Grafana dashboards, Zipkin tracing, custom business metrics, and alert rules are in place. Docker split-compose networking was stabilized via shared external network creation in startup scripts. Centralized EFK/Fluentd was blocked by corporate image policy (Zscaler), and fallback (`core-loglens` + JSON logs) was accepted and documented.

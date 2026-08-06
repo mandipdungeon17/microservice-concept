@@ -927,6 +927,7 @@ public class SellToSpendServiceImpl implements SellToSpendService { ... }
 In Spring Boot 3.x / Spring Cloud 2025.0.0+, `bootstrap.yml` is no longer processed. This is a breaking change from Spring Cloud 2024.x.
 
 **Historical context:**
+
 - Spring Cloud < 2024.0: `bootstrap.yml` processed in a separate "bootstrap phase" before `application.yml`
 - Spring Cloud 2024.0+: Bootstrap phase merged into normal startup
 - Spring Cloud 2025.0.0: `bootstrap.yml` deprecated, ignored silently
@@ -934,6 +935,7 @@ In Spring Boot 3.x / Spring Cloud 2025.0.0+, `bootstrap.yml` is no longer proces
 **Symptom:** Error at startup: `"No spring.config.import property has been defined"` even though the property exists in bootstrap.yml.
 
 **Fix:** Move `spring.config.import` to `application.yml`:
+
 ```yaml
 # application.yml (NOT bootstrap.yml)
 spring:
@@ -952,6 +954,7 @@ spring:
 `@EnableDiscoveryClient` is an activation annotation — it enables beans provided by a discovery dependency. It does NOT provide discovery functionality on its own.
 
 **Required dependency:**
+
 ```gradle
 implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
 ```
@@ -959,6 +962,7 @@ implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-cl
 **Without this dependency:** Annotation silently does nothing. No errors thrown. No registration logs. Dashboard shows zero instances.
 
 **Diagnosis checklist when Eureka registration fails:**
+
 1. Is `spring-cloud-starter-netflix-eureka-client` in build.gradle? → Add it
 2. Is `@EnableDiscoveryClient` on main class or `@Configuration`? → Must be Spring-scanned
 3. Is `spring.application.name` set in application.yml? → Required for Eureka registration name
@@ -973,6 +977,7 @@ implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-cl
 Actuator configuration and Spring Security are INDEPENDENT layers. Both must allow access.
 
 **Enable endpoints (management layer):**
+
 ```yaml
 management:
   endpoints:
@@ -985,6 +990,7 @@ management:
 ```
 
 **Allow access (security layer):**
+
 ```java
 http.authorizeHttpRequests(authz -> authz
     .requestMatchers("/actuator/**").permitAll()
@@ -995,6 +1001,7 @@ http.authorizeHttpRequests(authz -> authz
 **Symptom if security is missing:** HTTP 403 on `/actuator/health` even though it's in `exposure.include`.
 
 **Endpoint sensitivity guide:**
+
 - `health`, `info` — safe (expose publicly)
 - `metrics` — moderate (internal use / admin only)
 - `env`, `configprops` — sensitive (may expose credentials — never public)
@@ -1049,6 +1056,7 @@ Because `BaseEntity` extends/uses JPA annotations in its public declaration, any
 ### 12.4 Two Fix Options When You Inherit Unwanted Auto-Configuration
 
 **Option A — Exclude auto-configuration at startup (keep the dependency):**
+
 ```java
 @SpringBootApplication(exclude = {
     DataSourceAutoConfiguration.class,
@@ -1056,13 +1064,16 @@ Because `BaseEntity` extends/uses JPA annotations in its public declaration, any
 })
 public class MarketDataServiceApplication { ... }
 ```
+
 Use when: you need some commons types but not the auto-configured bean (e.g., you use `BaseEntity` for ID generation but have no SQL).
 
 **Option B — Remove the dependency entirely:**
+
 ```groovy
 // market-data/build.gradle — comment out the unused commons dependency
 // implementation project(':commons')
 ```
+
 Use when: the module genuinely has no use for commons at all. This is the cleaner fix.
 
 ### 12.5 Detecting Transitive Dependency Leaks
@@ -1088,12 +1099,13 @@ In a monolith, ONE `SecurityFilterChain` bean (defined in any module on the shar
 
 ### 13.2 `spring-security-core` vs `spring-boot-starter-security`
 
-| What you add | What you get | Default HTTP protection |
-|---|---|---|
-| `spring-security-core` | Core types: `Authentication`, `SecurityContext`, `@PreAuthorize`, `GrantedAuthority` | **None** — no filter chain, no auto-config |
-| `spring-boot-starter-security` | Core types + `SecurityAutoConfiguration` | **Yes** — all routes require auth by default |
+| What you add                   | What you get                                                                         | Default HTTP protection                      |
+| ------------------------------ | ------------------------------------------------------------------------------------ | -------------------------------------------- |
+| `spring-security-core`         | Core types: `Authentication`, `SecurityContext`, `@PreAuthorize`, `GrantedAuthority` | **None** — no filter chain, no auto-config   |
+| `spring-boot-starter-security` | Core types + `SecurityAutoConfiguration`                                             | **Yes** — all routes require auth by default |
 
 The typical reason to use only `spring-security-core` in a microservice:
+
 - You need to work with security types (e.g., parse a JWT passed from a gateway) but don't want to impose a specific filter chain
 - You're in a transition phase and will add full security later
 - You're behind an API gateway that already validates tokens — downstream services only need to extract the userId from a forwarded header
@@ -1111,6 +1123,7 @@ public ResponseEntity<Void> evictCache(String symbol) { ... }
 In the monolith, `user-service`'s `SecurityConfig` had `@EnableMethodSecurity` and was on the shared classpath — all modules benefited. In a standalone service, you must declare it yourself.
 
 **To enable method security in a standalone service:**
+
 ```java
 @Configuration
 @EnableMethodSecurity
@@ -1141,7 +1154,6 @@ spring:
 
 The resource server auto-configuration creates a `JwtAuthenticationConverter` → `BearerTokenAuthenticationFilter` chain that validates JWT on every request. This replaces the manual `JwtAuthFilter` in the monolith with a declarative, standardized approach.
 
-
 ---
 
 ## 15. Spring Scanning Pipelines in Multi-Module Applications
@@ -1150,22 +1162,22 @@ The resource server auto-configuration creates a `JwtAuthenticationConverter` �
 
 Spring Boot registers beans through four entirely separate mechanisms. None covers the others automatically:
 
-| What is registered | Controlled by | Scans for |
-|---|---|---|
-| `@Component`, `@Service`, `@Controller`, `@Configuration` beans | `@ComponentScan` | Classes with those annotations |
-| JPA repository proxy beans | `@EnableJpaRepositories` | Interfaces extending `JpaRepository` |
-| JPA entity / MappedSuperclass registration | `@EntityScan` | Classes annotated `@Entity` / `@MappedSuperclass` |
-| MongoDB repository proxy beans | `@EnableMongoRepositories` | Interfaces extending `MongoRepository` |
+| What is registered                                              | Controlled by              | Scans for                                         |
+| --------------------------------------------------------------- | -------------------------- | ------------------------------------------------- |
+| `@Component`, `@Service`, `@Controller`, `@Configuration` beans | `@ComponentScan`           | Classes with those annotations                    |
+| JPA repository proxy beans                                      | `@EnableJpaRepositories`   | Interfaces extending `JpaRepository`              |
+| JPA entity / MappedSuperclass registration                      | `@EntityScan`              | Classes annotated `@Entity` / `@MappedSuperclass` |
+| MongoDB repository proxy beans                                  | `@EnableMongoRepositories` | Interfaces extending `MongoRepository`            |
 
 The key insight: expanding `@ComponentScan` does **not** automatically expand `@EntityScan` or `@EnableJpaRepositories`, and vice versa. You must configure each pipeline explicitly when its targets live outside the main class's package tree.
 
 ### 15.2 Decision Guide: Which Scanner to Use
 
-| Need | Use |
-|---|---|
-| Use a foreign `@Service` or `@Component` bean directly | `@ComponentScan` covering that package |
-| Use only a foreign `JpaRepository` proxy | `@EnableJpaRepositories` covering that package |
-| Use a foreign `@Entity` / `@MappedSuperclass` | `@EntityScan` covering that package |
+| Need                                                   | Use                                            |
+| ------------------------------------------------------ | ---------------------------------------------- |
+| Use a foreign `@Service` or `@Component` bean directly | `@ComponentScan` covering that package         |
+| Use only a foreign `JpaRepository` proxy               | `@EnableJpaRepositories` covering that package |
+| Use a foreign `@Entity` / `@MappedSuperclass`          | `@EntityScan` covering that package            |
 
 **Rule:** only expand a scanner when the target class lives **outside** the main class's package tree. Within the tree, defaults cover everything.
 
@@ -1205,10 +1217,10 @@ Without `@EntityScan` covering `com.equitycart.commons`, Hibernate does not regi
 
 `@ConditionalOnProperty` has a `matchIfMissing` parameter controlling what happens when the named property is absent:
 
-| `matchIfMissing` value | Property absent | Bean created? |
-|---|---|---|
-| `false` (default) | condition NOT met | No |
-| `true` | condition treated as met | Yes |
+| `matchIfMissing` value | Property absent          | Bean created? |
+| ---------------------- | ------------------------ | ------------- |
+| `false` (default)      | condition NOT met        | No            |
+| `true`                 | condition treated as met | Yes           |
 
 Used to make a strategy bean **default-active** without requiring an explicit YAML entry. The property only needs to be set when overriding the default.
 
@@ -1226,6 +1238,7 @@ private int timeoutSeconds;
 When the property is absent, Spring substitutes `30` directly — no YAML entry required. The bean is always created; only the field value changes.
 
 **Contrast with `matchIfMissing`:**
+
 - `@ConditionalOnProperty(matchIfMissing = true)` controls **whether the bean exists at all**
 - `@Value("${prop:default}")` controls **what value a field gets** inside a bean that already exists
 
@@ -1256,6 +1269,7 @@ When the property is absent, Spring substitutes `30` directly — no YAML entry 
 5. The proxy is injected as the bean wherever ProductFeignClient is declared
 
 **JDK Dynamic Proxy vs CGLIB:**
+
 - JDK Dynamic Proxy: works on Java interface only. Generates a class at runtime that implements the interface and delegates all method calls to an InvocationHandler.
 - CGLIB: generates bytecode subclassing a concrete class. Cannot be used here - there is no concrete class, only an interface.
 - Feign uses JDK Dynamic Proxy exclusively.
@@ -1290,12 +1304,12 @@ When JSON response has more fields than the target type, Jackson silently drops 
 
 Example: ProductResponse (12 fields in product-service) vs ProductDTO (6 fields in commons). Jackson maps the 6 matching fields and drops the other 6.
 
-| Scenario | Result |
-|---|---|
-| JSON has field, target has field | Mapped normally |
+| Scenario                           | Result                                   |
+| ---------------------------------- | ---------------------------------------- |
+| JSON has field, target has field   | Mapped normally                          |
 | JSON has field, target lacks field | Silently dropped (FAIL_ON_UNKNOWN=false) |
-| Target has field, JSON lacks field | Field is null or primitive default |
-| Incompatible types | Deserialization exception |
+| Target has field, JSON lacks field | Field is null or primitive default       |
+| Incompatible types                 | Deserialization exception                |
 
 ---
 
@@ -1305,8 +1319,8 @@ Feign default on non-2xx: throws FeignException subclass (FeignException.NotFoun
 
 FeignErrorDecoder intercepts the Response object before the default exception is thrown, mapping HTTP status codes to domain exceptions:
 
-  HTTP 409 -> FeignErrorDecoder.decode() -> throw InsufficientStockException
-  HTTP 404 -> FeignErrorDecoder.decode() -> new Default().decode() -> FeignException.NotFound
+HTTP 409 -> FeignErrorDecoder.decode() -> throw InsufficientStockException
+HTTP 404 -> FeignErrorDecoder.decode() -> new Default().decode() -> FeignException.NotFound
 
 Registration: @Component on the decoder causes Spring to wire it into every Feign client in the context automatically.
 
@@ -1322,7 +1336,7 @@ Registration: @Component on the decoder causes Spring to wire it into every Feig
 Rule: single scalar -> @RequestParam. Structured payload -> @RequestBody with a DTO.
 
 Example from ProductFeignClient:
-  void deductStock(@PathVariable("id") Long id, @RequestParam("quantity") int quantity);
+void deductStock(@PathVariable("id") Long id, @RequestParam("quantity") int quantity);
 
 ---
 
@@ -1337,6 +1351,7 @@ Example from ProductFeignClient:
 3. MERGE those properties with the local application.yml (not replace)
 
 Priority order (highest wins):
+
 1. OS environment variables (SPRING_DATASOURCE_URL=...)
 2. Config Server properties (fetched remotely)
 3. Embedded application.yml in the JAR
@@ -1392,7 +1407,7 @@ When `eureka.instance.prefer-ip-address: true`, Spring calls `InetUtils.findFirs
 **DO NOT set `eureka.instance.ip-address: 127.0.0.1` in Docker.** Each service would register its own loopback — gateway would route requests to itself instead of the target service.
 
 Let Spring auto-detect the container IP. The Docker DNS resolver handles the rest.
-  // quantity is a single int -> @RequestParam (maps to ?quantity=5 in the URL)
+// quantity is a single int -> @RequestParam (maps to ?quantity=5 in the URL)
 
 ---
 
@@ -1415,6 +1430,7 @@ private static final ThreadLocal<RequestAttributes> inheritableRequestAttributes
 ```
 
 Two ThreadLocal fields:
+
 - `requestAttributesHolder` — plain ThreadLocal (default, thread-confined)
 - `inheritableRequestAttributesHolder` — InheritableThreadLocal (propagates to child threads, disabled by default)
 
@@ -1458,6 +1474,7 @@ public static RequestAttributes getRequestAttributes() {
 ```
 
 Returns `null` when called from:
+
 - Kafka consumer threads (started by Kafka poller, no HTTP request)
 - @Scheduled threads (started by Spring's TaskScheduler)
 - @Async child threads (new thread from executor, ThreadLocal not inherited by default)
@@ -1467,11 +1484,11 @@ Returns `null` when called from:
 
 Spring defaults to `threadContextInheritable = false` in FrameworkServlet for safety:
 
-| Risk | Explanation |
-|------|-------------|
-| Memory leak | Child thread holds reference to HttpServletRequest object → prevents GC → request/response buffers retained long after response sent |
-| Security leak | Parent thread gets reused from pool for new user → child thread still references OLD user's request → accessing stale auth data |
-| Stale data | Request completed and response committed, but child thread still reads from the request object → undefined behavior |
+| Risk          | Explanation                                                                                                                          |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Memory leak   | Child thread holds reference to HttpServletRequest object → prevents GC → request/response buffers retained long after response sent |
+| Security leak | Parent thread gets reused from pool for new user → child thread still references OLD user's request → accessing stale auth data      |
+| Stale data    | Request completed and response committed, but child thread still reads from the request object → undefined behavior                  |
 
 MDC (Log4j ThreadContext) uses InheritableThreadLocal safely because it stores lightweight String values that don't reference heavy objects or sensitive data.
 
@@ -1479,7 +1496,7 @@ MDC (Log4j ThreadContext) uses InheritableThreadLocal safely because it stores l
 
 ```
 FeignAuthorizationInterceptor:
-    ServletRequestAttributes attrs = 
+    ServletRequestAttributes attrs =
         (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
     // Safe: Feign calls execute synchronously on the same servlet thread
     // The ThreadLocal is guaranteed to contain the original request
@@ -1491,12 +1508,12 @@ MdcCorrelationFilter:
 
 ### Comparison with Other Spring ThreadLocal Mechanisms
 
-| Mechanism | Stores | ThreadLocal Type | Cleanup By |
-|-----------|--------|-----------------|------------|
-| RequestContextHolder | HttpServletRequest + Response | Plain (default) | FrameworkServlet finally block |
-| SecurityContextHolder | Authentication object | Configurable (MODE_THREADLOCAL default) | SecurityContextPersistenceFilter |
-| MDC / ThreadContext | Key-value String pairs | InheritableThreadLocal | MdcCorrelationFilter finally block |
-| LocaleContextHolder | Locale + TimeZone | Plain (default) | FrameworkServlet finally block |
+| Mechanism             | Stores                        | ThreadLocal Type                        | Cleanup By                         |
+| --------------------- | ----------------------------- | --------------------------------------- | ---------------------------------- |
+| RequestContextHolder  | HttpServletRequest + Response | Plain (default)                         | FrameworkServlet finally block     |
+| SecurityContextHolder | Authentication object         | Configurable (MODE_THREADLOCAL default) | SecurityContextPersistenceFilter   |
+| MDC / ThreadContext   | Key-value String pairs        | InheritableThreadLocal                  | MdcCorrelationFilter finally block |
+| LocaleContextHolder   | Locale + TimeZone             | Plain (default)                         | FrameworkServlet finally block     |
 
 ---
 
@@ -1506,9 +1523,9 @@ MdcCorrelationFilter:
 
 Spring Boot offers two web stacks (mutually exclusive per application):
 
-| Stack | Dependency | Threading Model | APIs |
-|-------|-----------|----------------|------|
-| **Servlet (MVC)** | `spring-boot-starter-web` | 1 thread per request (Tomcat pool, 200 default) | HttpServletRequest, FilterChain, @Controller |
+| Stack                  | Dependency                    | Threading Model                                 | APIs                                          |
+| ---------------------- | ----------------------------- | ----------------------------------------------- | --------------------------------------------- |
+| **Servlet (MVC)**      | `spring-boot-starter-web`     | 1 thread per request (Tomcat pool, 200 default) | HttpServletRequest, FilterChain, @Controller  |
 | **Reactive (WebFlux)** | `spring-boot-starter-webflux` | Event loop (Netty, ~4 threads for ALL requests) | ServerWebExchange, Mono/Flux, @RestController |
 
 Spring Cloud Gateway uses **WebFlux** because a gateway handles thousands of concurrent connections (mostly waiting for downstream responses) — event loop model is far more efficient than blocking one thread per connection.
@@ -1537,13 +1554,13 @@ Mono.empty()               → "do nothing, complete immediately"
 
 ### ServerWebExchange vs HttpServletRequest
 
-| Operation | Servlet | Reactive |
-|-----------|---------|----------|
-| Get header | `request.getHeader("X")` | `exchange.getRequest().getHeaders().getFirst("X")` |
-| Get path | `request.getRequestURI()` | `exchange.getRequest().getPath().value()` |
-| Set status | `response.setStatus(401)` | `exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED)` |
-| Write body | `response.getWriter().write(json)` | `exchange.getResponse().writeWith(Mono.just(buffer))` |
-| Mutate request | Not standard (wrapper) | `exchange.mutate().request(mutatedRequest).build()` |
+| Operation      | Servlet                            | Reactive                                                        |
+| -------------- | ---------------------------------- | --------------------------------------------------------------- |
+| Get header     | `request.getHeader("X")`           | `exchange.getRequest().getHeaders().getFirst("X")`              |
+| Get path       | `request.getRequestURI()`          | `exchange.getRequest().getPath().value()`                       |
+| Set status     | `response.setStatus(401)`          | `exchange.getResponse().setStatusCode(HttpStatus.UNAUTHORIZED)` |
+| Write body     | `response.getWriter().write(json)` | `exchange.getResponse().writeWith(Mono.just(buffer))`           |
+| Mutate request | Not standard (wrapper)             | `exchange.mutate().request(mutatedRequest).build()`             |
 
 ### Ordered Interface for Filter Ordering
 
@@ -1556,6 +1573,7 @@ public interface Ordered {
 ```
 
 EquityCart gateway filter order:
+
 ```
 HIGHEST_PRECEDENCE     → CorrelationIdGatewayFilter (assign trace ID)
 HIGHEST_PRECEDENCE + 1 → JwtValidationGatewayFilter (reject bad tokens)
@@ -1822,6 +1840,7 @@ A: The condition evaluates to NO MATCH. The bean definition is silently skipped 
 ### The Problem: UnsupportedOperationException on Response Headers
 
 In Spring Cloud Gateway (WebFlux/Netty), a common pattern for modifying response headers is:
+
 ```java
 chain.filter(exchange).then(Mono.fromRunnable(() -> {
     exchange.getResponse().getHeaders().add("X-Correlation-Id", correlationId);
@@ -1860,19 +1879,20 @@ ServerHttpResponseDecorator decoratedResponse = new ServerHttpResponseDecorator(
 The decorator intercepts the write call BEFORE it happens. At the point `writeWith()` is called, headers have NOT been committed yet — they're still mutable. The decorator adds the header, then delegates to the real `writeWith()` which commits headers + streams the body.
 
 **Three override points cover all response types:**
+
 - `writeWith()` — normal responses with a body (200 with JSON)
 - `writeAndFlushWith()` — SSE/streaming responses (Server-Sent Events)
 - `setComplete()` — empty-body responses (204 No Content, 304 Not Modified, redirects)
 
 ### Servlet vs Reactive Response Models
 
-| Aspect | Servlet (Tomcat) | Reactive (Netty) |
-|--------|-----------------|-------------------|
-| Response type | `HttpServletResponse` | `ServerHttpResponse` |
-| Header mutability | Mutable until `response.flushBuffer()` or `writer.flush()` | Mutable until first `writeWith()` call |
-| Lifecycle hook | `HandlerInterceptor.afterCompletion()` | `chain.filter().then()` (too late!) |
-| Correct interception | `OncePerRequestFilter` (headers still open in doFilter) | `ServerHttpResponseDecorator` |
-| Headers after commit | Silently ignored (Tomcat) | `UnsupportedOperationException` (Netty) |
+| Aspect               | Servlet (Tomcat)                                           | Reactive (Netty)                        |
+| -------------------- | ---------------------------------------------------------- | --------------------------------------- |
+| Response type        | `HttpServletResponse`                                      | `ServerHttpResponse`                    |
+| Header mutability    | Mutable until `response.flushBuffer()` or `writer.flush()` | Mutable until first `writeWith()` call  |
+| Lifecycle hook       | `HandlerInterceptor.afterCompletion()`                     | `chain.filter().then()` (too late!)     |
+| Correct interception | `OncePerRequestFilter` (headers still open in doFilter)    | `ServerHttpResponseDecorator`           |
+| Headers after commit | Silently ignored (Tomcat)                                  | `UnsupportedOperationException` (Netty) |
 
 ### Interview Questions
 
@@ -1889,6 +1909,7 @@ A: They solve the same problem (modifying responses) in different programming mo
 ### The Problem: Invalid HTTP method: PATCH
 
 When a Feign client declares a `@PatchMapping` method and the default HTTP transport is used, the call fails with:
+
 ```
 java.net.ProtocolException: Invalid HTTP method: PATCH
 ```
@@ -1896,6 +1917,7 @@ java.net.ProtocolException: Invalid HTTP method: PATCH
 ### Root Cause: HttpURLConnection (JDK Default)
 
 OpenFeign's default HTTP client is `java.net.HttpURLConnection` — a class written in the late 1990s (JDK 1.1). It only supports the methods defined in HTTP/1.0 + original RFC 2068:
+
 - GET, POST, PUT, DELETE, HEAD, OPTIONS, TRACE
 
 The PATCH method was defined in RFC 5789 (2010). Sun/Oracle never updated `HttpURLConnection` to support it. The method validation is a hardcoded `switch` statement that rejects any unrecognized verb.
@@ -1909,6 +1931,7 @@ implementation 'io.github.openfeign:feign-hc5'
 This replaces OpenFeign's HTTP transport with Apache HttpClient 5, which supports all standard HTTP methods including PATCH. Spring Cloud OpenFeign auto-detects `feign-hc5` on the classpath and configures it automatically (no @Bean needed).
 
 **Historical progression of Feign HTTP clients:**
+
 - `feign-httpclient` (Apache HttpClient 4) — legacy, works but older API
 - `feign-okhttp` (OkHttp 3/4) — popular, good HTTP/2 support
 - `feign-hc5` (Apache HttpClient 5) — current recommendation, modern async API
@@ -1925,6 +1948,7 @@ A: OpenFeign defaults to `java.net.HttpURLConnection`, which predates RFC 5789 a
 ### The Problem
 
 Spring Security's `SecurityContextHolder` uses `ThreadLocal` (MODE_THREADLOCAL by default). When a Kafka consumer thread processes a message:
+
 - No `DispatcherServlet` involved → no `RequestContextHolder` attributes
 - No `JwtAuthenticationFilter` ran → no `SecurityContext` set
 - Any `@PreAuthorize` check returns false → 403
@@ -1932,22 +1956,22 @@ Spring Security's `SecurityContextHolder` uses `ThreadLocal` (MODE_THREADLOCAL b
 
 ### Thread Context Availability Matrix
 
-| Thread Type | RequestContextHolder | SecurityContextHolder | MDC (Log4j) |
-|-------------|---------------------|----------------------|-------------|
-| Tomcat HTTP thread | ✓ (set by DispatcherServlet) | ✓ (set by JwtAuthFilter) | ✓ (set by MdcFilter) |
-| Kafka consumer thread | ✗ (null) | ✗ (empty) | ✗ (must set manually) |
-| @Async thread | ✗ (not inherited) | ✗ (not inherited by default) | ✗ (not inherited) |
-| @Scheduled thread | ✗ (null) | ✗ (empty) | ✗ (must set manually) |
-| CompletableFuture.runAsync | ✗ (null) | ✗ (not inherited) | ✗ (not inherited) |
+| Thread Type                | RequestContextHolder         | SecurityContextHolder        | MDC (Log4j)           |
+| -------------------------- | ---------------------------- | ---------------------------- | --------------------- |
+| Tomcat HTTP thread         | ✓ (set by DispatcherServlet) | ✓ (set by JwtAuthFilter)     | ✓ (set by MdcFilter)  |
+| Kafka consumer thread      | ✗ (null)                     | ✗ (empty)                    | ✗ (must set manually) |
+| @Async thread              | ✗ (not inherited)            | ✗ (not inherited by default) | ✗ (not inherited)     |
+| @Scheduled thread          | ✗ (null)                     | ✗ (empty)                    | ✗ (must set manually) |
+| CompletableFuture.runAsync | ✗ (null)                     | ✗ (not inherited)            | ✗ (not inherited)     |
 
 ### Solutions by Context
 
-| Need | Solution |
-|------|----------|
-| Feign calls from Kafka | `ServiceTokenProvider` (generates fresh JWT) |
-| SecurityContext in @Async | `SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL)` or `DelegatingSecurityContextExecutorService` |
-| MDC in Kafka | Manually set `ThreadContext.put("correlationId", ...)` from message header |
-| RequestContextHolder in @Async | Pass extracted values before spawning async task |
+| Need                           | Solution                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| Feign calls from Kafka         | `ServiceTokenProvider` (generates fresh JWT)                                                                       |
+| SecurityContext in @Async      | `SecurityContextHolder.setStrategyName(MODE_INHERITABLETHREADLOCAL)` or `DelegatingSecurityContextExecutorService` |
+| MDC in Kafka                   | Manually set `ThreadContext.put("correlationId", ...)` from message header                                         |
+| RequestContextHolder in @Async | Pass extracted values before spawning async task                                                                   |
 
 ### Interview Questions
 
@@ -2056,12 +2080,12 @@ if (FilterRegistrationBean already exists in context)
 
 This is why the CORRECT pattern when you DO want a filter in the SecurityFilterChain is:
 
-| Approach | Result |
-|----------|--------|
-| `@Component` alone | Auto-registered by FilterRegistrationBean OUTSIDE SecurityFilterChain |
-| `@Component` + define a `FilterRegistrationBean` with `setEnabled(false)` | Prevents auto-reg; only SecurityFilterChain places it |
-| Remove `@Component` | Bean not in IoC; manually placed via `addFilterBefore()` in SecurityConfig |
-| `@Bean` in `@Configuration` without `FilterRegistrationBean` | Same trap as @Component — Spring treats @Bean Filter the same way |
+| Approach                                                                  | Result                                                                     |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `@Component` alone                                                        | Auto-registered by FilterRegistrationBean OUTSIDE SecurityFilterChain      |
+| `@Component` + define a `FilterRegistrationBean` with `setEnabled(false)` | Prevents auto-reg; only SecurityFilterChain places it                      |
+| Remove `@Component`                                                       | Bean not in IoC; manually placed via `addFilterBefore()` in SecurityConfig |
+| `@Bean` in `@Configuration` without `FilterRegistrationBean`              | Same trap as @Component — Spring treats @Bean Filter the same way          |
 
 In EquityCart's case, `JwtAuthenticationFilter` is wired into `SecurityAutoConfig.securityFilterChain()` via `addFilterBefore()`. The filter does NOT need `@Component` — `SecurityAutoConfig` creates it via `new JwtAuthenticationFilter(...)` and adds it directly to the chain.
 
@@ -2086,12 +2110,12 @@ No `FilterRegistrationBean` exists in WebFlux — there is no Servlet API. Sprin
 
 **Comparison table:**
 
-| | Servlet Filter + @Component | WebFlux GlobalFilter + @Component |
-|-|---------------------------|-----------------------------------|
-| Registration mechanism | `FilterRegistrationBean` (Spring Boot auto-config) | `GatewayAutoConfiguration` autowired list |
-| Runs outside security chain? | YES (bug trap) | NO (no Servlet concept of "outside") |
-| Correct pattern for security | Remove @Component, wire manually in SecurityConfig | @Component works fine |
-| Discovery mechanism | `SecurityFilterAutoConfiguration` detects Filter beans | GatewayAutoConfiguration collects GlobalFilter beans |
+|                              | Servlet Filter + @Component                            | WebFlux GlobalFilter + @Component                    |
+| ---------------------------- | ------------------------------------------------------ | ---------------------------------------------------- |
+| Registration mechanism       | `FilterRegistrationBean` (Spring Boot auto-config)     | `GatewayAutoConfiguration` autowired list            |
+| Runs outside security chain? | YES (bug trap)                                         | NO (no Servlet concept of "outside")                 |
+| Correct pattern for security | Remove @Component, wire manually in SecurityConfig     | @Component works fine                                |
+| Discovery mechanism          | `SecurityFilterAutoConfiguration` detects Filter beans | GatewayAutoConfiguration collects GlobalFilter beans |
 
 ---
 
@@ -2167,10 +2191,10 @@ NimbusJwtDecoder creation from jwk-set-uri:
 
 ### jwk-set-uri vs issuer-uri — Why Docker Forced Our Hand
 
-| Property | Effect |
-|----------|--------|
-| `jwk-set-uri` | Fetches keys from exact URL provided. No issuer validation. Services trust whatever keys come from the URI. |
-| `issuer-uri` | Calls `.well-known/openid-configuration` discovery endpoint. Downloads JWKS URI + validates `iss` claim in every token matches the configured issuer. |
+| Property      | Effect                                                                                                                                                |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jwk-set-uri` | Fetches keys from exact URL provided. No issuer validation. Services trust whatever keys come from the URI.                                           |
+| `issuer-uri`  | Calls `.well-known/openid-configuration` discovery endpoint. Downloads JWKS URI + validates `iss` claim in every token matches the configured issuer. |
 
 **Why `issuer-uri` fails in Docker:**
 
@@ -2203,9 +2227,11 @@ FIX: Use jwk-set-uri instead of issuer-uri
 Spring's `BearerTokenAuthenticationFilter` creates the `Authentication` object using a `JwtAuthenticationConverter`. The default converter sets `authentication.getPrincipal()` to the `Jwt` object itself.
 
 **Problem:** Existing controllers use:
+
 ```java
 (Long) authentication.getPrincipal()  // expects Long userId
 ```
+
 With default OAuth2 converter, this ClassCastException at runtime.
 
 **Solution: Custom converter** that extracts `userId` attribute from Keycloak JWT and wraps in `UsernamePasswordAuthenticationToken(Long userId, ...)`:
@@ -2248,14 +2274,14 @@ WebFlux (Netty):
 
 ### NimbusJwtDecoder vs NimbusReactiveJwtDecoder
 
-| | NimbusJwtDecoder | NimbusReactiveJwtDecoder |
-|-|-----------------|--------------------------|
-| Programming model | Blocking (Servlet) | Non-blocking (WebFlux) |
-| HTTP client for JWKS | `RestTemplate` (blocking) | `WebClient` (reactive) |
-| Integration point | `JwtDecoder` bean in SecurityFilterChain | `ReactiveJwtDecoder` bean in SecurityWebFilterChain |
-| Thread behavior | Blocks HTTP thread while fetching JWKS | Returns Mono — caller subscribes asynchronously |
-| Used at | Services (order, product, etc.) | API Gateway |
-| Auto-config triggers | `OAuth2ResourceServerJwtConfiguration` | `ReactiveOAuth2ResourceServerJwtConfiguration` |
+|                      | NimbusJwtDecoder                         | NimbusReactiveJwtDecoder                            |
+| -------------------- | ---------------------------------------- | --------------------------------------------------- |
+| Programming model    | Blocking (Servlet)                       | Non-blocking (WebFlux)                              |
+| HTTP client for JWKS | `RestTemplate` (blocking)                | `WebClient` (reactive)                              |
+| Integration point    | `JwtDecoder` bean in SecurityFilterChain | `ReactiveJwtDecoder` bean in SecurityWebFilterChain |
+| Thread behavior      | Blocks HTTP thread while fetching JWKS   | Returns Mono — caller subscribes asynchronously     |
+| Used at              | Services (order, product, etc.)          | API Gateway                                         |
+| Auto-config triggers | `OAuth2ResourceServerJwtConfiguration`   | `ReactiveOAuth2ResourceServerJwtConfiguration`      |
 
 ---
 
@@ -2268,7 +2294,7 @@ A: `spring-boot-starter-oauth2-resource-server` auto-configures `NimbusJwtDecode
 A: `issuer-uri` triggers OIDC discovery (`/.well-known/openid-configuration`) and validates that every token's `iss` claim matches the configured URI exactly. In Docker, the Keycloak container advertises its internal hostname (e.g., `keycloak:8080`) in the `iss` claim, but the service is configured with `localhost:8180`. The string comparison fails. `jwk-set-uri` skips issuer validation entirely — it only fetches public keys from the exact URL you provide. The tradeoff: no automatic discovery, and you lose issuer claim verification (acceptable in controlled dev environments, not for production).
 
 **Q: "Why does the OAuth2 JwtAuthenticationConverter need to return Mono in WebFlux but not in Servlet?"**
-A: `AuthenticationWebFilter` (WebFlux) calls the converter via `flatMap()`:  `Mono<Authentication> auth = jwtDecoder.decode(token).flatMap(converter::convert)`. `flatMap` requires a function that returns a `Publisher` (Mono/Flux) — a synchronous return value would prevent composition with upstream reactive streams. In Servlet, `AbstractSecurityInterceptor` calls the converter synchronously as part of a blocking thread — no reactive composition involved, so a plain `Converter<Jwt, AbstractAuthenticationToken>` suffices.
+A: `AuthenticationWebFilter` (WebFlux) calls the converter via `flatMap()`: `Mono<Authentication> auth = jwtDecoder.decode(token).flatMap(converter::convert)`. `flatMap` requires a function that returns a `Publisher` (Mono/Flux) — a synchronous return value would prevent composition with upstream reactive streams. In Servlet, `AbstractSecurityInterceptor` calls the converter synchronously as part of a blocking thread — no reactive composition involved, so a plain `Converter<Jwt, AbstractAuthenticationToken>` suffices.
 
 **Q: "How does Spring automatically detect and validate JWT tokens on every request?"**
 A: `BearerTokenAuthenticationFilter` (added to `SecurityFilterChain` by `OAuth2ResourceServerAutoConfiguration`) runs before your controllers. It extracts the `Authorization: Bearer <token>` header, calls `JwtDecoder.decode()` which validates the RS256 signature via JWKS, validates `exp`/`nbf` claims, then calls the `JwtAuthenticationConverter` to produce an `Authentication`. It stores this in `SecurityContextHolder`. The rest of the filter chain sees an authenticated request. If decoding fails, a 401 is returned immediately.
@@ -2324,6 +2350,7 @@ SecurityContextHolder (ThreadLocal)   ReactiveSecurityContextHolder (Reactor Con
 ```
 
 **What @EnableWebFluxSecurity does NOT do:**
+
 - Does NOT enable method security (`@PreAuthorize` still inactive without explicit enablement)
 - Does NOT create any SecurityWebFilterChain — YOU must declare a `@Bean` of type `SecurityWebFilterChain`
 - Does NOT interfere with Spring MVC if somehow on the same classpath (though mixing stacks is wrong)
@@ -2332,14 +2359,14 @@ SecurityContextHolder (ThreadLocal)   ReactiveSecurityContextHolder (Reactor Con
 
 ### SecurityWebFilterChain vs SecurityFilterChain
 
-| | SecurityFilterChain (Servlet) | SecurityWebFilterChain (WebFlux) |
-|-|------------------------------|----------------------------------|
-| DSL builder | `HttpSecurity` | `ServerHttpSecurity` |
-| Builds from | `WebSecurityConfigurerAdapter` (deprecated) or `@Bean SecurityFilterChain` | `@Bean SecurityWebFilterChain` |
-| Token validation filter | `BearerTokenAuthenticationFilter` | `AuthenticationWebFilter` |
-| Authentication storage | `SecurityContextHolder` (ThreadLocal) | `ReactiveSecurityContextHolder` (Reactor Context) |
-| Authorization filter | `AuthorizationFilter` | `AuthorizationWebFilter` |
-| CSRF | `CsrfFilter` (enabled by default) | `CsrfWebFilter` (disabled by default in stateless APIs) |
+|                         | SecurityFilterChain (Servlet)                                              | SecurityWebFilterChain (WebFlux)                        |
+| ----------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------- |
+| DSL builder             | `HttpSecurity`                                                             | `ServerHttpSecurity`                                    |
+| Builds from             | `WebSecurityConfigurerAdapter` (deprecated) or `@Bean SecurityFilterChain` | `@Bean SecurityWebFilterChain`                          |
+| Token validation filter | `BearerTokenAuthenticationFilter`                                          | `AuthenticationWebFilter`                               |
+| Authentication storage  | `SecurityContextHolder` (ThreadLocal)                                      | `ReactiveSecurityContextHolder` (Reactor Context)       |
+| Authorization filter    | `AuthorizationFilter`                                                      | `AuthorizationWebFilter`                                |
+| CSRF                    | `CsrfFilter` (enabled by default)                                          | `CsrfWebFilter` (disabled by default in stateless APIs) |
 
 ---
 
@@ -2377,6 +2404,7 @@ Solution: Reactor Context (per-subscription, not per-thread)
 ### Why @EnableMethodSecurity Does Nothing at API Gateway
 
 `@EnableMethodSecurity` activates AOP advice that intercepts `@PreAuthorize`/`@PostAuthorize` on Spring MVC controller methods. The API Gateway:
+
 1. Has no `@RestController` or `@Controller` — it's a pure routing layer
 2. Runs on WebFlux stack — `@EnableMethodSecurity` targets Servlet MVC AOP
 3. Uses `@EnableWebFluxSecurity` — the reactive stack ignores `@EnableMethodSecurity` entirely
@@ -2398,3 +2426,86 @@ A: Not in a meaningful way. While both can technically be on the classpath, Spri
 
 **Q: "How does SecurityWebFilterChain order affect security enforcement?"**
 A: `SecurityWebFilterChain` beans can be annotated with `@Order`. The `WebFilterChainProxy` evaluates chains in ascending order and uses the FIRST chain whose `pathMatcher` matches the request. A chain with `@Order(1)` matching `/api/public/**` with no auth can short-circuit requests before `@Order(2)` matching `/**` with full auth. This enables different security policies per URL pattern without conditionals inside a single chain.
+
+---
+
+## 21. Phase 9 Observability Internals — Metrics, Traces, and Logging
+
+### 21.1 Why Correlation ID Alone Was Not Enough
+
+Correlation IDs answer: "which logs belong to this request?"  
+They do **not** answer:
+
+- Is latency increasing over time?
+- Which endpoint is causing p99 spikes?
+- Which service is failing most often?
+- Where did the request spend time across service boundaries?
+
+Phase 9 adds the missing three pillars:
+
+- **Metrics** (Prometheus + Micrometer) for trends, SLOs, alerting
+- **Tracing** (Micrometer Tracing + Zipkin) for cross-service request timelines
+- **Structured logs** (Log4j2 JSON) for machine-queryable events
+
+### 21.2 Spring Boot 3 Metrics Flow (Micrometer)
+
+```
+Controller/Service method
+   └─ record metrics via MeterRegistry (Counter/Timer)
+         └─ stored in Micrometer meter registry
+               └─ exposed at /actuator/prometheus
+                     └─ Prometheus scrapes periodically
+                           └─ Grafana queries PromQL for dashboards/alerts
+```
+
+**Critical implementation dependency:** `/actuator/prometheus` requires the Prometheus registry dependency (`micrometer-registry-prometheus`). Actuator exposure alone is not enough.
+
+### 21.3 Tracing Flow (Boot 3.x Preferred Path)
+
+```
+Incoming request
+   └─ trace/span context created (or continued)
+        └─ context propagates through HTTP client calls
+             └─ spans exported to Zipkin endpoint
+                  └─ Zipkin UI reconstructs full request graph
+```
+
+Boot 3.x guidance:
+
+- Use Micrometer tracing properties
+- Configure explicit Zipkin endpoint for exporter
+- Keep sampling explicit in config (e.g., 1.0 in dev, lower in prod)
+
+### 21.4 Structured Log Design Decisions
+
+Per-service `log4j2-spring.xml` configured with:
+
+- JSON layout for parseable logs
+- stdout + rolling file appender
+- MDC/correlation context included in each event
+
+This design supports both:
+
+- local debugging (human-friendly console)
+- operational analysis tools (`core-loglens`, log shipping pipelines)
+
+### 21.5 Alerts as Executable SLO Contracts
+
+Phase 9 alert classes:
+
+- **Availability:** service down (`up == 0`)
+- **Reliability:** high 5xx/error ratio
+- **Performance:** high p99 latency
+
+These are not dashboard cosmetics; they are runtime enforcement of production expectations.
+
+### 21.6 Interview Questions
+
+**Q: "Why use both logs and metrics if metrics already show errors?"**  
+A: Metrics tell you _that_ a problem exists and how big it is (rate, latency, percentile). Logs tell you _why_ it happened (stack trace, payload, domain context). They are complementary, not interchangeable.
+
+**Q: "Why does p99 matter more than average latency?"**  
+A: Average hides tail pain. Averages can look healthy while a minority of requests are extremely slow. p99 captures worst-user experience and is a better alert target for production APIs.
+
+**Q: "What is the practical difference between correlation ID and trace ID?"**  
+A: Correlation ID is usually an application-defined request identifier propagated for log grouping. Trace ID is part of standardized distributed tracing context with parent/child span relationships and timing metadata. Correlation IDs are useful for logs; trace IDs power full causal timelines.

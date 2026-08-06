@@ -194,12 +194,14 @@ kafkaTemplate.send(outboxEvent.getTopic(), key, event).get();
 ```
 
 **Why this matters:** When you add a third event type (e.g., `OrderCancelledEvent`), you only need to:
+
 1. Create the DTO class
 2. Call `outboxWriter.writeOutboxEvent(...)` with the new event
 
 The poller handles it automatically — zero changes. This is the Open/Closed Principle applied to infrastructure: open for extension (new event types), closed for modification (poller code never changes).
 
 **How `payloadType` is populated:**
+
 ```java
 event.getClass().getName()  // → "com.equitycart.commons.event.OrderDeliveredEvent"
 ```
@@ -209,6 +211,7 @@ Using `.getClass().getName()` instead of hardcoded strings ensures the FQCN is a
 ### 1.10 The Outbox as Infrastructure vs. Domain
 
 The outbox has ONE job: reliably relay messages from DB to Kafka. It has:
+
 - **No domain knowledge** — doesn't care if the event is "delivered" or "returned"
 - **One lifecycle**: `PENDING → SENT`
 - **No business logic** — just serialize, store, poll, send, mark done
@@ -339,20 +342,21 @@ The polling variant has a fundamental trade-off: **latency vs DB load**. Polling
 
 **Key differences from Polling variant:**
 
-| Aspect | Polling Variant | CDC Variant |
-|--------|----------------|-------------|
-| Relay mechanism | Java @Scheduled job (SELECT → send → UPDATE) | Debezium reads PostgreSQL WAL |
-| Latency | Up to poll interval (5s) | Milliseconds (WAL is near-real-time) |
-| DB load | Repeated SELECT queries every 5s | Zero queries (reads WAL stream) |
-| Status column | Meaningful: PENDING → SENT | Vestigial: stays PENDING forever |
-| `__TypeId__` header | Present (KafkaTemplate adds it) | Absent (Debezium is not Spring-aware) |
-| Infrastructure | Just Java code (no external deps) | Kafka Connect + Debezium container |
-| Resume on restart | Re-reads PENDING rows | Resumes from WAL LSN position |
-| Delivery guarantee | Confirmed: `.get()` blocks until Kafka ACK | Confirmed: Kafka Connect offset tracking |
+| Aspect              | Polling Variant                              | CDC Variant                              |
+| ------------------- | -------------------------------------------- | ---------------------------------------- |
+| Relay mechanism     | Java @Scheduled job (SELECT → send → UPDATE) | Debezium reads PostgreSQL WAL            |
+| Latency             | Up to poll interval (5s)                     | Milliseconds (WAL is near-real-time)     |
+| DB load             | Repeated SELECT queries every 5s             | Zero queries (reads WAL stream)          |
+| Status column       | Meaningful: PENDING → SENT                   | Vestigial: stays PENDING forever         |
+| `__TypeId__` header | Present (KafkaTemplate adds it)              | Absent (Debezium is not Spring-aware)    |
+| Infrastructure      | Just Java code (no external deps)            | Kafka Connect + Debezium container       |
+| Resume on restart   | Re-reads PENDING rows                        | Resumes from WAL LSN position            |
+| Delivery guarantee  | Confirmed: `.get()` blocks until Kafka ACK   | Confirmed: Kafka Connect offset tracking |
 
 **Why the status column is vestigial in CDC mode:**
 
 In polling mode, the status column has operational meaning — the poller reads PENDING rows and marks them SENT after Kafka confirms. In CDC mode, Debezium reads the INSERT directly from the WAL the moment it's committed. Nothing updates the row because:
+
 1. Debezium has no write-back mechanism to the source database
 2. The OutboxPoller is disabled via `@Profile("!cdc")`
 3. There's no feedback loop from "Kafka received it" back to the outbox table
@@ -361,26 +365,26 @@ The outbox table in CDC mode is a **write-only append log**. Maintenance: period
 
 **CDC drawbacks and failure modes:**
 
-| Drawback | Impact | Mitigation |
-|----------|--------|------------|
-| WAL disk growth | `logical` WAL level produces more data than `replica` | Monitor `pg_wal` size, tune `wal_keep_size` |
+| Drawback                   | Impact                                                                                   | Mitigation                                                                      |
+| -------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| WAL disk growth            | `logical` WAL level produces more data than `replica`                                    | Monitor `pg_wal` size, tune `wal_keep_size`                                     |
 | Replication slot retention | If Debezium is down, PostgreSQL retains WAL segments until it reconnects — can fill disk | Alerting on `pg_replication_slots.active = false`, set `max_slot_wal_keep_size` |
-| No `__TypeId__` header | Spring consumers can't auto-detect type | `spring.json.value.default.type` per listener |
-| `@Lob` incompatibility | OID storage invisible to WAL | Use `@Column(columnDefinition = "text")` |
-| Snapshot on first start | Dumps all existing rows (duplicates) | `snapshot.mode=never` for outbox tables |
-| Timezone mismatch | Host timezone vs Docker UTC for timestamp fields | Don't use app timestamps as Kafka message timestamps |
-| Column naming | Hibernate snake_case vs Debezium default camelCase | Explicit `table.field.*` mappings in connector config |
-| Operational complexity | Kafka Connect cluster to manage, monitor, upgrade | Worth it only at scale; polling is simpler for low-volume |
+| No `__TypeId__` header     | Spring consumers can't auto-detect type                                                  | `spring.json.value.default.type` per listener                                   |
+| `@Lob` incompatibility     | OID storage invisible to WAL                                                             | Use `@Column(columnDefinition = "text")`                                        |
+| Snapshot on first start    | Dumps all existing rows (duplicates)                                                     | `snapshot.mode=never` for outbox tables                                         |
+| Timezone mismatch          | Host timezone vs Docker UTC for timestamp fields                                         | Don't use app timestamps as Kafka message timestamps                            |
+| Column naming              | Hibernate snake_case vs Debezium default camelCase                                       | Explicit `table.field.*` mappings in connector config                           |
+| Operational complexity     | Kafka Connect cluster to manage, monitor, upgrade                                        | Worth it only at scale; polling is simpler for low-volume                       |
 
 **When to use which:**
 
-| Scenario | Recommended Variant |
-|----------|-------------------|
-| Learning/prototyping | Polling (simpler, no infra) |
-| Low-volume monolith (< 100 events/min) | Polling (adequate, minimal ops) |
-| High-volume or latency-sensitive | CDC (sub-second delivery, no polling overhead) |
-| Multiple databases/services | CDC (one Debezium cluster serves all) |
-| No Docker/container infrastructure | Polling (pure Java, no external deps) |
+| Scenario                               | Recommended Variant                            |
+| -------------------------------------- | ---------------------------------------------- |
+| Learning/prototyping                   | Polling (simpler, no infra)                    |
+| Low-volume monolith (< 100 events/min) | Polling (adequate, minimal ops)                |
+| High-volume or latency-sensitive       | CDC (sub-second delivery, no polling overhead) |
+| Multiple databases/services            | CDC (one Debezium cluster serves all)          |
+| No Docker/container infrastructure     | Polling (pure Java, no external deps)          |
 
 **Mode switching safety:** If switching from CDC to polling (removing `cdc` profile), the OutboxPoller will pick up ALL rows with `status=PENDING` — including ones already published by Debezium. This causes duplicate publishing. Mitigation: truncate the outbox table before switching modes, or add a `created_at` filter to the poller (only process rows newer than switch timestamp).
 
@@ -429,6 +433,7 @@ Saga: Sell-to-Spend
 ```
 
 If step 3 fails:
+
 1. Compensate step 2: record a REVERSAL ledger entry (HOLDING_ASSET ← CASH)
 2. Compensate step 1: re-add the shares to the portfolio
 3. Saga ends in COMPENSATED state
@@ -437,14 +442,14 @@ If step 3 fails:
 
 ### 2.3 Orchestration vs. Choreography
 
-| | Orchestration | Choreography |
-|---|---|---|
-| **Coordination** | Central orchestrator drives each step | Each service reacts to events from previous step |
-| **Flow visibility** | Entire saga readable in one class | Logic scattered across multiple event listeners |
-| **Coupling** | Orchestrator knows all steps | Services know only their own step + next event |
-| **Error handling** | Orchestrator decides what to compensate | Each service must know its own compensation trigger |
-| **Best for** | Complex multi-step flows, clear sequences | Simple 2-3 step flows, loose coupling |
-| **Example** | EquityCart Sell-to-Spend Saga | Order-Delivered → Reward-Consumer (Phase 6 Steps 4-5) |
+|                     | Orchestration                             | Choreography                                          |
+| ------------------- | ----------------------------------------- | ----------------------------------------------------- |
+| **Coordination**    | Central orchestrator drives each step     | Each service reacts to events from previous step      |
+| **Flow visibility** | Entire saga readable in one class         | Logic scattered across multiple event listeners       |
+| **Coupling**        | Orchestrator knows all steps              | Services know only their own step + next event        |
+| **Error handling**  | Orchestrator decides what to compensate   | Each service must know its own compensation trigger   |
+| **Best for**        | Complex multi-step flows, clear sequences | Simple 2-3 step flows, loose coupling                 |
+| **Example**         | EquityCart Sell-to-Spend Saga             | Order-Delivered → Reward-Consumer (Phase 6 Steps 4-5) |
 
 **EquityCart uses Orchestration** — the `SellToSpendSagaOrchestrator` class knows the full 3-step sequence and handles all compensation logic in one place.
 
@@ -481,11 +486,11 @@ The orchestrator persists a **saga entity** (`SellToSpendSaga`) to the database 
 
 Sagas execute in an at-least-once environment (retries, timeout recovery). Every step must be safe to call twice:
 
-| Strategy | How it works | EquityCart example |
-|----------|-------------|-------------------|
-| Status gate | Check saga status before executing — skip if already past this step | If status already `HOLDING_REDUCED`, don't call `reduceHolding()` again |
-| Natural idempotency | The operation itself rejects duplicates | `updateOrderStatus(CONFIRMED)` on already-confirmed order throws `InvalidStatusTransitionException` |
-| Unique constraints | DB constraint prevents double-write | Saga entity with `orderId` lookup prevents duplicate saga creation |
+| Strategy            | How it works                                                        | EquityCart example                                                                                  |
+| ------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Status gate         | Check saga status before executing — skip if already past this step | If status already `HOLDING_REDUCED`, don't call `reduceHolding()` again                             |
+| Natural idempotency | The operation itself rejects duplicates                             | `updateOrderStatus(CONFIRMED)` on already-confirmed order throws `InvalidStatusTransitionException` |
+| Unique constraints  | DB constraint prevents double-write                                 | Saga entity with `orderId` lookup prevents duplicate saga creation                                  |
 
 ### 2.6 Timeout Detection
 
@@ -503,15 +508,15 @@ In production (distributed services with network latency), timeouts are minutes 
 
 ### 2.7 Saga vs. @Transactional — When to Use Which
 
-| Criteria | @Transactional | Saga |
-|----------|---------------|------|
-| Same database | ✅ Use this | Overkill |
-| Separate databases | Not possible | ✅ Required |
-| Code complexity | ~50 lines | ~300+ lines |
-| Consistency | Strong (ACID) | Eventual |
-| Intermediate visibility | None (isolated) | Visible (other transactions can see partial state) |
-| Failure recovery | Automatic rollback | Manual compensation |
-| Performance | Single commit | Multiple commits + saga saves |
+| Criteria                | @Transactional     | Saga                                               |
+| ----------------------- | ------------------ | -------------------------------------------------- |
+| Same database           | ✅ Use this        | Overkill                                           |
+| Separate databases      | Not possible       | ✅ Required                                        |
+| Code complexity         | ~50 lines          | ~300+ lines                                        |
+| Consistency             | Strong (ACID)      | Eventual                                           |
+| Intermediate visibility | None (isolated)    | Visible (other transactions can see partial state) |
+| Failure recovery        | Automatic rollback | Manual compensation                                |
+| Performance             | Single commit      | Multiple commits + saga saves                      |
 
 **Rule of thumb:** Use `@Transactional` when you can. Use Sagas when you must (separate databases, separate deployments, cross-network boundaries).
 
@@ -550,12 +555,12 @@ Event Sourcing stores every state change as an immutable event in an append-only
 
 ### 3.2 Key Components
 
-| Component | Purpose | EquityCart Implementation |
-|-----------|---------|--------------------------|
-| Event Store | Append-only persistence of events | MongoDB `portfolio_events` collection |
-| Event | Immutable fact with type, data, timestamp, sequence | `PortfolioEvent` @Document |
-| Projection | Function that replays events → read model | `PortfolioProjectionService.rebuildHoldings()` |
-| Sequence Number | Total ordering per aggregate | Per-user monotonic counter |
+| Component       | Purpose                                             | EquityCart Implementation                      |
+| --------------- | --------------------------------------------------- | ---------------------------------------------- |
+| Event Store     | Append-only persistence of events                   | MongoDB `portfolio_events` collection          |
+| Event           | Immutable fact with type, data, timestamp, sequence | `PortfolioEvent` @Document                     |
+| Projection      | Function that replays events → read model           | `PortfolioProjectionService.rebuildHoldings()` |
+| Sequence Number | Total ordering per aggregate                        | Per-user monotonic counter                     |
 
 ### 3.3 Event Document Structure
 
@@ -601,6 +606,7 @@ Service Operation
 ```
 
 **Why dual-write instead of pure event sourcing?**
+
 - No risky migration of existing PostgreSQL infrastructure
 - Portfolio read operations still hit fast indexed SQL (not replay)
 - Event store adds audit/history without changing core behavior
@@ -610,35 +616,37 @@ Service Operation
 
 ### 3.6 Comparison: Event Sourcing vs CRUD vs Outbox
 
-| Aspect | CRUD | Outbox | Event Sourcing |
-|--------|------|--------|----------------|
-| State storage | Current only | Current + outbox events | Events only (state derived) |
-| History | Lost on update | Events have delivery purpose | Full append-only history |
-| Replay | Impossible | Not designed for replay | Core feature |
-| Complexity | Low | Medium | High |
-| Query performance | Direct SQL | Direct SQL | Requires projections |
-| Audit trail | Requires separate logging | Events are transient (deleted after publish) | Built-in and permanent |
+| Aspect            | CRUD                      | Outbox                                       | Event Sourcing              |
+| ----------------- | ------------------------- | -------------------------------------------- | --------------------------- |
+| State storage     | Current only              | Current + outbox events                      | Events only (state derived) |
+| History           | Lost on update            | Events have delivery purpose                 | Full append-only history    |
+| Replay            | Impossible                | Not designed for replay                      | Core feature                |
+| Complexity        | Low                       | Medium                                       | High                        |
+| Query performance | Direct SQL                | Direct SQL                                   | Requires projections        |
+| Audit trail       | Requires separate logging | Events are transient (deleted after publish) | Built-in and permanent      |
 
 ### 3.7 Sequence Numbers vs Timestamps
 
-| Strategy | Pros | Cons |
-|----------|------|------|
-| Timestamps | Simple, human-readable | Clock skew, same-millisecond collisions |
-| Auto-increment (DB) | Guaranteed unique | Requires centralized sequence generator |
-| Application sequence | Per-aggregate, gap-detectable | Query before write (slight overhead) |
-| Kafka offset | Natural ordering in streams | Only works within Kafka partitions |
+| Strategy             | Pros                          | Cons                                    |
+| -------------------- | ----------------------------- | --------------------------------------- |
+| Timestamps           | Simple, human-readable        | Clock skew, same-millisecond collisions |
+| Auto-increment (DB)  | Guaranteed unique             | Requires centralized sequence generator |
+| Application sequence | Per-aggregate, gap-detectable | Query before write (slight overhead)    |
+| Kafka offset         | Natural ordering in streams   | Only works within Kafka partitions      |
 
 EquityCart uses application-level per-user sequence numbers: lightweight, gap-detectable, and works with any storage backend.
 
 ### 3.8 When to Use Event Sourcing
 
 **Use when:**
+
 - You need a complete audit trail (finance, compliance, healthcare)
 - Temporal queries are required ("portfolio at time T")
 - You want to derive multiple read models from the same event stream
 - Debugging requires reproducing exact state sequences
 
 **Don't use when:**
+
 - Simple CRUD with no history requirements
 - Performance-critical reads that can't tolerate projection latency
 - The domain has few state changes (overhead isn't justified)
@@ -646,27 +654,27 @@ EquityCart uses application-level per-user sequence numbers: lightweight, gap-de
 
 ### 3.9 EquityCart Event Types
 
-| Event | Holding Impact | Triggered By |
-|-------|---------------|--------------|
-| SHARES_PURCHASED | +qty, recalc avg | Manual BUY trade |
-| SHARES_SOLD | -qty, avg unchanged | Manual SELL trade |
-| REWARD_GRANTED | None (informational) | Order delivered → stock-back |
-| REWARD_VESTED | +qty at price=0 | Scheduled vesting job |
-| REWARD_CANCELLED | None (informational) | Order returned |
-| SELL_TO_SPEND | -qty | Saga step 1 / transactional sell |
-| SELL_TO_SPEND_COMPENSATED | +qty (reversal) | Saga compensation |
-| REFUND_RESTORED | +qty (reversal) | Order refund (Kafka) |
+| Event                     | Holding Impact       | Triggered By                     |
+| ------------------------- | -------------------- | -------------------------------- |
+| SHARES_PURCHASED          | +qty, recalc avg     | Manual BUY trade                 |
+| SHARES_SOLD               | -qty, avg unchanged  | Manual SELL trade                |
+| REWARD_GRANTED            | None (informational) | Order delivered → stock-back     |
+| REWARD_VESTED             | +qty at price=0      | Scheduled vesting job            |
+| REWARD_CANCELLED          | None (informational) | Order returned                   |
+| SELL_TO_SPEND             | -qty                 | Saga step 1 / transactional sell |
+| SELL_TO_SPEND_COMPENSATED | +qty (reversal)      | Saga compensation                |
+| REFUND_RESTORED           | +qty (reversal)      | Order refund (Kafka)             |
 
 ### 3.10 Event Sourcing vs CQRS — Relationship & Differences
 
 **They are separate patterns** that complement each other but are independently usable:
 
-| | Event Sourcing | CQRS |
-|--|---|---|
-| **Concern** | How you **store** state (as immutable events) | How you **separate** reads from writes (different models) |
-| **Core question** | "What happened?" (record facts) | "Who needs what shape of data?" (optimized paths) |
-| **Standalone?** | Yes — single store for reads + writes | Yes — read replicas + write master, no events |
-| **Origin** | Martin Fowler (2005), Greg Young (2006) | Greg Young / Bertrand Meyer's CQS (1988) evolved |
+|                   | Event Sourcing                                | CQRS                                                      |
+| ----------------- | --------------------------------------------- | --------------------------------------------------------- |
+| **Concern**       | How you **store** state (as immutable events) | How you **separate** reads from writes (different models) |
+| **Core question** | "What happened?" (record facts)               | "Who needs what shape of data?" (optimized paths)         |
+| **Standalone?**   | Yes — single store for reads + writes         | Yes — read replicas + write master, no events             |
+| **Origin**        | Martin Fowler (2005), Greg Young (2006)       | Greg Young / Bertrand Meyer's CQS (1988) evolved          |
 
 **Why they're conflated:** Event Sourcing makes reads awkward (scanning N events per query). So you build separate read-optimized projections — which is CQRS. The two patterns naturally co-occur in production systems, but neither requires the other.
 
@@ -707,12 +715,14 @@ Command Side                              Query Side
 ```
 
 **EquityCart's position (CQRS Lite):**
+
 - Write path → PostgreSQL `holdings` (current state, fast UPDATE)
 - Read/audit path → MongoDB `portfolio_events` (timeline, replay, temporal queries)
 - Two stores optimized for different access patterns = CQRS principle applied lightly
 - Not full CQRS because PostgreSQL is still the authority (not derived from events)
 
 **When to upgrade from CQRS Lite to Full CQRS:**
+
 - When you have multiple consumers needing different read shapes (search index, analytics, mobile view)
 - When write throughput is bottlenecked by read queries on the same tables
 - When you need independent scaling of reads vs writes
@@ -790,13 +800,13 @@ Browser/Mobile App
 
 ### 4.3 Historical Context: Gateway Evolution
 
-| Era | Technology | Model | Limitations |
-|-----|-----------|-------|-------------|
-| 2005–2012 | Apache HTTP Server / Nginx | Static reverse proxy, config-file routing | No service discovery, manual reload on topology change |
-| 2012–2015 | Netflix Zuul 1.x | Servlet-based (blocking), integrated with Eureka | One thread per request → thread exhaustion under load |
-| 2015–2018 | Netflix Zuul 2.x | Non-blocking (Netty), async I/O | Netflix-internal, limited community adoption |
-| 2018–present | **Spring Cloud Gateway** | Reactive (Project Reactor + Netty), non-blocking | Requires understanding reactive programming |
-| 2019–present | Envoy / Istio | Service mesh sidecar proxy | Infrastructure-level, higher operational complexity |
+| Era          | Technology                 | Model                                            | Limitations                                            |
+| ------------ | -------------------------- | ------------------------------------------------ | ------------------------------------------------------ |
+| 2005–2012    | Apache HTTP Server / Nginx | Static reverse proxy, config-file routing        | No service discovery, manual reload on topology change |
+| 2012–2015    | Netflix Zuul 1.x           | Servlet-based (blocking), integrated with Eureka | One thread per request → thread exhaustion under load  |
+| 2015–2018    | Netflix Zuul 2.x           | Non-blocking (Netty), async I/O                  | Netflix-internal, limited community adoption           |
+| 2018–present | **Spring Cloud Gateway**   | Reactive (Project Reactor + Netty), non-blocking | Requires understanding reactive programming            |
+| 2019–present | Envoy / Istio              | Service mesh sidecar proxy                       | Infrastructure-level, higher operational complexity    |
 
 **Why Spring Cloud Gateway replaced Zuul 1:** Zuul 1 uses a thread-per-request model (Servlet API). Under 1000 concurrent connections, each connection holds a thread. If downstream services are slow (2s response), 1000 threads are blocked simultaneously — the gateway's thread pool is exhausted and it stops accepting new connections. Spring Cloud Gateway uses Netty's event loop (non-blocking I/O) — a single thread can handle thousands of concurrent connections because it never blocks waiting for a downstream response.
 
@@ -825,14 +835,14 @@ API Gateway:
 
 **Consequence:** You cannot use `jakarta.servlet.Filter` (like `OncePerRequestFilter`) in the gateway. Instead, you use `org.springframework.cloud.gateway.filter.GlobalFilter` which operates on reactive types (`ServerWebExchange`, `Mono<Void>`).
 
-| Concept | Servlet (downstream services) | Reactive (gateway) |
-|---------|-----|-----|
-| Request type | `HttpServletRequest` | `ServerWebExchange` |
-| Filter base | `OncePerRequestFilter` | `GlobalFilter` |
-| Return type | `void` (blocking) | `Mono<Void>` (non-blocking) |
-| Thread model | One thread per request | Event loop (few threads, many requests) |
-| Container | Tomcat | Netty |
-| Request mutation | `request.setAttribute(...)` | `exchange.mutate().request(...)` (immutable) |
+| Concept          | Servlet (downstream services) | Reactive (gateway)                           |
+| ---------------- | ----------------------------- | -------------------------------------------- |
+| Request type     | `HttpServletRequest`          | `ServerWebExchange`                          |
+| Filter base      | `OncePerRequestFilter`        | `GlobalFilter`                               |
+| Return type      | `void` (blocking)             | `Mono<Void>` (non-blocking)                  |
+| Thread model     | One thread per request        | Event loop (few threads, many requests)      |
+| Container        | Tomcat                        | Netty                                        |
+| Request mutation | `request.setAttribute(...)`   | `exchange.mutate().request(...)` (immutable) |
 
 ### 4.5 Route Resolution — How a Request Finds Its Service
 
@@ -921,17 +931,18 @@ Resolution chain:
 
 Spring Cloud Gateway supports many predicate types beyond simple path matching:
 
-| Predicate | Example | Use Case |
-|-----------|---------|----------|
-| `Path` | `Path=/api/auth/**` | Most common — match URL path pattern |
-| `Method` | `Method=GET,POST` | Route only specific HTTP methods |
-| `Header` | `Header=X-Request-Id, \d+` | Route based on header presence/regex |
-| `Query` | `Query=version, v2` | Route based on query parameter |
-| `Host` | `Host=api.equitycart.com` | Route based on Host header (multi-tenant) |
-| `Weight` | `Weight=group1, 8` | Traffic splitting (canary releases) |
-| `After` / `Before` | `After=2026-07-01T00:00:00Z` | Time-based routing (feature launches) |
+| Predicate          | Example                      | Use Case                                  |
+| ------------------ | ---------------------------- | ----------------------------------------- |
+| `Path`             | `Path=/api/auth/**`          | Most common — match URL path pattern      |
+| `Method`           | `Method=GET,POST`            | Route only specific HTTP methods          |
+| `Header`           | `Header=X-Request-Id, \d+`   | Route based on header presence/regex      |
+| `Query`            | `Query=version, v2`          | Route based on query parameter            |
+| `Host`             | `Host=api.equitycart.com`    | Route based on Host header (multi-tenant) |
+| `Weight`           | `Weight=group1, 8`           | Traffic splitting (canary releases)       |
+| `After` / `Before` | `After=2026-07-01T00:00:00Z` | Time-based routing (feature launches)     |
 
 **EquityCart uses only `Path` predicates** — simplest and sufficient for path-based microservice routing. Other predicates become relevant for:
+
 - **Canary deployments** — route 10% of traffic to v2 (`Weight`)
 - **A/B testing** — route based on query parameter or header
 - **API versioning** — `Path=/v2/api/**` → new service, `Path=/v1/api/**` → legacy
@@ -976,10 +987,10 @@ Downstream Service
 
 **Two types of filters:**
 
-| Type | Scope | Registration | Example |
-|------|-------|--------------|---------|
-| GlobalFilter | ALL routes automatically | `@Component` on class | CorrelationIdGatewayFilter |
-| GatewayFilter | Specific route only | YAML `filters:` list or factory | `AddRequestHeader`, `StripPrefix` |
+| Type          | Scope                    | Registration                    | Example                           |
+| ------------- | ------------------------ | ------------------------------- | --------------------------------- |
+| GlobalFilter  | ALL routes automatically | `@Component` on class           | CorrelationIdGatewayFilter        |
+| GatewayFilter | Specific route only      | YAML `filters:` list or factory | `AddRequestHeader`, `StripPrefix` |
 
 ### 4.9 GlobalFilter Implementation — CorrelationIdGatewayFilter Deep Dive
 
@@ -1038,12 +1049,12 @@ CorrelationIdGatewayFilter.getOrder() → HIGHEST_PRECEDENCE
 
 These terms are often confused. Each has a different primary concern:
 
-| Component | Primary Concern | Aware of Service Registry? | Application Logic? |
-|-----------|----------------|---|---|
-| **Load Balancer** (e.g., AWS ALB) | Distribute traffic across instances | No (static target groups) | No |
-| **Reverse Proxy** (e.g., Nginx) | Forward requests, terminate TLS, cache | No (static upstreams config) | Minimal (rewrite rules) |
-| **API Gateway** (Spring Cloud Gateway) | Route + discover + cross-cut | **Yes** (queries Eureka at runtime) | **Yes** (custom filters, auth, transform) |
-| **Service Mesh** (Istio/Envoy sidecar) | Transparent inter-service communication | Yes (control plane) | Yes (policy-driven) |
+| Component                              | Primary Concern                         | Aware of Service Registry?          | Application Logic?                        |
+| -------------------------------------- | --------------------------------------- | ----------------------------------- | ----------------------------------------- |
+| **Load Balancer** (e.g., AWS ALB)      | Distribute traffic across instances     | No (static target groups)           | No                                        |
+| **Reverse Proxy** (e.g., Nginx)        | Forward requests, terminate TLS, cache  | No (static upstreams config)        | Minimal (rewrite rules)                   |
+| **API Gateway** (Spring Cloud Gateway) | Route + discover + cross-cut            | **Yes** (queries Eureka at runtime) | **Yes** (custom filters, auth, transform) |
+| **Service Mesh** (Istio/Envoy sidecar) | Transparent inter-service communication | Yes (control plane)                 | Yes (policy-driven)                       |
 
 **Spring Cloud Gateway combines** all three roles for EquityCart: it's the load balancer (round-robin via `lb://`), the reverse proxy (forwards requests transparently), and the application gateway (runs custom filters).
 
@@ -1051,13 +1062,13 @@ These terms are often confused. Each has a different primary concern:
 
 Nginx is a production-grade reverse proxy, but for microservices it lacks:
 
-| Need | Nginx | Spring Cloud Gateway |
-|------|-------|---------------------|
-| Service discovery integration | Manual upstream blocks, reload on change | `lb://` auto-discovers from Eureka in real-time |
-| Dynamic routing | Config file reload (SIGHUP) | Runtime route refresh via Config Server |
-| Custom Java filters | Lua scripting (limited) | Full Java/Kotlin with Spring ecosystem |
-| Circuit breaking | Passive health checks only | Can integrate Resilience4j per route |
-| JWT validation | Requires auth_request module + external service | Spring Security OAuth2 resource server in-process |
+| Need                          | Nginx                                           | Spring Cloud Gateway                              |
+| ----------------------------- | ----------------------------------------------- | ------------------------------------------------- |
+| Service discovery integration | Manual upstream blocks, reload on change        | `lb://` auto-discovers from Eureka in real-time   |
+| Dynamic routing               | Config file reload (SIGHUP)                     | Runtime route refresh via Config Server           |
+| Custom Java filters           | Lua scripting (limited)                         | Full Java/Kotlin with Spring ecosystem            |
+| Circuit breaking              | Passive health checks only                      | Can integrate Resilience4j per route              |
+| JWT validation                | Requires auth_request module + external service | Spring Security OAuth2 resource server in-process |
 
 **When to use Nginx instead:** In production, Nginx often sits IN FRONT of Spring Cloud Gateway as a TLS terminator and static content server. The architecture becomes: Client → Nginx (TLS, static files) → Spring Cloud Gateway (routing, auth, discovery) → Microservices.
 
@@ -1109,40 +1120,41 @@ API Gateway (Netty/WebFlux)
 ```
 
 **Why each service ALSO validates (not just the gateway):**
+
 - Direct port access (debug tools, internal services, misconfiguration) bypasses the gateway
 - Defense in depth: attacker compromising the gateway doesn't gain access to service data
 - Zero-trust: services never assume a request is authenticated just because it came from the gateway
 
 ### 4.14 Gateway Patterns Implemented in Phase 8
 
-| Pattern | Implementation | Key Detail |
-|---------|---------------|------------|
-| **Edge Authentication (OAuth2 RS256)** | `SecurityWebFilterChain` + `NimbusReactiveJwtDecoder` via JWKS | `@EnableWebFluxSecurity` — reactive stack only |
-| **Rate Limiting (Token Bucket)** | `RequestRateLimiter` default-filter + Redis Lua script | Per-userId (authenticated), per-IP (anonymous) |
-| **Security Headers** | `SecurityHeadersGlobalFilter` at `LOWEST_PRECEDENCE` | `chain.filter().then()` — sets headers after downstream response |
-| **Token Relay** | `ProxyExchange` forwards `Authorization: Bearer` unchanged | No `TokenRelay` config needed with standard proxy behavior |
+| Pattern                                | Implementation                                                 | Key Detail                                                       |
+| -------------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **Edge Authentication (OAuth2 RS256)** | `SecurityWebFilterChain` + `NimbusReactiveJwtDecoder` via JWKS | `@EnableWebFluxSecurity` — reactive stack only                   |
+| **Rate Limiting (Token Bucket)**       | `RequestRateLimiter` default-filter + Redis Lua script         | Per-userId (authenticated), per-IP (anonymous)                   |
+| **Security Headers**                   | `SecurityHeadersGlobalFilter` at `LOWEST_PRECEDENCE`           | `chain.filter().then()` — sets headers after downstream response |
+| **Token Relay**                        | `ProxyExchange` forwards `Authorization: Bearer` unchanged     | No `TokenRelay` config needed with standard proxy behavior       |
 
 ### 4.15 API Gateway Anti-Patterns
 
-| Anti-Pattern | Why It's Bad | EquityCart's Approach |
-|---|---|---|
-| **Business logic in the gateway** | Gateway becomes a monolith again; all teams coupled to one codebase | Gateway only routes and cross-cuts; zero business logic |
-| **Gateway as data aggregator** | Couples gateway to multiple service schemas; changes cascade | Each client calls one service per request (Phase 7) |
-| **Single gateway for all clients** | Mobile needs different data shapes than web; one gateway can't optimize both | Single gateway is fine at current scale; BFF pattern if mobile added |
-| **No health checks on routes** | Gateway routes to dead instances until Eureka deregisters them (90s default) | Eureka heartbeat + LoadBalancer skips unhealthy |
-| **Storing session state in gateway** | Gateway instances can't scale independently; sticky sessions needed | Stateless — JWT token carries identity |
+| Anti-Pattern                         | Why It's Bad                                                                 | EquityCart's Approach                                                |
+| ------------------------------------ | ---------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **Business logic in the gateway**    | Gateway becomes a monolith again; all teams coupled to one codebase          | Gateway only routes and cross-cuts; zero business logic              |
+| **Gateway as data aggregator**       | Couples gateway to multiple service schemas; changes cascade                 | Each client calls one service per request (Phase 7)                  |
+| **Single gateway for all clients**   | Mobile needs different data shapes than web; one gateway can't optimize both | Single gateway is fine at current scale; BFF pattern if mobile added |
+| **No health checks on routes**       | Gateway routes to dead instances until Eureka deregisters them (90s default) | Eureka heartbeat + LoadBalancer skips unhealthy                      |
+| **Storing session state in gateway** | Gateway instances can't scale independently; sticky sessions needed          | Stateless — JWT token carries identity                               |
 
 ### 4.16 Comparison: API Gateway Implementations
 
-| Feature | Spring Cloud Gateway | Kong | AWS API Gateway | Nginx + Lua |
-|---------|---------------------|------|----------------|-------------|
-| Language | Java (reactive) | Lua + Go | Managed service | C + Lua |
-| Service discovery | Eureka, Consul, K8s | DNS, Consul | AWS Cloud Map | Manual upstream |
-| Config model | Java code + YAML | Admin API + DB | AWS Console / CloudFormation | nginx.conf |
-| Custom filters | Java GlobalFilter | Lua plugins | Lambda authorizers | Lua scripts |
-| Performance | High (Netty event loop) | Very high (Nginx core) | Managed (auto-scale) | Very high |
-| Deployment | Self-hosted (your JVM) | Self-hosted or Cloud | Fully managed | Self-hosted |
-| Best for | Spring ecosystem, Eureka | Multi-language, plugin marketplace | AWS-native, serverless | Raw performance, simple routing |
+| Feature           | Spring Cloud Gateway     | Kong                               | AWS API Gateway              | Nginx + Lua                     |
+| ----------------- | ------------------------ | ---------------------------------- | ---------------------------- | ------------------------------- |
+| Language          | Java (reactive)          | Lua + Go                           | Managed service              | C + Lua                         |
+| Service discovery | Eureka, Consul, K8s      | DNS, Consul                        | AWS Cloud Map                | Manual upstream                 |
+| Config model      | Java code + YAML         | Admin API + DB                     | AWS Console / CloudFormation | nginx.conf                      |
+| Custom filters    | Java GlobalFilter        | Lua plugins                        | Lambda authorizers           | Lua scripts                     |
+| Performance       | High (Netty event loop)  | Very high (Nginx core)             | Managed (auto-scale)         | Very high                       |
+| Deployment        | Self-hosted (your JVM)   | Self-hosted or Cloud               | Fully managed                | Self-hosted                     |
+| Best for          | Spring ecosystem, Eureka | Multi-language, plugin marketplace | AWS-native, serverless       | Raw performance, simple routing |
 
 **Why Spring Cloud Gateway for EquityCart:** The entire backend is Spring Boot + Eureka. The gateway integrates natively — shares the same config server, same service registry, same security libraries. No polyglot overhead.
 
@@ -1166,12 +1178,12 @@ A: You CAN, but you duplicate JWT validation logic in 7 services (same library, 
 
 The API Gateway sits at the single entry point for all external traffic. Centralizing security enforcement here gives you:
 
-| Concern | Without Gateway Centralization | With Gateway Centralization |
-|---------|-------------------------------|----------------------------|
-| JWT validation | Each service validates independently | Gateway rejects bad tokens before network hop |
-| Rate limiting | Each service implements its own limits | One Redis-backed limit covers all 7 services |
-| Security headers | Each service adds headers | One GlobalFilter adds headers to all responses |
-| Key rotation | Each service polls JWKS independently | All gateway validations share one NimbusReactiveJwtDecoder instance |
+| Concern          | Without Gateway Centralization         | With Gateway Centralization                                         |
+| ---------------- | -------------------------------------- | ------------------------------------------------------------------- |
+| JWT validation   | Each service validates independently   | Gateway rejects bad tokens before network hop                       |
+| Rate limiting    | Each service implements its own limits | One Redis-backed limit covers all 7 services                        |
+| Security headers | Each service adds headers              | One GlobalFilter adds headers to all responses                      |
+| Key rotation     | Each service polls JWKS independently  | All gateway validations share one NimbusReactiveJwtDecoder instance |
 
 **The dual-validation principle:** Gateway validates AND each service validates independently. This is "defense in depth" — if an attacker bypasses the gateway (direct port access, network misconfiguration), services still reject unauthorized requests. Services never trust the gateway's opinion of authentication.
 
@@ -1235,6 +1247,7 @@ The `ProxyExchange` in Spring Cloud Gateway reads the original `ServerHttpReques
 ```
 
 **KeyResolver pattern — key determines the bucket:**
+
 - Authenticated request → `ReactiveSecurityContextHolder.getContext().map(ctx -> ctx.getAuthentication().getPrincipal().toString())` → userId string → one bucket per user (all devices share)
 - Anonymous request → `exchange.getRequest().getRemoteAddress().getAddress().getHostAddress()` → IP string → one bucket per IP (login brute-force protection)
 - The `.defaultIfEmpty(ip)` only fires when the SecurityContext `Mono` is empty (unauthenticated path)
@@ -1272,6 +1285,7 @@ Request lifecycle in the reactive gateway:
 ```
 
 **`chain.filter(exchange).then(Mono.fromRunnable())` explained:**
+
 - `chain.filter(exchange)` = run everything downstream (auth, rate limit, proxy, receive response) → returns `Mono<Void>`
 - `.then(...)` = subscribe to a second `Mono` only AFTER the first completes
 - `Mono.fromRunnable(lambda)` = wrap a synchronous side-effect in a `Mono<Void>`
@@ -1349,15 +1363,16 @@ The Circuit Breaker pattern is borrowed from electrical engineering: a fuse that
 
 **Three states:**
 
-| State | Behavior | Analogy |
-|-------|----------|---------|
-| CLOSED | All calls pass through normally. Failures are counted in a sliding window. | Normal wiring — electricity flows |
-| OPEN | All calls are rejected immediately (CallNotPermittedException). No network call made. Timer running. | Tripped fuse — electricity blocked |
-| HALF-OPEN | A limited number of trial calls are permitted. If they succeed → CLOSED. If they fail → OPEN again. | Electrician testing if the fault is fixed |
+| State     | Behavior                                                                                             | Analogy                                   |
+| --------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| CLOSED    | All calls pass through normally. Failures are counted in a sliding window.                           | Normal wiring — electricity flows         |
+| OPEN      | All calls are rejected immediately (CallNotPermittedException). No network call made. Timer running. | Tripped fuse — electricity blocked        |
+| HALF-OPEN | A limited number of trial calls are permitted. If they succeed → CLOSED. If they fail → OPEN again.  | Electrician testing if the fault is fixed |
 
 ### 5.3 Resilience4j — Lightweight Fault Tolerance Library
 
 Resilience4j (inspired by Netflix Hystrix, which was deprecated in 2018) provides:
+
 - **Circuit Breaker** — fail-fast when downstream is unhealthy
 - **Retry** — automatic retry with configurable delay
 - **Rate Limiter** — throttle outgoing calls to respect API quotas
@@ -1404,23 +1419,23 @@ resilience4j:
   retry:
     instances:
       alphaVantage:
-        max-attempts: 3        # Try up to 3 times total (1 initial + 2 retries)
-        wait-duration: 2s      # Wait 2 seconds between retry attempts
+        max-attempts: 3 # Try up to 3 times total (1 initial + 2 retries)
+        wait-duration: 2s # Wait 2 seconds between retry attempts
 
   circuitbreaker:
     instances:
       alphaVantage:
-        failure-rate-threshold: 50                        # Open when ≥50% of calls in window fail
-        wait-duration-in-open-state: 30s                  # Stay OPEN for 30s before trying HALF-OPEN
-        permitted-number-of-calls-in-half-open-state: 3   # Allow 3 trial calls in HALF-OPEN
-        sliding-window-size: 10                           # Track the last 10 calls for failure rate
+        failure-rate-threshold: 50 # Open when ≥50% of calls in window fail
+        wait-duration-in-open-state: 30s # Stay OPEN for 30s before trying HALF-OPEN
+        permitted-number-of-calls-in-half-open-state: 3 # Allow 3 trial calls in HALF-OPEN
+        sliding-window-size: 10 # Track the last 10 calls for failure rate
 
   rate-limiter:
     instances:
       alphaVantage:
-        limit-for-period: 5        # Max 5 calls per refresh period
-        limit-refresh-period: 60s  # Period resets every 60 seconds
-        timeout-duration: 0s       # Don't wait — reject immediately if limit exceeded
+        limit-for-period: 5 # Max 5 calls per refresh period
+        limit-refresh-period: 60s # Period resets every 60 seconds
+        timeout-duration: 0s # Don't wait — reject immediately if limit exceeded
 ```
 
 ### 5.6 Detailed Behavior Walkthrough
@@ -1534,16 +1549,17 @@ private Mono<StockQuote> getStockQuoteFallback(String symbol, Throwable t) {
 ```
 
 The fallback is invoked when:
+
 - Circuit Breaker is OPEN (CallNotPermittedException)
 - All retry attempts are exhausted
 - Rate Limiter rejects the call (RequestNotPermitted)
 
 **Design choice: error propagation, not fake data.**
 
-| Strategy | When appropriate |
-|----------|-----------------|
-| Return cached/stale data | When approximate data is better than no data (dashboards, analytics) |
-| Return default value | When a safe default exists (e.g., default config values) |
+| Strategy                  | When appropriate                                                       |
+| ------------------------- | ---------------------------------------------------------------------- |
+| Return cached/stale data  | When approximate data is better than no data (dashboards, analytics)   |
+| Return default value      | When a safe default exists (e.g., default config values)               |
 | Return error (our choice) | When incorrect data is worse than no data (financial systems, trading) |
 
 For stock prices: showing an outdated price could lead to bad trade decisions. Better to tell the user "market data unavailable" than to show $150 when the price dropped to $120.
@@ -1560,10 +1576,10 @@ WebClient.builder()
     .build();
 ```
 
-| Timeout | What it bounds | Default without config |
-|---------|---------------|----------------------|
-| CONNECT_TIMEOUT_MILLIS (5s) | TCP SYN → SYN-ACK (establishing connection) | 30s (Netty default) |
-| responseTimeout (10s) | Time from request sent → first response byte | Infinite (no timeout!) |
+| Timeout                     | What it bounds                               | Default without config |
+| --------------------------- | -------------------------------------------- | ---------------------- |
+| CONNECT_TIMEOUT_MILLIS (5s) | TCP SYN → SYN-ACK (establishing connection)  | 30s (Netty default)    |
+| responseTimeout (10s)       | Time from request sent → first response byte | Infinite (no timeout!) |
 
 **Why these values matter for Resilience4j:**
 
@@ -1584,6 +1600,7 @@ Resilience4j defines a default decoration order (highest → lowest priority):
 ```
 
 This order means:
+
 - **Retry wraps CircuitBreaker:** A retry re-checks the circuit breaker state each time. If the CB opened during retry wait → next retry fails immediately (no pointless call).
 - **CircuitBreaker wraps RateLimiter:** A rate-limit rejection (RequestNotPermitted) is NOT counted as a circuit breaker failure — it's a local throttle, not a downstream problem.
 
@@ -1591,14 +1608,14 @@ You can customize this order via `resilience4j.circuitbreaker.circuitBreakerAspe
 
 ### 5.11 When to Use Circuit Breaker vs Other Patterns
 
-| Scenario | Pattern |
-|----------|---------|
-| External API might be down | Circuit Breaker (fail-fast, protect threads) |
-| Transient network blip | Retry (brief wait, try again) |
-| API has call quota | Rate Limiter (enforce quota locally) |
-| Prevent thread exhaustion | Bulkhead (limit concurrent calls) |
-| Need all four | Stack them (as in EquityCart's AlphaVantageClient) |
-| Calling your own database | Typically none — if your DB is down, you're down anyway |
+| Scenario                         | Pattern                                                       |
+| -------------------------------- | ------------------------------------------------------------- |
+| External API might be down       | Circuit Breaker (fail-fast, protect threads)                  |
+| Transient network blip           | Retry (brief wait, try again)                                 |
+| API has call quota               | Rate Limiter (enforce quota locally)                          |
+| Prevent thread exhaustion        | Bulkhead (limit concurrent calls)                             |
+| Need all four                    | Stack them (as in EquityCart's AlphaVantageClient)            |
+| Calling your own database        | Typically none — if your DB is down, you're down anyway       |
 | Calling another internal service | Circuit Breaker + Retry (network boundaries = failure points) |
 
 ### 5.12 EquityCart Implementation Files
@@ -1636,6 +1653,7 @@ Key philosophical difference: Hystrix used thread-pool isolation (each downstrea
 **Solution:** Eureka maintains an in-memory registry. Services self-register; clients query it.
 
 **Registration lifecycle:**
+
 ```
 Service startup → POST /eureka/apps/{appName} (host, port, status)
 Service running → Heartbeat every 30s → refreshes 90s TTL lease
@@ -1646,17 +1664,19 @@ Other services  → Fetch full registry every 30s → cache locally
 **Self-preservation mode:** In production, leave enabled (prevents eviction during network partitions). In dev, disable (`enable-self-preservation: false`) so failures are immediately visible.
 
 **Discovery Server config:**
+
 ```yaml
 eureka:
   client:
-    register-with-eureka: false  # This IS the server
-    fetch-registry: false        # Server doesn't need its own registry
+    register-with-eureka: false # This IS the server
+    fetch-registry: false # Server doesn't need its own registry
   server:
     enable-self-preservation: false
     eviction-interval-timer-in-ms: 10000
 ```
 
 **Client service requirements:**
+
 1. `spring-cloud-starter-netflix-eureka-client` in build.gradle
 2. `@EnableDiscoveryClient` on main class
 3. `spring.application.name` set in application.yml
@@ -1671,6 +1691,7 @@ eureka:
 **Solution:** Config Server reads from Git (single source of truth), serves merged configs to clients.
 
 **Git repository structure:**
+
 ```
 equitycart-config/
 ├── application.yml         # Shared: JPA, Kafka, logging (all services)
@@ -1681,21 +1702,24 @@ equitycart-config/
 ```
 
 **Merge order (highest priority last wins):**
+
 ```
 Spring defaults ← application.yml (base) ← service.yml (overrides) ← local application.yml
 ```
 
 **Client bootstrap:**
+
 ```yaml
 # local application.yml (MUST be in application.yml, NOT bootstrap.yml in Spring Cloud 2025.0.0)
 spring:
   application:
-    name: api-gateway         # ← Config Server uses this to find api-gateway.yml
+    name: api-gateway # ← Config Server uses this to find api-gateway.yml
   config:
-    import: configserver:http://localhost:8888   # ← Fetch from Config Server
+    import: configserver:http://localhost:8888 # ← Fetch from Config Server
 ```
 
 **Why separate config repo?**
+
 - Ops can change environment configs without rebuilding/redeploying code
 - Git history provides audit trail for all config changes
 - Config rollback = Git revert (no DB migration needed)
@@ -1710,18 +1734,20 @@ spring:
 **Solution:** Single gateway entry point handles routing, cross-cutting concerns, service discovery.
 
 **Routing via Eureka (lb:// URIs):**
+
 ```yaml
 spring:
   cloud:
     gateway:
       routes:
         - id: user-service
-          uri: lb://user-service          # Eureka resolves this dynamically
+          uri: lb://user-service # Eureka resolves this dynamically
           predicates:
             - Path=/api/auth/**,/api/users/**
 ```
 
 **How lb:// works:**
+
 ```
 Client: POST /api/auth/login
   → Gateway: matches Path=/api/auth/**
@@ -1732,12 +1758,14 @@ Client: POST /api/auth/login
 ```
 
 **Gateway as cross-cutting concern host:**
+
 - Authentication (verify JWT before forwarding) — Phase 8
 - Rate limiting (per client/IP) — Phase 8
 - Correlation ID injection (add X-Correlation-Id header) — Phase 7 Step 11
 - Request/response logging — Phase 9
 
 **Port allocation (EquityCart Phase 7):**
+
 ```
 8080 → API Gateway (single entry point for clients)
 8081 → user-service (future)
@@ -1756,11 +1784,13 @@ Client: POST /api/auth/login
 ### Database-per-Service vs Single Database + Multiple Schemas
 
 **Shared database (single DB, multiple schemas):**
+
 - Pros: ACID transactions across schemas, single backup, lower infra cost
 - Cons: Schema changes affect all services, shared connection pool, tight coupling
 - Example: Real-world `momentum` app — 25+ schemas in one PostgreSQL database
 
 **Database-per-service (recommended for true microservices):**
+
 - Pros: Independent deployments, independent scaling, technology choice per service
 - Cons: No cross-service ACID, requires Saga pattern for distributed transactions, more infra
 
@@ -1777,6 +1807,7 @@ Client: POST /api/auth/login
 The naive decomposition strategy: stop everything, rewrite all services from scratch, switch over on day one. This is the "Big Bang" rewrite.
 
 Why it fails:
+
 - Rewrites take months/years — business cannot freeze feature development during that time
 - New system complexity is underestimated (edge cases only appear in production)
 - No rollback path if the new system has bugs on day one
@@ -1925,22 +1956,20 @@ The gateway is the Strangler Facade — the single entry point that routes reque
 
 For read-heavy domains: dual-read (both systems serve reads) until confident, then cut over. For write-heavy domains: the extracted service becomes the authoritative write path via gateway routing. The monolith database for that domain stops receiving writes. After verification, the monolith tables are deprecated. In EquityCart: equitycart_user is the authoritative source once user-service is registered with Eureka and gateway routes to it.
 
-
-
 ---
 
 ### 7.10 Phase-Based Extraction: The Six-Service Comparison
 
 Not all services in a Strangler Fig decomposition can be extracted simultaneously — the order depends on inter-service dependencies. Annotation complexity is a direct proxy for coupling complexity:
 
-| Service | Annotations beyond minimum | Reason |
-|---|---|---|
-| User-service | `@EnableDiscoveryClient` only | All beans in `com.equitycart.user.*`, no cross-module deps |
-| Market-data-service | `@EnableDiscoveryClient` only, removed `commons` dep | Transitive JPA blast — `commons` `api` scope leaked JPA to a no-DB service |
-| Order-service | `@EnableDiscoveryClient`, `@EnableJpaRepositories`, `@EntityScan`, `@EnableScheduling` | Cross-module `ProductRepository` + cross-module entities + OutboxPoller |
-| Portfolio-service | `@ComponentScan` + `excludeFilters`, `@EnableJpaRepositories`, `@EntityScan`, `@EnableMongoRepositories`, `@EnableDiscoveryClient`, `@EnableScheduling` | Full service layer from 5 modules needed |
-| Ledger-service | `@EnableDiscoveryClient`, `@EntityScan` | `BaseEntity` in commons is sole out-of-scope class |
-| Notification-service | `@EnableDiscoveryClient`, `@EntityScan` | Same as ledger — `NotificationLog` extends `BaseEntity` |
+| Service              | Annotations beyond minimum                                                                                                                              | Reason                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| User-service         | `@EnableDiscoveryClient` only                                                                                                                           | All beans in `com.equitycart.user.*`, no cross-module deps                 |
+| Market-data-service  | `@EnableDiscoveryClient` only, removed `commons` dep                                                                                                    | Transitive JPA blast — `commons` `api` scope leaked JPA to a no-DB service |
+| Order-service        | `@EnableDiscoveryClient`, `@EnableJpaRepositories`, `@EntityScan`, `@EnableScheduling`                                                                  | Cross-module `ProductRepository` + cross-module entities + OutboxPoller    |
+| Portfolio-service    | `@ComponentScan` + `excludeFilters`, `@EnableJpaRepositories`, `@EntityScan`, `@EnableMongoRepositories`, `@EnableDiscoveryClient`, `@EnableScheduling` | Full service layer from 5 modules needed                                   |
+| Ledger-service       | `@EnableDiscoveryClient`, `@EntityScan`                                                                                                                 | `BaseEntity` in commons is sole out-of-scope class                         |
+| Notification-service | `@EnableDiscoveryClient`, `@EntityScan`                                                                                                                 | Same as ledger — `NotificationLog` extends `BaseEntity`                    |
 
 Portfolio-service needs the most annotations because it has the most cross-module dependencies — every annotation signals one more inter-service coupling that will be eliminated in Phase 10.
 
@@ -1949,6 +1978,7 @@ Portfolio-service needs the most annotations because it has the most cross-modul
 A service acting as a shared library **cannot** be extracted as a standalone microservice until all its consumers have migrated to HTTP.
 
 In EquityCart, `product-service` is consumed as a library by two services:
+
 - `order-service`: `implementation project(':product-service')` → `OrderServiceImpl` injects `ProductRepository` directly for pessimistic stock locking
 - `portfolio-service`: `@ComponentScan` covers `com.equitycart.product.*` → `ProductServiceImpl` is loaded as a live Spring bean
 
@@ -1967,6 +1997,7 @@ Removing `project(':product-service')` from either build without a replacement c
 In a monolith, a single @Transactional method calling multiple repositories is atomic: all changes commit or none do. In microservices, each service has its own database and connection pool. There is no shared transaction coordinator.
 
 EquityCart example: OrderServiceImpl.placeOrder() calls:
+
 1. productFeignClient.deductStock() - product-service commits a stock decrement to its database
 2. orderRepository.save(order) - order-service commits the order to its database
 
@@ -1988,10 +2019,11 @@ Not used in modern microservice architectures.
 
 A Saga is a sequence of local transactions, each with a compensating transaction that undoes it if a later step fails.
 
-  Forward:    deductStock() -> saveOrder() -> clearCart()
-  Compensate: restoreStock() <- [triggered if saveOrder fails]
+Forward: deductStock() -> saveOrder() -> clearCart()
+Compensate: restoreStock() <- [triggered if saveOrder fails]
 
 Two variants:
+
 - **Choreography:** Each service publishes an event; the next service listens and reacts. No central coordinator. Harder to trace.
 - **Orchestration:** A central orchestrator drives the sequence and compensations explicitly. EquityCart SellToSpendSagaOrchestrator follows this pattern.
 
@@ -2002,6 +2034,7 @@ Order placement (deductStock -> saveOrder) is a Phase 10 known limitation - full
 ### ACID vs BASE
 
 Microservices trade ACID for BASE (Basically Available, Soft-state, Eventually consistent):
+
 - Operations are not globally atomic - they become consistent eventually via compensations and retries
 - Designing for compensation from the start is mandatory; retrofitting is expensive
 
@@ -2012,6 +2045,7 @@ Microservices trade ACID for BASE (Basically Available, Soft-state, Eventually c
 ### 7.1 Two-File Split (Infrastructure vs Application)
 
 Separate infrastructure (databases, brokers) from application services:
+
 - `docker-pets.yml` — PostgreSQL, Kafka, Redis, MongoDB, Debezium, MailHog
 - `docker-compose-services.yml` — Spring Boot microservices
 
@@ -2029,6 +2063,7 @@ Infrastructure (must be READY: accepting connections)
 ```
 
 Readiness scripts poll HTTP endpoints before proceeding:
+
 ```bash
 until curl -s http://localhost:8761/actuator/health | grep -q '"status":"UP"'; do
   sleep 5
@@ -2038,6 +2073,7 @@ done
 ### 7.3 Config Externalization Pattern
 
 Same Docker image works in ANY environment via environment variables:
+
 ```yaml
 environment:
   - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/equitycart_order
@@ -2049,6 +2085,7 @@ The JAR is immutable — behavior changes come from environment, not code change
 ### 7.4 Service Mesh (preview — current state)
 
 Current inter-service communication in EquityCart:
+
 - **Synchronous:** OpenFeign (HTTP) via Eureka service discovery (lb:// URIs)
 - **Asynchronous:** Kafka events (order-delivered, portfolio-notification, sell-to-spend-saga)
 - **Observability:** Correlation ID propagated via Gateway GlobalFilter → Feign RequestInterceptor
@@ -2061,14 +2098,14 @@ Future (Phase 9-10): Istio service mesh would replace Eureka/Feign with sidecar 
 
 ### GoF Observer vs Kafka Observer
 
-| GoF Observer (in-memory) | Kafka Observer (distributed) |
-|---|---|
-| Subject maintains `List<Observer>` | Producer has no knowledge of consumers |
-| `subject.notifyAll()` — synchronous, blocking | `kafkaTemplate.send()` — async, non-blocking |
-| Observer failure blocks subject | Consumer failure doesn't affect producer |
-| Same JVM, same thread | Cross-process, cross-machine |
-| No persistence | Events retained, replayable |
-| Adding observer = code change | Adding consumer = new consumer group (zero code change) |
+| GoF Observer (in-memory)                      | Kafka Observer (distributed)                            |
+| --------------------------------------------- | ------------------------------------------------------- |
+| Subject maintains `List<Observer>`            | Producer has no knowledge of consumers                  |
+| `subject.notifyAll()` — synchronous, blocking | `kafkaTemplate.send()` — async, non-blocking            |
+| Observer failure blocks subject               | Consumer failure doesn't affect producer                |
+| Same JVM, same thread                         | Cross-process, cross-machine                            |
+| No persistence                                | Events retained, replayable                             |
+| Adding observer = code change                 | Adding consumer = new consumer group (zero code change) |
 
 ### EquityCart Implementation
 
@@ -2095,10 +2132,11 @@ NotificationChannelStrategy (interface)
 ```yaml
 equitycart:
   notification:
-    channel: LOG   # Change to EMAIL or WEBHOOK without code modification
+    channel: LOG # Change to EMAIL or WEBHOOK without code modification
 ```
 
 The dispatcher uses Spring's `Map<String, NotificationChannelStrategy>` auto-injection (bean name → bean instance) to resolve the active channel at runtime. New channels can be added by implementing the interface and annotating with `@Component("newChannel")` — zero changes to existing code.
+
 - The Outbox Pattern (already implemented for order events) ensures event delivery is durable even if the broker is temporarily down
 
 ---
@@ -2185,10 +2223,10 @@ This is where RequestContextHolder gets populated:
   // Spring source (simplified):
   RequestAttributes previousAttributes = RequestContextHolder.getRequestAttributes();
   ServletRequestAttributes requestAttributes = new ServletRequestAttributes(request, response);
-  
+
   // ★ THIS IS THE LINE THAT STORES THE REQUEST IN ThreadLocal ★
   RequestContextHolder.setRequestAttributes(requestAttributes, this.threadContextInheritable);
-  
+
   try {
       doService(request, response);  // → DispatcherServlet.doService()
   } finally {
@@ -2204,7 +2242,7 @@ Class: org.springframework.web.context.request.RequestContextHolder
   // The actual ThreadLocal fields:
   private static final ThreadLocal<RequestAttributes> requestAttributesHolder =
       new NamedThreadLocal<>("Request attributes");
-  
+
   private static final ThreadLocal<RequestAttributes> inheritableRequestAttributesHolder =
       new NamedInheritableThreadLocal<>("Request context");
 
@@ -2238,7 +2276,7 @@ Method: createOrder(...)
 
   // Inside your controller code:
   ProductResponse product = productFeignClient.getProduct(productId);
-  
+
   // This triggers Feign's internal pipeline...
 
 STEP 7: Feign builds the outgoing request
@@ -2254,14 +2292,14 @@ Method: executeAndDecode(RequestTemplate template, Options options)
 STEP 8: FeignAuthorizationInterceptor.apply() — YOUR CODE
 ─────────────────────────────────────────
   // Still on Thread-42! Same thread that received the original request.
-  
-  ServletRequestAttributes attrs = 
+
+  ServletRequestAttributes attrs =
       (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
   // ↑ reads Thread-42's ThreadLocal → finds the original HttpServletRequest
-  
+
   String header = attrs.getRequest().getHeader("Authorization");
   // ↑ extracts "Bearer eyJhbGciOiJIUzI1NiJ9..." from original request
-  
+
   template.header("Authorization", header);
   // ↑ copies it to the outgoing Feign request
 
@@ -2441,15 +2479,15 @@ internal service via Feign, it would hit the same 401 problem as Kafka.
 
 ### RequestContextHolder vs MDC ThreadContext — Comparison
 
-| Aspect | RequestContextHolder | MDC / ThreadContext |
-|--------|---------------------|---------------------|
-| **What it stores** | Full HttpServletRequest object | Key-value string pairs (correlationId) |
-| **Managed by** | FrameworkServlet (set) → Spring MVC lifecycle | MdcCorrelationFilter (set) → your filter code |
-| **ThreadLocal type** | NamedThreadLocal (non-inheritable default) | InheritableThreadLocal (Log4j2 default) |
-| **Available in child threads** | NO (unless inheritable mode enabled) | YES (Log4j2 uses InheritableThreadLocal) |
-| **Available in Kafka thread** | NO (no HTTP request) | YES if Kafka message carries correlationId and filter re-populates MDC |
-| **Cleanup** | FrameworkServlet finally block (automatic) | MdcCorrelationFilter finally block (manual) |
-| **Used by** | FeignAuthorizationInterceptor | FeignCorrelationInterceptor |
+| Aspect                         | RequestContextHolder                          | MDC / ThreadContext                                                    |
+| ------------------------------ | --------------------------------------------- | ---------------------------------------------------------------------- |
+| **What it stores**             | Full HttpServletRequest object                | Key-value string pairs (correlationId)                                 |
+| **Managed by**                 | FrameworkServlet (set) → Spring MVC lifecycle | MdcCorrelationFilter (set) → your filter code                          |
+| **ThreadLocal type**           | NamedThreadLocal (non-inheritable default)    | InheritableThreadLocal (Log4j2 default)                                |
+| **Available in child threads** | NO (unless inheritable mode enabled)          | YES (Log4j2 uses InheritableThreadLocal)                               |
+| **Available in Kafka thread**  | NO (no HTTP request)                          | YES if Kafka message carries correlationId and filter re-populates MDC |
+| **Cleanup**                    | FrameworkServlet finally block (automatic)    | MdcCorrelationFilter finally block (manual)                            |
+| **Used by**                    | FeignAuthorizationInterceptor                 | FeignCorrelationInterceptor                                            |
 
 Key insight: **Correlation ID survives across threads** (because MDC uses InheritableThreadLocal), but **Authorization header does NOT** (because RequestContextHolder uses plain ThreadLocal). This is by design — security context should not leak to unrelated threads.
 
@@ -2457,15 +2495,15 @@ Key insight: **Correlation ID survives across threads** (because MDC uses Inheri
 
 ### Token Propagation vs Token Exchange
 
-| Aspect | Token Propagation (our approach) | Token Exchange (OAuth2 standard) |
-|--------|----------------------------------|----------------------------------|
-| **Mechanism** | Copy original token to outgoing request | Call IdP to exchange token for new scoped token |
-| **Network calls** | 0 extra (just header copy) | 1 extra per hop (to IdP token endpoint) |
-| **Downstream sees** | Full user identity + ALL roles | Reduced-scope token (e.g., only "read:products") |
-| **Security** | If product-service is compromised, attacker has full user token | If compromised, attacker has limited-scope token |
-| **Complexity** | Simple (3 lines of code) | Requires IdP support + token exchange grant type |
-| **When to use** | Internal trusted network, same trust boundary | Cross-organizational, microservices with different trust levels |
-| **Standard** | Ad-hoc pattern (widely used) | RFC 8693 (OAuth 2.0 Token Exchange) |
+| Aspect              | Token Propagation (our approach)                                | Token Exchange (OAuth2 standard)                                |
+| ------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
+| **Mechanism**       | Copy original token to outgoing request                         | Call IdP to exchange token for new scoped token                 |
+| **Network calls**   | 0 extra (just header copy)                                      | 1 extra per hop (to IdP token endpoint)                         |
+| **Downstream sees** | Full user identity + ALL roles                                  | Reduced-scope token (e.g., only "read:products")                |
+| **Security**        | If product-service is compromised, attacker has full user token | If compromised, attacker has limited-scope token                |
+| **Complexity**      | Simple (3 lines of code)                                        | Requires IdP support + token exchange grant type                |
+| **When to use**     | Internal trusted network, same trust boundary                   | Cross-organizational, microservices with different trust levels |
+| **Standard**        | Ad-hoc pattern (widely used)                                    | RFC 8693 (OAuth 2.0 Token Exchange)                             |
 
 **Our current approach (Propagation)** is correct for Phase 8 Steps 1-4 because all services are in the same trust boundary and owned by the same team. Phase 8 Step 6 (Keycloak) enables Token Exchange as an option for production.
 
@@ -2498,6 +2536,7 @@ Key insight: **Correlation ID survives across threads** (because MDC uses Inheri
 ### Problem Statement
 
 In a microservice architecture, certain concerns apply to ALL services identically:
+
 - JWT authentication filter
 - Correlation ID propagation
 - Global exception handling
@@ -2636,21 +2675,22 @@ Key insight for JJWT:
 
 After @ComponentScan fix, here's what each service gets from commons:
 
-| Commons Bean | Mechanism | Loads? | Why/Why Not |
-|-------------|-----------|--------|-------------|
-| SecurityAutoConfig | @ComponentScan + @ConditionalOnProperty | ✅ (if property=true) | Scanned AND property satisfied |
-| JwtAuthenticationFilter | @ComponentScan | ✅ | @Component in scanned package |
-| JwtTokenValidatorImpl | @ComponentScan | ✅ | @Component in scanned package |
-| GlobalExceptionHandler | @ComponentScan | ✅ | @RestControllerAdvice in scanned package |
-| MdcCorrelationFilter | @ComponentScan | ✅ | @Component in scanned package |
-| FeignCorrelationInterceptor | @ComponentScan | ✅ | @Component in scanned package |
-| FeignAuthorizationInterceptor | @ComponentScan | ✅ | @Component in scanned package |
-| KafkaConsumerConfig | @ComponentScan | ✅ | @Configuration in scanned package |
-| BaseEntity | @EntityScan | ✅ | @MappedSuperclass, separate mechanism |
-| ProductDTO, OrderEvent | None needed | ✅ | Plain POJOs — no Spring scanning required |
-| ProductFeignClient | @EnableFeignClients | ✅ (if declared) | @FeignClient interface, separate mechanism |
+| Commons Bean                  | Mechanism                               | Loads?                | Why/Why Not                                |
+| ----------------------------- | --------------------------------------- | --------------------- | ------------------------------------------ |
+| SecurityAutoConfig            | @ComponentScan + @ConditionalOnProperty | ✅ (if property=true) | Scanned AND property satisfied             |
+| JwtAuthenticationFilter       | @ComponentScan                          | ✅                    | @Component in scanned package              |
+| JwtTokenValidatorImpl         | @ComponentScan                          | ✅                    | @Component in scanned package              |
+| GlobalExceptionHandler        | @ComponentScan                          | ✅                    | @RestControllerAdvice in scanned package   |
+| MdcCorrelationFilter          | @ComponentScan                          | ✅                    | @Component in scanned package              |
+| FeignCorrelationInterceptor   | @ComponentScan                          | ✅                    | @Component in scanned package              |
+| FeignAuthorizationInterceptor | @ComponentScan                          | ✅                    | @Component in scanned package              |
+| KafkaConsumerConfig           | @ComponentScan                          | ✅                    | @Configuration in scanned package          |
+| BaseEntity                    | @EntityScan                             | ✅                    | @MappedSuperclass, separate mechanism      |
+| ProductDTO, OrderEvent        | None needed                             | ✅                    | Plain POJOs — no Spring scanning required  |
+| ProductFeignClient            | @EnableFeignClients                     | ✅ (if declared)      | @FeignClient interface, separate mechanism |
 
 **Three independent discovery mechanisms, each with its own scope:**
+
 1. @ComponentScan → Spring beans (DI container)
 2. @EntityScan → JPA entities (Hibernate metamodel)
 3. @EnableFeignClients → Feign client interfaces (proxy generation)
@@ -2694,6 +2734,7 @@ This is why Phase 8 Step 2 was a critical fix — these beans were NEVER loading
 ### Problem Statement
 
 In a microservices architecture, some inter-service calls originate from non-HTTP contexts:
+
 - **Kafka consumers** processing domain events (order-delivered → reward calculation)
 - **@Scheduled tasks** (periodic data sync, cleanup jobs)
 - **@Async threads** (fire-and-forget operations)
@@ -2736,11 +2777,11 @@ These threads have no incoming HTTP request, so `RequestContextHolder.getRequest
 
 ### Comparison: Token Propagation vs Token Generation vs Client Credentials
 
-| Approach | When to Use | Pros | Cons |
-|----------|------------|------|------|
-| **Propagation** (forward user token) | HTTP thread with incoming request | Simple, preserves user identity | Fails in non-HTTP contexts |
-| **Generation** (ServiceTokenProvider) | Non-HTTP threads, symmetric signing | No external deps, fast (~0.1ms) | Shared secret = any service can forge |
-| **Client Credentials** (OAuth2) | Production with Keycloak/IdP | Proper identity per service, audit trail | Requires IdP, network call for token |
+| Approach                              | When to Use                         | Pros                                     | Cons                                  |
+| ------------------------------------- | ----------------------------------- | ---------------------------------------- | ------------------------------------- |
+| **Propagation** (forward user token)  | HTTP thread with incoming request   | Simple, preserves user identity          | Fails in non-HTTP contexts            |
+| **Generation** (ServiceTokenProvider) | Non-HTTP threads, symmetric signing | No external deps, fast (~0.1ms)          | Shared secret = any service can forge |
+| **Client Credentials** (OAuth2)       | Production with Keycloak/IdP        | Proper identity per service, audit trail | Requires IdP, network call for token  |
 
 ### Config Migration Gap Pattern
 
@@ -2749,6 +2790,7 @@ These threads have no incoming HTTP request, so `RequestContextHolder.getRequest
 **Example:** `equitycart.sell-to-spend.strategy=saga` was set in `app/src/main/resources/application.yml`. After microservice extraction, portfolio-service reads from Config Server's `portfolio-service.yml` — which didn't have the property. The strategy silently defaulted to `transactional` because `@ConditionalOnProperty(matchIfMissing=true)` activated the wrong implementation.
 
 **Prevention checklist:**
+
 1. Grep the monolith's application.yml for every `@Value` and `@ConditionalOnProperty` used by the extracted service
 2. Copy those properties to the service's Config Server YAML
 3. Push Config Server changes to Git BEFORE testing the extracted service
@@ -2792,7 +2834,7 @@ order-service:
   environment:
     # WRONG: Using host port inside Docker network
     SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:9432/orderdb
-    
+
     # CORRECT: Containers use internal port
     SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orderdb
 ```
@@ -2801,14 +2843,14 @@ order-service:
 
 ### Port Mapping Quick Reference (EquityCart)
 
-| Service | Host Port | Container Port | Who Uses Host Port | Who Uses Container Port |
-|---------|-----------|---------------|-------------------|------------------------|
-| PostgreSQL | 9432 | 5432 | DBeaver, IDE | order-svc, user-svc, portfolio-svc |
-| Redis | 6379 | 6379 | RedisInsight | market-data-svc, portfolio-svc |
-| MongoDB | 27017 | 27017 | Compass | market-data-svc |
-| API Gateway | 8080 | 8080 | Browser, Postman | (entry point) |
-| Config Server | 8888 | 8888 | Browser (debug) | All services |
-| Eureka | 8761 | 8761 | Browser (dashboard) | All services |
+| Service       | Host Port | Container Port | Who Uses Host Port  | Who Uses Container Port            |
+| ------------- | --------- | -------------- | ------------------- | ---------------------------------- |
+| PostgreSQL    | 9432      | 5432           | DBeaver, IDE        | order-svc, user-svc, portfolio-svc |
+| Redis         | 6379      | 6379           | RedisInsight        | market-data-svc, portfolio-svc     |
+| MongoDB       | 27017     | 27017          | Compass             | market-data-svc                    |
+| API Gateway   | 8080      | 8080           | Browser, Postman    | (entry point)                      |
+| Config Server | 8888      | 8888           | Browser (debug)     | All services                       |
+| Eureka        | 8761      | 8761           | Browser (dashboard) | All services                       |
 
 ### Interview Questions
 
@@ -2823,3 +2865,68 @@ order-service:
 
 ---
 
+## Section 14: Observability Pattern Stack (Phase 9)
+
+Phase 9 introduced an observability architecture composed of four patterns working together:
+
+1. **Correlation Pattern (request identity propagation)**
+2. **Metrics Pattern (numerical time-series signals)**
+3. **Tracing Pattern (causal span graph)**
+4. **Alerting Pattern (policy on top of metrics)**
+
+### 14.1 Correlation + Tracing Are Different Layers
+
+| Concern  | Correlation ID             | Trace/Span                         |
+| -------- | -------------------------- | ---------------------------------- |
+| Goal     | Group logs for one request | Show distributed timing/call graph |
+| Shape    | Single ID per request      | Trace ID + many span IDs           |
+| Best for | Log search and debugging   | Latency bottleneck analysis        |
+| Storage  | Logs                       | Tracing backend (Zipkin)           |
+
+**Design insight:** Correlation IDs remained valuable even after trace rollout; logs and traces are separate data planes.
+
+### 14.2 Metrics Pattern — Golden Signals Applied
+
+Metrics were instrumented around:
+
+- **Traffic:** request counters
+- **Errors:** failure counters and error-rate ratios
+- **Latency:** timers/percentiles (p99 focus)
+- **Saturation proxies:** service-down and backlog-like conditions
+
+Business-domain counters were added for:
+
+- order placement outcomes
+- portfolio trade/reward actions
+- notification dispatch outcomes/channels
+
+### 14.3 Alerting Pattern — Three Classes
+
+| Alert Class  | Intent                | Example                  |
+| ------------ | --------------------- | ------------------------ |
+| Availability | Service unreachable   | `up == 0`                |
+| Reliability  | Error ratio unhealthy | 5xx/error-rate threshold |
+| Performance  | Tail latency degraded | p99 above SLO threshold  |
+
+### 14.4 Environment-Constrained Logging Pattern
+
+Planned centralized EFK/Fluentd logging was blocked by enterprise egress policy (Zscaler image pull denial from `docker.elastic.co`).
+
+Adopted fallback:
+
+- retain structured JSON logs per service
+- aggregate/inspect via local `core-loglens`
+- keep EFK as future enhancement when network policy allows
+
+This preserves observability capability while documenting the operational constraint explicitly.
+
+### 14.5 Interview Questions
+
+1. **"If Zipkin already shows traces, why still create custom business metrics?"**  
+   → Traces are per-request diagnostics. Metrics are aggregate signals for trend analysis, SLOs, and alerting.
+
+2. **"Why can an alert stay in NoData even when Grafana dashboards show data?"**  
+   → Rule queries can return empty vectors depending on label matchers/windowing. Dashboard panels may use different queries or transformations that still render data.
+
+3. **"How do you justify a fallback instead of blocking the release until EFK is available?"**  
+   → Observability is about operational visibility, not a single vendor stack. Structured logs + metrics + traces + alerting already satisfy core reliability goals; centralized log backend can be deferred behind a known external constraint.

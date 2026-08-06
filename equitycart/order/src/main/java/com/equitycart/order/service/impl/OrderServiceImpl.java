@@ -15,6 +15,7 @@ import com.equitycart.order.entity.Order;
 import com.equitycart.order.entity.OrderItem;
 import com.equitycart.order.enums.OrderStatus;
 import com.equitycart.order.event.OrderOutboxWriter;
+import com.equitycart.order.metrics.OrderMetrics;
 import com.equitycart.order.repository.OrderRepository;
 import com.equitycart.order.service.api.OrderService;
 import java.util.List;
@@ -35,6 +36,7 @@ public class OrderServiceImpl implements OrderService {
 
   private static final Logger log = LogManager.getLogger(OrderServiceImpl.class);
 
+  private final OrderMetrics orderMetrics;
   private final CartService cartService;
   private final OrderRepository orderRepository;
   private final ProductFeignClient productFeignClient;
@@ -44,61 +46,78 @@ public class OrderServiceImpl implements OrderService {
   @Transactional
   @Override
   public OrderResponse placeOrder(Long userId, PlaceOrderRequest request) {
-    log.info(
-        "Placing order for userId={} with idempotencyKey={}", userId, request.idempotencyKey());
+    long startTime = System.nanoTime();
+    boolean success = false;
 
-    Optional<Order> orderOptional = orderRepository.findByIdempotencyKey(request.idempotencyKey());
-    if (orderOptional.isPresent()) {
+    try {
       log.info(
-          "Duplicate request detected — returning existing order id={}",
-          orderOptional.get().getId());
-      return toResponse(orderOptional.get());
-    }
+          "Placing order for userId={} with idempotencyKey={}", userId, request.idempotencyKey());
 
-    CartResponse cartResponse = cartService.getCart(String.valueOf(userId));
+      Optional<Order> orderOptional =
+          orderRepository.findByIdempotencyKey(request.idempotencyKey());
+      if (orderOptional.isPresent()) {
+        log.info(
+            "Duplicate request detected — returning existing order id={}",
+            orderOptional.get().getId());
+        success = true;
+        return toResponse(orderOptional.get());
+      }
 
-    if (cartResponse.items().isEmpty())
-      throw new ResourceNotFoundException("Can't place an order with no items");
+      CartResponse cartResponse = cartService.getCart(String.valueOf(userId));
 
-    List<CartItemResponse> itemResponses = cartResponse.items();
+      if (cartResponse.items().isEmpty())
+        throw new ResourceNotFoundException("Can't place an order with no items");
 
-    Order order =
-        Order.builder()
-            .userId(Long.valueOf(cartResponse.userId()))
-            .status(OrderStatus.CREATED)
-            .idempotencyKey(request.idempotencyKey())
-            .shippingAddress(request.shippingAddress())
-            .paymentMethod(request.paymentMethod())
-            .totalAmount(cartResponse.total())
-            .build();
+      List<CartItemResponse> itemResponses = cartResponse.items();
 
-    for (CartItemResponse cartItemResponse : itemResponses) {
-      ProductDTO product = productFeignClient.getProductById(cartItemResponse.productId());
-
-      productFeignClient.deductStock(cartItemResponse.productId(), cartItemResponse.quantity());
-
-      OrderItem orderItem =
-          OrderItem.builder()
-              .productId(cartItemResponse.productId())
-              .productName(product.name())
-              .quantity(cartItemResponse.quantity())
-              .priceAtPurchase(cartItemResponse.price())
-              .subTotal(cartItemResponse.subtotal())
+      Order order =
+          Order.builder()
+              .userId(Long.valueOf(cartResponse.userId()))
+              .status(OrderStatus.CREATED)
+              .idempotencyKey(request.idempotencyKey())
+              .shippingAddress(request.shippingAddress())
+              .paymentMethod(request.paymentMethod())
+              .totalAmount(cartResponse.total())
               .build();
 
-      order.addItem(orderItem);
+      for (CartItemResponse cartItemResponse : itemResponses) {
+        ProductDTO product = productFeignClient.getProductById(cartItemResponse.productId());
+
+        productFeignClient.deductStock(cartItemResponse.productId(), cartItemResponse.quantity());
+
+        OrderItem orderItem =
+            OrderItem.builder()
+                .productId(cartItemResponse.productId())
+                .productName(product.name())
+                .quantity(cartItemResponse.quantity())
+                .priceAtPurchase(cartItemResponse.price())
+                .subTotal(cartItemResponse.subtotal())
+                .build();
+
+        order.addItem(orderItem);
+      }
+
+      Order savedOrder = orderRepository.save(order);
+      cartService.clearCart(String.valueOf(userId));
+
+      log.info(
+          "Order placed successfully — orderId={}, items={}, total={}",
+          savedOrder.getId(),
+          savedOrder.getItems().size(),
+          savedOrder.getTotalAmount());
+
+      success = true;
+
+      return toResponse(savedOrder);
+    } finally {
+      long elapsed = System.nanoTime() - startTime;
+      if (success) {
+        orderMetrics.recordPlaced();
+        orderMetrics.recordPlacementDurationNanos(elapsed);
+      } else {
+        orderMetrics.recordFailed();
+      }
     }
-
-    Order savedOrder = orderRepository.save(order);
-    cartService.clearCart(String.valueOf(userId));
-
-    log.info(
-        "Order placed successfully — orderId={}, items={}, total={}",
-        savedOrder.getId(),
-        savedOrder.getItems().size(),
-        savedOrder.getTotalAmount());
-
-    return toResponse(savedOrder);
   }
 
   /** {@inheritDoc} */

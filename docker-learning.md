@@ -1120,6 +1120,7 @@ Inside order-service container:
 When a service registers with Eureka, it tells Eureka "my address is X". Eureka stores this. When the gateway asks "where is ORDER-SERVICE?", Eureka returns that stored address.
 
 **Problem with `prefer-ip-address: true`:**
+
 ```
 Service registers: "I am at 172.18.0.15:8088"
 Eureka stores: 172.18.0.15:8088
@@ -1150,15 +1151,15 @@ ports:
 
 **Which services actually need port mapping?**
 
-| Service | Port Mapped? | Why |
-|---------|-------------|-----|
-| api-gateway | Yes (8080:8080) | Browser entry point |
-| discovery | Yes (8761:8761) | Eureka dashboard in browser |
-| config-server | Yes (8888:8888) | Debug: view configs in browser |
-| postgres | Yes (5432:5432) | Host tools (pgAdmin, DBeaver) |
-| kafka | Yes (9092:9092) | Host apps connecting during dev |
-| mailhog | Yes (8025:8025) | Email UI in browser |
-| application services | Optional | Only for direct debugging |
+| Service              | Port Mapped?    | Why                             |
+| -------------------- | --------------- | ------------------------------- |
+| api-gateway          | Yes (8080:8080) | Browser entry point             |
+| discovery            | Yes (8761:8761) | Eureka dashboard in browser     |
+| config-server        | Yes (8888:8888) | Debug: view configs in browser  |
+| postgres             | Yes (5432:5432) | Host tools (pgAdmin, DBeaver)   |
+| kafka                | Yes (9092:9092) | Host apps connecting during dev |
+| mailhog              | Yes (8025:8025) | Email UI in browser             |
+| application services | Optional        | Only for direct debugging       |
 
 In production, only the gateway would be exposed. All other services communicate internally.
 
@@ -1232,10 +1233,10 @@ eureka:
 
 **How it resolves in two contexts:**
 
-| Context | EUREKA_URL env var | Resolved value |
-|---------|-------------------|----------------|
-| Local dev (no Docker) | Not set | `http://localhost:8761/eureka/` (default) |
-| Docker Compose | `http://discovery:8761/eureka/` | `http://discovery:8761/eureka/` (env var wins) |
+| Context               | EUREKA_URL env var              | Resolved value                                 |
+| --------------------- | ------------------------------- | ---------------------------------------------- |
+| Local dev (no Docker) | Not set                         | `http://localhost:8761/eureka/` (default)      |
+| Docker Compose        | `http://discovery:8761/eureka/` | `http://discovery:8761/eureka/` (env var wins) |
 
 **Key principle:** The config-server does NOT resolve the placeholder. It sends `${EUREKA_URL:http://localhost:8761/eureka/}` as-is to the client. The CLIENT resolves it against its own environment variables. This is why Docker Compose sets the env var on the client service, not on the config-server.
 
@@ -1276,6 +1277,7 @@ spring:
 ```
 
 **When to use each:**
+
 - **Relaxed binding** (just set the env var): For standard Spring properties that exist in your YAML as fixed values
 - **Custom placeholder** (`${MY_VAR:default}`): When you want the YAML value to be dynamic and the env var name doesn't follow Spring's convention
 
@@ -1327,7 +1329,7 @@ docker/
 ```yaml
 config-server:
   depends_on:
-    - discovery   # Only waits for container to START, not app to be READY
+    - discovery # Only waits for container to START, not app to be READY
 ```
 
 `depends_on` says "start this container after that one" — but Docker considers a container "started" the instant its process launches (1-2 seconds). A Spring Boot app needs 10-30 seconds to actually be ready. That's why the start scripts add readiness polling:
@@ -1344,7 +1346,7 @@ done
 ```yaml
 kafka:
   image: apache/kafka:latest
-  user: "0"   # Run as root inside container
+  user: "0" # Run as root inside container
   volumes:
     - kafka-data:/var/kafka/data
 ```
@@ -1396,6 +1398,7 @@ environment:
 ### Config Merge Order (what the client receives)
 
 When order-service requests its config, the config server returns properties from:
+
 1. `application.yml` (shared base — all services get this)
 2. `order-service.yml` (service-specific overrides)
 
@@ -1423,6 +1426,7 @@ This tells Spring Boot: "Also fetch properties from config server and MERGE them
 **Root cause:** Git Bash on Windows converts Unix-style absolute paths to Windows paths before passing them to commands. `/opt/kafka/bin/script.sh` becomes `C:/Program Files/Git/opt/kafka/bin/script.sh`.
 
 **Fixes:**
+
 ```bash
 # Option A: Wrap in sh -c (path stays as string argument)
 docker exec kafka sh -c '/opt/kafka/bin/kafka-topics.sh --list --bootstrap-server localhost:9092'
@@ -1443,6 +1447,7 @@ export MSYS_NO_PATHCONV=1
 **Impact:** If the initial `git clone` succeeds (DNS worked at boot time), subsequent failures are harmless — configs are served from cache. If it fails at boot time, config-server can't serve anything.
 
 **Fixes:**
+
 - Configure Docker Desktop DNS (Settings → Docker Engine → `dns: ["8.8.8.8"]`)
 - Set `refresh-rate: 3600` to reduce frequency of re-fetch attempts
 - Corporate: add Docker network to proxy exceptions
@@ -1454,10 +1459,11 @@ export MSYS_NO_PATHCONV=1
 **Root cause:** On Windows with Hyper-V (Docker Desktop/WSL2), `InetAddress.getLocalHost().getHostName()` returns the Hyper-V virtual NAT adapter's hostname instead of `localhost`. Eureka uses this for registration.
 
 **Fix in shared config (equitycart-config/application.yml):**
+
 ```yaml
 eureka:
   instance:
-    prefer-ip-address: true   # register with IP instead of hostname
+    prefer-ip-address: true # register with IP instead of hostname
     # Do NOT set ip-address: 127.0.0.1 in Docker!
     # That would make each service advertise its OWN loopback.
     # Let Spring auto-detect the Docker container IP (172.18.0.x).
@@ -1468,6 +1474,7 @@ eureka:
 **Symptom:** Service logs show `Fetching config from server at: http://localhost:8888` despite Docker env var set
 
 **Root cause:** The embedded `application.yml` had a hardcoded URL:
+
 ```yaml
 # WRONG — this is fixed, env var can't override it:
 spring.config.import: configserver:http://localhost:8888
@@ -1485,6 +1492,7 @@ spring.config.import: configserver:${CONFIG_SERVER_URL:http://localhost:8888}
 **Root cause:** Running `docker compose -f docker-pets.yml up` sees containers from `docker-compose-services.yml` that aren't defined in the current file. Docker Compose considers them "orphans" of the project.
 
 **Fix:** Safe to ignore (informational warning). Suppress with `--remove-orphans` or by always referencing both files together:
+
 ```bash
 docker compose -f docker-pets.yml -f docker-compose-services.yml up -d
 ```
@@ -1492,6 +1500,7 @@ docker compose -f docker-pets.yml -f docker-compose-services.yml up -d
 ### 6. Multiple Databases on One PostgreSQL Container
 
 PostgreSQL's default entrypoint only creates ONE database (`POSTGRES_DB`). For multiple:
+
 ```bash
 # init-db.sh (mounted as /docker-entrypoint-initdb.d/init-db.sh)
 #!/bin/bash
@@ -1512,5 +1521,65 @@ postgres:
 ```
 
 **Important:** `docker-entrypoint-initdb.d/` scripts only run on FIRST container creation (when the volume is empty). If you add a new database later, you must either:
+
 - `docker compose down -v` + `up` (destroys all data), or
 - `docker exec postgres psql -U postgres -c "CREATE DATABASE new_db;"`
+
+---
+
+## 22. Phase 9 Docker Learnings — Shared Networks, Volume Mounts, and Policy Constraints
+
+### 22.1 Shared External Network for Split Compose
+
+When infra (`docker-pets.yml`) and app services (`docker-compose-services.yml`) are started separately, each file creates its own default network unless overridden.
+
+**Observed issue:** services could not reliably discover infra components by DNS name across compose boundaries.
+
+**Fix pattern:**
+
+1. Create one shared network (once): `docker network create equitycart-shared`
+2. Mark it `external: true` in both compose files
+3. Attach all relevant services to that network
+4. In startup scripts, create the network if missing before `docker compose up`
+
+This makes split startup deterministic and keeps service DNS stable.
+
+### 22.2 Internal Port vs Host Port (Reinforced)
+
+Intra-container communication must always use:
+
+- `service-name:container-port`
+
+Host-mapped ports are only for host tools (browser, curl from laptop, DBeaver, etc.).
+
+### 22.3 Volume Mount Lessons from Observability
+
+For log persistence and cross-tool inspection:
+
+- Mount service log root from container to host-accessible path/volume.
+- Keep rolling policy in application logging config to prevent unbounded growth.
+- Use read-only mounts (`:ro`) where mutation is not required (configs/scripts).
+
+Operationally, this enabled `core-loglens` usage without centralized log backend.
+
+### 22.4 Enterprise Egress Constraint (Zscaler) and Image Pull Failures
+
+**Observed issue:** pulls from `docker.elastic.co` (Kibana/Elastic stack) denied by policy.
+
+**Practical handling pattern:**
+
+- Classify as environment/infrastructure blocker, not app bug.
+- Capture exact error evidence in learning/progress docs.
+- Use a fallback architecture (structured logs + local log analysis tool).
+- Keep blocked stack as deferred item for future network allowlisting.
+
+### 22.5 Interview Questions
+
+1. **"Why not use two independent default compose networks?"**  
+   → Because cross-stack DNS and connectivity become brittle/impossible when services need to talk across files.
+
+2. **"What is the trade-off of host-mounted logs vs centralized log shipping?"**  
+   → Host mounts are simple and immediate for local/dev debugging; centralized shipping is stronger for search/retention at scale but depends on extra infra and network policy.
+
+3. **"How do you make startup scripts idempotent for Docker network creation?"**  
+   → Check existence first (`docker network inspect ...`) and create only if absent; reruns should not fail.
