@@ -1,5 +1,8 @@
 package com.equitycart.portfolio.controller;
 
+import com.equitycart.portfolio.config.CQRSFeatureFlag;
+import com.equitycart.portfolio.cqrs.controller.PortfolioReadController;
+import com.equitycart.portfolio.cqrs.dtos.PortfolioReadResponse;
 import com.equitycart.portfolio.dto.HoldingRequest;
 import com.equitycart.portfolio.dto.HoldingResponse;
 import com.equitycart.portfolio.dto.PortfolioAnalyticsResponse;
@@ -11,11 +14,14 @@ import com.equitycart.portfolio.dto.TradeRequest;
 import com.equitycart.portfolio.dto.TradeResponse;
 import com.equitycart.portfolio.service.api.PortfolioFacade;
 import jakarta.validation.Valid;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import lombok.RequiredArgsConstructor;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -36,6 +42,9 @@ public class PortfolioController {
   private static final Logger logger = LogManager.getLogger(PortfolioController.class);
 
   private final PortfolioFacade portfolioFacade;
+  // NEW: Inject feature flag and CQRS controller
+  private final CQRSFeatureFlag cqrsFeatureFlag;
+  private final PortfolioReadController portfolioReadController;
 
   /**
    * Returns the authenticated user's portfolio with all holdings.
@@ -48,6 +57,15 @@ public class PortfolioController {
   public PortfolioResponse getPortfolio(Authentication authentication) {
     Long userId = (Long) authentication.getPrincipal();
     logger.info("GET /api/portfolio — userId={}", userId);
+    if (cqrsFeatureFlag.isCqrsReadEnabled()) {
+      logger.debug("Routing to CQRS read path (MongoDB)");
+      ResponseEntity<PortfolioReadResponse> response = portfolioReadController.getPortfolio(userId);
+
+      if (response.getStatusCode() == HttpStatus.OK && Objects.nonNull(response.getBody())) {
+        return convertToLegacyFormat(response.getBody());
+      }
+    }
+    logger.debug("Routing to legacy read path (PostgreSQL)");
     return portfolioFacade.getPortfolio(userId);
   }
 
@@ -135,6 +153,27 @@ public class PortfolioController {
   public PortfolioAnalyticsResponse getAnalytics(Authentication authentication) {
     Long userId = (Long) authentication.getPrincipal();
     logger.info("GET /api/portfolio/analytics — userId={}", userId);
+    if (cqrsFeatureFlag.isCqrsReadEnabled()) {
+      logger.debug("Routing to CQRS analytics path (MongoDB)");
+      ResponseEntity<PortfolioAnalyticsResponse> response =
+          portfolioReadController.getPortfolioAnalytics(userId);
+      if (response.getStatusCode() == HttpStatus.OK && Objects.nonNull(response.getBody())) {
+        return response.getBody();
+      }
+    }
+    logger.debug("Routing to legacy analytics path (PostgreSQL)");
     return portfolioFacade.getAnalytics(userId);
+  }
+
+  // Helper to convert CQRS response to legacy format (backward compat)
+  private PortfolioResponse convertToLegacyFormat(PortfolioReadResponse cqrsResponse) {
+    // Map CQRS DTO fields to legacy PortfolioResponse
+    // (assuming PortfolioResponse exists in your codebase)
+    return new PortfolioResponse(
+        cqrsResponse.userId(),
+        new ArrayList<>(
+            cqrsResponse.holdings().stream()
+                .map(h -> new HoldingResponse(h.tickerSymbol(), h.quantity(), h.averageBuyPrice()))
+                .toList()));
   }
 }

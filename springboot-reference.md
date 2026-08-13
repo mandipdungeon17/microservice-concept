@@ -2509,3 +2509,426 @@ A: Average hides tail pain. Averages can look healthy while a minority of reques
 
 **Q: "What is the practical difference between correlation ID and trace ID?"**  
 A: Correlation ID is usually an application-defined request identifier propagated for log grouping. Trace ID is part of standardized distributed tracing context with parent/child span relationships and timing metadata. Correlation IDs are useful for logs; trace IDs power full causal timelines.
+
+---
+
+## Section 22: @KafkaListener — Consumer Group Management and Offset Handling
+
+### 22.1 The @KafkaListener Annotation
+
+```java
+@Service
+public class PortfolioReadModelOutboxConsumer {
+    
+    @KafkaListener(
+        topics = "portfolio-projection",
+        groupId = "equitycart-portfolio-read-model-sync",
+        containerFactory = "kafkaListenerContainerFactory"
+    )
+    public void handleProjectionEvent(
+        @Payload PortfolioProjectionEvent event,
+        @Header(KafkaHeaders.RECEIVED_PARTITION_ID) int partition,
+        @Header(KafkaHeaders.OFFSET) long offset
+    ) {
+        // Process event
+        portfolioReadModelSynchronizer.rebuildReadModelForUser(event.userId());
+    }
+}
+```
+
+**Key fields:**
+
+- **topics:** Kafka topic(s) to subscribe to
+- **groupId:** Consumer group name (determines partition assignment and offset tracking)
+- **containerFactory:** Bean name of the `ConcurrentKafkaListenerContainerFactory` (optional; uses default if omitted)
+- **@Payload:** deserialize message value to this type (Spring handles JSON deserialization)
+- **@Header:** inject Kafka metadata (partition, offset, timestamp, topic)
+
+### 22.2 Consumer Groups and Partition Assignment
+
+```
+Topic: portfolio-projection (3 partitions)
+Consumer Group: equitycart-portfolio-read-model-sync
+
+Scenario 1 (single consumer):
+  Partition 0 → Instance A
+  Partition 1 → Instance A
+  Partition 2 → Instance A
+
+Scenario 2 (two consumers):
+  Partition 0 → Instance A
+  Partition 1 → Instance B
+  Partition 2 → Instance B (or A, depends on Kafka rebalancing algorithm)
+
+Each partition is processed by exactly one consumer (guarantee).
+```
+
+**Rebalancing:** When a new instance joins or crashes, Kafka triggers a rebalance — partitions are reassigned to live consumers. During rebalance, the group temporarily stops processing (pause window, typically < 5 seconds).
+
+### 22.3 Offset Management and Acknowledgment
+
+By default, Spring Kafka uses **automatic offset commits** (commits every 5 seconds or N records):
+
+```yaml
+spring.kafka.consumer.enable-auto-commit: true
+spring.kafka.consumer.auto-commit-interval: 5000  # milliseconds
+```
+
+**Flow:**
+
+```
+1. Message arrives at partition 0, offset 100
+2. @KafkaListener method invoked with the message
+3. Method completes successfully
+4. Offset commit happens in background (or after auto-commit interval)
+5. Broker records: "this consumer group has committed offset 100"
+6. Next restart: consumer resumes from offset 100 (won't reprocess message 100)
+```
+
+**Manual acknowledgment (more control, riskier):**
+
+```yaml
+spring.kafka.listener.ack-mode: MANUAL_IMMEDIATE
+```
+
+```java
+@KafkaListener(topics = "...")
+public void handle(PortfolioProjectionEvent event, Acknowledgment ack) {
+    try {
+        processEvent(event);
+        ack.acknowledge();  // commit only on success
+    } catch (Exception e) {
+        // Don't acknowledge → message will be reprocessed from last committed offset
+        log.error("Failed", e);
+    }
+}
+```
+
+**Tradeoff:** Manual acknowledgment gives more control (commit only on success) but requires explicit code in every listener. Automatic is simpler but requires idempotent handlers (to handle retries).
+
+**Phase 10 approach:** Automatic acknowledgment + MongoDB upsert ensures idempotency (replayed events produce same result).
+
+### 22.4 Offset Reset Behavior
+
+```yaml
+spring.kafka.consumer.auto-offset-reset: earliest | latest | none
+```
+
+- **earliest:** On startup, if no committed offset exists, start from offset 0 (reprocess all messages). Useful for rebuilding read models.
+- **latest:** Skip to the end of the topic (ignore historical messages). Useful for real-time metrics.
+- **none:** Throw exception if no committed offset exists (fail-fast).
+
+**Phase 10:** Uses `latest` for `PortfolioReadModelOutboxConsumer` (new consumers skip historical events; the separate reconciliation job handles drift).
+
+### 22.5 Payload Type Deserialization
+
+```java
+@KafkaListener(topics = "portfolio-projection")
+public void handle(@Payload PortfolioProjectionEvent event) { }
+```
+
+Spring deserializes the Kafka message value to `PortfolioProjectionEvent` using:
+
+1. Check for `__TypeId__` header (set by Spring's `JsonSerializer` on producer side)
+2. If header present, use that FQCN to instantiate the class
+3. If header absent, use `spring.json.value.default.type` property to determine class
+4. Deserialize JSON payload using `ObjectMapper`
+
+**Configuration:**
+
+```yaml
+spring:
+  kafka:
+    consumer:
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+    properties:
+      spring.json.value.default.type: com.equitycart.portfolio.event.PortfolioProjectionEvent
+```
+
+### 22.6 Interview Questions
+
+**Q: "What happens if a @KafkaListener method throws an exception?" (Phase 10)**  
+A: By default (with DefaultErrorHandler), the exception triggers retries with exponential backoff. After max retries exhausted, the message is sent to a Dead Letter Topic (`.DLT` suffix). The consumer continues processing the next message. Exception does NOT propagate to crash the listener. If you want exceptions to pause consumption and retry indefinitely, configure `MINIMAL_ERROR_HANDLING` or a custom `ErrorHandler`.
+
+**Q: "How do you ensure exactly-once processing semantics in Kafka consumers?" (Phase 10)**  
+A: At-least-once (default) means messages may be reprocessed after failures. Exactly-once requires: (1) idempotent handlers (replaying same message produces same result), (2) idempotent database writes (MongoDB upsert by key), (3) offset management (commit only after successful processing). EquityCart uses: automatic offset commits + MongoDB upsert by userId → effectively exactly-once semantics.
+
+**Q: "Why use a consumer group name instead of letting Kafka auto-generate it?" (Phase 10)**  
+A: Consumer groups are identified by their name in Kafka's `__consumer_offsets` topic. Same group name resuming from old offsets (e.g., after redeployment) means continuing from where you left off. Auto-generated names (based on instance ID or UUID) create a new group every time the consumer starts → all historical messages reprocessed → rebuilding the read model from scratch. Explicit group names let you control this.
+
+---
+
+## Section 23: MongoTemplate — Upsert and Bulk Operations
+
+### 23.1 MongoTemplate Setup
+
+```java
+@Configuration
+public class MongoConfig {
+    
+    @Bean
+    public MongoTemplate mongoTemplate(MongoClient mongoClient, MongoDatabaseFactory databaseFactory) {
+        return new MongoTemplate(databaseFactory);
+    }
+}
+```
+
+Spring Boot auto-configures `MongoTemplate` if `spring-boot-starter-data-mongodb` is on the classpath. For Phase 10 CQRS read models, `MongoTemplate` is the primary API (vs Spring Data's `MongoRepository`).
+
+### 23.2 The Upsert Operation
+
+```java
+Query query = new Query(Criteria.where("userId").is(userId));
+Update update = new Update()
+    .set("holdings", holdingsList)
+    .set("rewards", rewardsList)
+    .set("totalValue", computed)
+    .set("lastUpdatedAt", Instant.now());
+
+UpdateResult result = mongoTemplate.upsert(query, update, ReadModelPortfolio.class);
+// result.getModifiedCount() → 0 or 1 (not 1+ because upsert never inserts multiple)
+// result.getUpsertedId() → ObjectId if INSERT happened; null if UPDATE
+```
+
+**Behavior:**
+
+```
+Query matches 0 docs → INSERT new doc with all Update.set() fields
+Query matches 1 doc  → UPDATE that doc's fields
+Query matches N docs → UPDATE all N docs (risky; should use specific key)
+```
+
+**Idempotency guarantee (Phase 10):**
+
+```
+Event 1: upsert(userId, holdings) → INSERT (no doc exists)
+Event 1 (retry): upsert(userId, holdings) → UPDATE (doc exists, same result)
+Event 1 (3rd retry): upsert(userId, holdings) → UPDATE again (idempotent)
+```
+
+### 23.3 MongoDB Write Semantics vs SQL
+
+```sql
+-- SQL: explicit INSERT or UPDATE
+INSERT INTO portfolio (userId, holdings) VALUES (...)  -- fail if userId exists
+UPDATE portfolio SET holdings = ... WHERE userId = ... -- fail if userId missing
+
+-- MongoDB: implicit upsert
+db.portfolio.updateOne({ userId: "x" }, { $set: { holdings: [...] } }, { upsert: true })
+// If userId exists → $set updates fields
+// If userId missing → inserts new doc with userId and all $set fields
+```
+
+MongoTemplate's `upsert()` wraps MongoDB's `updateOne(..., { upsert: true })`.
+
+### 23.4 Bulk Operations
+
+For rebuilding multiple users' read models in one batch:
+
+```java
+BulkOperations bulk = mongoTemplate.bulkOps(BulkMode.ORDERED, ReadModelPortfolio.class);
+
+for (String userId : userIds) {
+    Query query = new Query(Criteria.where("userId").is(userId));
+    Update update = new Update()
+        .set("holdings", computeHoldings(userId))
+        .set("rewards", computeRewards(userId));
+    
+    bulk.upsert(query, update);
+}
+
+BulkWriteResult result = bulk.execute();
+// result.getInsertedCount() + result.getModifiedCount() = userIds.size()
+```
+
+**Ordered vs Unordered:**
+
+- `ORDERED`: stops at first error (safest)
+- `UNORDERED`: continues on error, reports all results (faster for large batches where some failures are acceptable)
+
+### 23.5 Common Query Patterns
+
+```java
+// Find by business key
+Query query = new Query(Criteria.where("userId").is(userId));
+
+// Composite condition
+Query query = new Query()
+    .addCriteria(Criteria.where("userId").is(userId))
+    .addCriteria(Criteria.where("status").is("VESTED"));
+
+// Range query
+Query query = new Query(Criteria.where("vestingDate").lte(LocalDateTime.now()));
+
+// In list
+Query query = new Query(Criteria.where("userId").in(userIds));
+
+// Null check
+Query query = new Query(Criteria.where("deletedAt").isNull());
+```
+
+### 23.6 Interview Questions
+
+**Q: "Why use MongoTemplate.upsert() instead of repository.save() for CQRS projections?" (Phase 10)**  
+A: `save()` always inserts if no `_id` field set, causing duplicate documents. Upsert queries by business key (userId), so it either updates an existing doc or inserts a new one — both operations produce the same end state (idempotent). Critical for Kafka at-least-once semantics where events may be retried.
+
+**Q: "What's the difference between Query + Update vs plain `findAndReplace()`?" (Phase 10)**  
+A: `findAndReplace()` does a full document replacement (equivalent to SQL DELETE + INSERT). `Query + Update` with `$set` modifies only specified fields, leaving others untouched. For CQRS projections, `upsert()` with specific `$set` fields is safer — it doesn't accidentally delete fields from a concurrent update.
+
+**Q: "How does MongoDB enforce uniqueness in upsert?" (Phase 10)**  
+A: Via unique indexes. `@Indexed(unique = true) String userId` creates a unique index on that field. During INSERT, MongoDB checks if the value already exists — if yes, rejects the insert. During UPDATE, the unique constraint is not re-checked. The pattern: add `@Indexed(unique = true)` to your business key field, and upsert queries by that field are guaranteed to create at most one document per unique value.
+
+---
+
+## Section 24: @Profile — Runtime Bean Activation for Feature Flags
+
+### 24.1 Basic @Profile Usage
+
+```java
+@Configuration
+@Profile("!cdc")  // active when profile is NOT "cdc"
+public class OutboxPollerConfig {
+    
+    @Bean
+    public OutboxPoller outboxPoller(OutboxEventRepository repo, KafkaTemplate<String, ?> kafka) {
+        return new OutboxPoller(repo, kafka);
+    }
+}
+```
+
+Spring activates this `@Configuration` class only when:
+- `spring.profiles.active` does NOT include `cdc`
+- `spring.profiles.default` is set to something other than `cdc`
+
+**Comparison:**
+
+```yaml
+# application.yml (default — polling mode)
+spring:
+  profiles:
+    active: ""  # or omitted
+
+# Result: OutboxPollerConfig ACTIVE
+
+---
+
+# application-cdc.yml (CDC mode overlay)
+# No explicit profile setting needed; the file name is the profile
+
+# To activate: spring.profiles.active=cdc
+
+# Result: OutboxPollerConfig INACTIVE (because profile IS cdc)
+```
+
+### 24.2 Profile Expressions and Negation
+
+```java
+@Profile("prod")              // Active only in prod
+@Profile("!prod")             // Active unless prod
+@Profile("dev | staging")     // Active in dev OR staging
+@Profile("!(prod | staging)") // Active unless prod or staging
+@Profile("dev & !test")       // Active in dev AND NOT in test
+```
+
+### 24.3 Multi-Level Profile Activation
+
+```
+application.yml           (default values, any profile)
+application-{profile}.yml (profile-specific overrides)
+```
+
+**Load order:**
+1. `application.yml` (base)
+2. `application-{spring.profiles.active}.yml` (overrides)
+
+Example:
+
+```yaml
+# application.yml
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+
+# application-cdc.yml
+# (empty — just activates the cdc profile)
+
+# application-prod.yml
+spring:
+  kafka:
+    bootstrap-servers: kafka-prod:9092
+```
+
+When `spring.profiles.active=prod`:
+1. Load `application.yml` → kafka bootstrap = localhost:9092
+2. Load `application-prod.yml` → kafka bootstrap = kafka-prod:9092 (overrides)
+3. Result: bootstrap = kafka-prod:9092
+
+### 24.4 Feature Flag Pattern Using @Profile + @ConditionalOnProperty
+
+```java
+@Configuration
+public class SellToSpendConfig {
+    
+    @Bean
+    @ConditionalOnProperty(name = "feature.saga-enabled", havingValue = "true", matchIfMissing = true)
+    public SellToSpendSagaOrchestrator sagaOrchestrator(ServiceA svc) {
+        return new SellToSpendSagaOrchestrator(svc);
+    }
+    
+    @Bean
+    @ConditionalOnProperty(name = "feature.saga-enabled", havingValue = "false")
+    public SellToSpendTransactionalService transactionalService(ServiceA svc) {
+        return new SellToSpendTransactionalService(svc);
+    }
+}
+```
+
+**Behavior:**
+
+```yaml
+# application.yml
+feature.saga-enabled: true
+
+# Result: SellToSpendSagaOrchestrator bean created
+# Controller injects via interface → gets saga implementation
+
+---
+
+# application.yml
+feature.saga-enabled: false
+
+# Result: SellToSpendTransactionalService bean created
+# Controller injects via interface → gets transactional implementation
+```
+
+### 24.5 @Profile vs @ConditionalOnProperty
+
+| Aspect                | @Profile                              | @ConditionalOnProperty                        |
+| --------------------- | ------------------------------------- | --------------------------------------------- |
+| **Controlled by**     | Command line / environment variables  | application.yml properties                    |
+| **Scope**             | Entire bean class or method           | Per-bean decision                             |
+| **Use case**          | Deployment environment (dev/prod/cdc) | Feature flags (saga on/off, debug mode)      |
+| **Override**          | `spring.profiles.active=cdc`          | `feature.saga-enabled=true` in yml            |
+| **Typical pattern**   | One profile per deployment            | Multiple boolean properties per app           |
+
+**Phase 10 pattern:**
+
+```
+@Profile("!cdc")        → OutboxPollerConfig (deployment: with/without Debezium)
+@ConditionalOnProperty  → Future: feature toggles (saga on/off for A/B testing)
+```
+
+### 24.6 Interview Questions
+
+**Q: "Why use @Profile("!cdc") instead of @Profile("polling")?" (Phase 10)**  
+A: Negative profiles are more maintainable. `@Profile("!cdc")` means "use this config unless CDC is explicitly enabled." If you used `@Profile("polling")`, you'd need to explicitly set `spring.profiles.active=polling` — if someone forgets and the property is empty, neither `polling` nor `cdc` would be active, and the OutboxPoller wouldn't start. Negation makes the default explicit.
+
+**Q: "How would you A/B test a feature flag with @ConditionalOnProperty?" (Phase 10)**  
+A: Create two beans implementing the same interface, each with a different `@ConditionalOnProperty` condition. Controller injects via interface. YAML determines which bean is active: `feature.new-algorithm: true` → new bean active. This allows toggling algorithms without redeploying if properties are externalized (Config Server, environment variables).
+
+**Q: "What happens if two @Profile-annotated beans both match?" (Phase 10)**  
+A: The bean with higher `@Ordered` value wins (or arbitrary if no order specified). More commonly: use mutually-exclusive conditions (`@ConditionalOnProperty`) with `matchIfMissing` and `havingValue` to ensure exactly one bean activates.
+
+**Q: "Can you mix @Profile and @ConditionalOnProperty on the same bean?" (Phase 10)**  
+A: Yes. Both conditions must be satisfied (AND). Example: `@Profile("prod") @ConditionalOnProperty(name="feature.expensive-check", havingValue="true")` — bean active only if deployment is prod AND the feature flag is on. Useful for expensive features that should only run in production when explicitly enabled.
+

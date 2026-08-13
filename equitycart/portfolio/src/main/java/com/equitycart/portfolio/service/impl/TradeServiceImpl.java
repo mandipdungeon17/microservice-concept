@@ -5,6 +5,7 @@ import com.equitycart.commons.exception.InvalidStatusTransitionException;
 import com.equitycart.ledger.enums.AccountType;
 import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
+import com.equitycart.portfolio.async.event.PortfolioOutboxWriter;
 import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.enums.TradeType;
 import com.equitycart.portfolio.event.NotificationPublisher;
@@ -45,6 +46,7 @@ public class TradeServiceImpl implements TradeService {
   private final PortfolioEventStore portfolioEventStore;
   private final NotificationPublisher notificationPublisher;
   private final PortfolioMetrics portfolioMetrics;
+  private final PortfolioOutboxWriter portfolioOutboxWriter;
 
   /** {@inheritDoc} */
   @Override
@@ -88,6 +90,7 @@ public class TradeServiceImpl implements TradeService {
           amount,
           Map.of("tradeType", "BUY"));
 
+      portfolioOutboxWriter.writeSharesPurchasedEvent(holding);
       portfolioMetrics.recordTrade("BUY");
     } else {
       holding = portfolioService.reduceHolding(userId, tickerSymbol, qty);
@@ -115,6 +118,8 @@ public class TradeServiceImpl implements TradeService {
           price,
           amount,
           Map.of("tradeType", "SELL"));
+
+      portfolioOutboxWriter.writeSharesSoldEvent(holding, qty, price);
       portfolioMetrics.recordTrade("SELL");
     }
 

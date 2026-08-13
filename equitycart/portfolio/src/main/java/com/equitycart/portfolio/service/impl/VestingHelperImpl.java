@@ -1,6 +1,7 @@
 package com.equitycart.portfolio.service.impl;
 
 import com.equitycart.commons.event.NotificationEvent;
+import com.equitycart.portfolio.async.event.PortfolioOutboxWriter;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
 import com.equitycart.portfolio.event.NotificationPublisher;
@@ -42,6 +43,7 @@ public class VestingHelperImpl implements VestingHelper {
   @Autowired private StockBackRewardRepository stockBackRewardRepository;
   @Autowired private PortfolioEventStore portfolioEventStore;
   @Autowired private NotificationPublisher notificationPublisher;
+  @Autowired private PortfolioOutboxWriter portfolioOutboxWriter;
 
   /**
    * {@inheritDoc}
@@ -61,7 +63,7 @@ public class VestingHelperImpl implements VestingHelper {
       reward.setStatus(VestingStatus.VESTED);
       reward.setVestedAt(LocalDateTime.now());
 
-      stockBackRewardRepository.save(reward);
+      StockBackReward stockBackReward = stockBackRewardRepository.save(reward);
 
       portfolioEventStore.append(
           reward.getUserId(),
@@ -84,6 +86,8 @@ public class VestingHelperImpl implements VestingHelper {
               LocalDateTime.now());
 
       notificationPublisher.publish(notificationEvent);
+
+      portfolioOutboxWriter.writeRewardVestedEvent(stockBackReward);
 
       logger.info(
           "Vested reward id={} for userId={}, ticker={}, shares={}",

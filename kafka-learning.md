@@ -1300,3 +1300,252 @@ KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,DOCKER://kafka:29092
 - `DOCKER://kafka:29092` — advertised to other containers (Debezium, Spring Boot services in Docker)
 
 When a Kafka client connects, the broker responds with its advertised listener address. If Kafka only advertised `localhost:9092`, a container trying to connect would use `localhost` — which inside that container means itself, not Kafka.
+
+---
+
+## 15. Phase 10 Topic 1: CQRS Portfolio Read Model — Event-Driven Projection
+
+### The Problem: Sync Read Models After Business Events
+
+When an order is delivered or a trade is executed, multiple services need fast, denormalized query access to the user's portfolio state:
+- CQRS Read Model query: "Get my holdings" (not "execute a complex JOIN")
+- Problem: Write model (PostgreSQL `Portfolio`, `Holding`, `Reward`) is normalized for transactional consistency. Querying it requires expensive JOINs across multiple tables.
+- Solution: Maintain a separate **read model** in MongoDB (denormalized snapshot per user) that's kept in sync via Kafka events.
+
+### Event-Driven Rebuild: Each Kafka Message Triggers Full Snapshot
+
+Unlike incremental delta projection (update only the changed fields), Topic 1 implements **correctness-first full rebuild**:
+
+```
+1. TradeServiceImpl.recordBuy() → writes Portfolio, Holding, Reward to PostgreSQL
+2. PortfolioOutboxWriter.writeSharesPurchasedEvent() → writes OutboxEvent row (atomically, same transaction)
+3. Debezium CDC reads PostgreSQL WAL → publishes PortfolioProjectionEvent to Kafka topic
+   (Kafka partition key = userId, ensuring all user events go to same partition)
+4. PortfolioReadModelOutboxConsumer.handleProjectionEvent() receives event
+5. PortfolioReadModelSynchronizer.rebuildReadModelForUser(userId) queries PostgreSQL:
+   SELECT all Holdings + Rewards + metadata for userId
+   → Upserts entire user snapshot to MongoDB (replace on userId match)
+6. API queries MongoDB (fast denormalized read) → serves response
+```
+
+**Why full rebuild vs delta projection?**
+- Delta projection: update only qty/price for the holding — faster, but risky if event order corrupted or payload complex
+- Full rebuild: fetch fresh from source-of-truth → guaranteed consistency even if events reordered. Trades compute for correctness.
+- **Optimization decision deferred**: Once metrics show rebuild is bottleneck (e.g., >100ms per user, millions of users), switch to incremental projection.
+
+### MongoDB Schema — Denormalized Snapshot
+
+```json
+{
+  "_id": ObjectId("..."),
+  "userId": "user-123",
+  "totalValue": 5000.50,
+  "totalRewards": 1500.00,
+  "holdings": [
+    {
+      "ticker": "AAPL",
+      "quantity": 10,
+      "averageCost": 150.25,
+      "currentPrice": 180.50,
+      "marketValue": 1805.00
+    }
+  ],
+  "rewards": [
+    {
+      "id": "rew-456",
+      "status": "PENDING",      // PENDING | VESTED | CANCELLED
+      "vestingDate": "2026-01-15",
+      "ticker": "AAPL",
+      "quantity": 2
+    }
+  ],
+  "lastUpdatedAt": "2026-01-08T10:30:45Z",
+  "version": 42                  // internal version tracking
+}
+```
+
+**Key design decisions:**
+- No `_id` generation during projection — MongoDB auto-generates it
+- `userId` is queried field (frequently filtered), so indexed separately
+- `version` field not used (for future optimistic locking if needed)
+- `holdings` and `rewards` arrays denormalized (no separate collections) — single upsert atomic
+
+### Idempotency via MongoDB Upsert by userId
+
+**The idempotency challenge:** Kafka at-least-once semantics means events can be retried. Processing the same event twice must produce the same result.
+
+```java
+// Implementation (Spring MongoTemplate):
+Query query = new Query(Criteria.where("userId").is(userId));
+Update update = new Update()
+    .set("totalValue", computedTotal)
+    .set("holdings", holdings)
+    .set("rewards", rewards)
+    .set("lastUpdatedAt", Instant.now());
+
+mongoTemplate.upsert(query, update, ReadModelPortfolio.class);
+// Upsert: if userId exists → update fields; if not → insert new doc with userId
+```
+
+**Why this guarantees idempotency:**
+1. First event received: user doc doesn't exist → INSERT (MongoDB adds _id)
+2. Retry of same event: user doc exists (same userId) → UPDATE all fields
+3. Third retry: same UPDATE applied again (idempotent — same result)
+4. Unique index on userId ensures no duplicate user docs
+
+**Alternative approach (rejected):** Using `repository.save(newDoc)` always inserts → duplicate docs with different ObjectIds → manual deduplication logic → complex.
+
+### @Lob Gotcha: PostgreSQL WAL + Debezium CDC
+
+**Problem discovered in Phase 10:**
+- If `@Lob` used on JSON field → PostgreSQL creates OID (Object Identifier) reference
+- Debezium reads WAL and publishes the OID number (e.g., `12345`) not the JSON content
+- Consumer receives `{"payload": "12345"}` → deserialization fails
+
+**Solution (applied to OutboxEvent):**
+```java
+@Column(columnDefinition = "text")
+private String payload;  // NOT @Lob
+```
+
+**Why this works:**
+- `columnDefinition = "text"` stores entire JSON inline in PostgreSQL
+- Debezium publishes the JSON string directly (not OID reference)
+- Consumer deserializes from actual payload content
+- Performance: text column slightly slower than BYTEA, but negligible for event payloads
+
+### Kafka Partition Key Strategy: userId as Aggregated ID
+
+```
+Kafka Topic: portfolio-projection
+  Partition 0: Events for users [0-999]
+  Partition 1: Events for users [1000-1999]
+  Partition 2: Events for users [2000-2999]
+  ...
+
+Each user's events always route to the same partition.
+```
+
+**Why this matters:**
+1. **Rebuild ordering:** User 123's TRADE_1, TRADE_2, TRADE_3 arrive in order (same partition, single consumer per partition)
+2. **Concurrent rebuilds:** Multiple users (different partitions) rebuild in parallel safely
+3. **Saga compensation:** Sell-to-spend saga sends events in sequence (SELL_TO_SPEND_INITIATED, SELL_TO_SPEND_COMPLETED or COMPENSATED). Same user partition guarantees order.
+
+### How Scheduled Reconciliation Handles Drift
+
+**Background job (ReadModelReconciliation, 24-hour interval):**
+
+```java
+// Pseudocode: check for drift
+for each user:
+  postgresPortfolio = fetch from write-model (source of truth)
+  mongoPortfolio = fetch from read-model (projection)
+  
+  if (postgresPortfolio != mongoPortfolio):
+    PortfolioReadModelSynchronizer.rebuildReadModelForUser(userId)
+    log.warn("Detected drift for user {}, reconciled", userId)
+```
+
+**Why separate reconciliation job?**
+- Event-driven rebuild (via Kafka consumer) handles happy path (99.9% of cases)
+- Reconciliation job handles edge cases: Kafka message loss (rare), consumer crash+replay, CDC connector downtime
+- 24-hour interval acceptable because projection is not critical-path (caching/read-only) — business operations use write-model
+
+### Why synchronizeReadModels Is Commented Out
+
+Initial design (Phase 5) scheduled a polling job:
+
+```java
+@Scheduled(fixedDelay = 5000)  // Every 5 seconds
+private void synchronizeReadModels() {
+  // Query all portfolios, check each against MongoDB, rebuild if needed
+}
+```
+
+**Replaced by event-driven approach in Phase 10:**
+
+1. **Primary path (Debezium CDC):**
+   - PostgreSQL WAL → Debezium Kafka Connect → portfolio-projection topic
+   - Most reliable, lowest latency (sub-second)
+
+2. **Fallback path (OutboxPoller):**
+   - Application polls `outbox_events` table periodically
+   - Publishes to portfolio-projection topic
+   - Enabled when CDC not running (feature flag `@Profile("!cdc")`)
+
+3. **Event-driven rebuild:**
+   - Each event triggers `PortfolioReadModelOutboxConsumer.handleProjectionEvent()`
+   - Calls `PortfolioReadModelSynchronizer.rebuildReadModelForUser(userId)`
+   - MongoDB upsert ensures idempotency
+
+4. **24-hour reconciliation job:**
+   - Separate scheduled task
+   - Detects and repairs drift (independent of event stream)
+
+**Code kept for reference:** Shows the polling pattern (useful for systems without CDC capability). Java comments explain the three-part strategy above.
+
+### @Profile("!cdc") — Feature Flag for Outbox Relay Mode
+
+```yaml
+# application.yml (production, CDC enabled)
+spring.profiles.active: cdc
+
+# application-cdc.yml overlay
+kafka.cdc.enabled: true
+
+# Spring Bean Conditional Registration
+@Configuration
+@Profile("!cdc")
+public class OutboxPollerConfig {
+  @Bean
+  public OutboxPoller outboxPoller() { ... }  // Only created if NOT cdc profile
+}
+```
+
+**Why feature flag?**
+- **CDC mode:** Debezium running in Docker, tailing PostgreSQL WAL → portfolio-projection
+  - No polling, no OutboxPoller polling `outbox_events` table
+- **Polling mode:** Debezium not running, OutboxPoller polls table every 2s → publishes to same topic
+- **Single Spring app, two deployment modes** with one config change
+
+### Kafka Consumer Group Strategy
+
+```
+Topic: portfolio-projection
+Consumer Group: equitycart-portfolio-read-model-sync
+
+Kafka ensures:
+- Each partition assigned to ONE consumer (or rebalanced if consumer fails)
+- Offset committed per partition
+- At-least-once semantics per event
+```
+
+**For Phase 10:**
+- Single instance of `PortfolioReadModelOutboxConsumer` listening
+- Future: scale horizontally by adding more instances (auto-rebalance across partitions)
+
+### Testing Strategy — Manual E2E (No Full JUnit Suite Yet)
+
+Phase 10 uses manual E2E validation checklist (auto-testing deferred):
+
+```
+✓ BUY → outbox row written → Debezium publishes → consumer rebuilds → API returns updated holdings
+✓ SELL → outbox row written → Debezium publishes → consumer rebuilds → API returns updated portfolio
+✓ REWARD_GRANTED → outbox row written → Debezium publishes → consumer rebuilds → API returns pending reward
+✓ REWARD_VESTED → outbox row written → Debezium publishes → consumer rebuilds → API returns vested reward
+✓ SELL_TO_SPEND → outbox row written → Debezium publishes → consumer rebuilds → API returns completed state
+✓ REFUND_RESTORED (compensation) → outbox row written → Debezium publishes → consumer rebuilds → API shows restored holdings
+
+Each flow verified: PostgreSQL write-model → outbox_events → Kafka → MongoDB read-model → CQRS API response
+```
+
+### Lessons Learned (Phase 10 Topic 1)
+
+1. **Correctness-first over optimization:** Full rebuild is simpler, safer, deferred premature optimization to delta projection
+2. **Idempotency via upsert by aggregateId:** Kafka at-least-once + MongoDB upsert by userId = guaranteed exactly-once semantics
+3. **@Lob incompatible with CDC:** Must use `@Column(columnDefinition = "text")` for Debezium to read payload
+4. **Event-driven rebuild > polling:** No 5-second poll interval + unnecessary queries; events trigger rebuild immediately
+5. **Partition key strategy matters:** userId as Kafka key ensures replay order and saga compensation safety
+6. **Feature flags for deployment flexibility:** `@Profile("!cdc")` toggles between Debezium and OutboxPoller without code change
+7. **Separate reconciliation for drift repair:** CDC handles happy path, scheduled 24h job handles edge cases
+8. **Manual E2E is sufficient for CQRS validation:** Full JUnit suite would require mocking Kafka/MongoDB complexity; manual checklist provides business confidence

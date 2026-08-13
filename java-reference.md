@@ -873,3 +873,202 @@ A: High-cardinality labels (userId, orderId, sessionId) explode time-series coun
 
 **Q: "When do you use Counter vs Timer?"**  
 A: Counter tracks event totals (how many). Timer tracks duration distribution (how long) and also provides count/rate over time.
+
+---
+
+## Part 5: MongoDB & Spring Data MongoDB (Phase 10 CQRS)
+
+### 5.1 MongoDB Upsert Pattern for Idempotent Projections
+
+**Problem:** Kafka provides at-least-once delivery semantics — messages can be retried. When rebuilding a read model from Kafka events, the same event may be processed multiple times. The read model must idempotently converge to the same state regardless of replay count.
+
+**Solution: MongoDB Upsert by Unique Key**
+
+```java
+// In PortfolioReadModelSynchronizer
+Query query = new Query(Criteria.where("userId").is(userId));
+Update update = new Update()
+    .set("totalValue", computedTotal)
+    .set("holdings", holdings)
+    .set("rewards", rewards)
+    .set("lastUpdatedAt", Instant.now());
+
+mongoTemplate.upsert(query, update, ReadModelPortfolio.class);
+```
+
+**How it works:**
+
+1. **First event:** `Query.where("userId").is("user-123")` matches ZERO documents (collection empty). Upsert INSERTs a new document with all fields set.
+2. **Retry of same event:** Same query now matches ONE document (userId exists). Upsert UPDATEs all fields to the same values → idempotent (result unchanged).
+3. **Third retry:** Same UPDATEs applied again → still idempotent.
+
+**Why NOT `repository.save(newDoc)`?**
+- `save()` always INSERTs if no ID provided → creates duplicate document with different ObjectId
+- Deduplication logic required → complex queries to find and merge duplicates
+- Upsert solves this atomically with one database operation
+
+**Uniqueness enforcement:**
+
+MongoDB creates unique index on `userId` (via `@Indexed(unique = true)` on the field):
+
+```java
+@Document("portfolio_read_models")
+public class ReadModelPortfolio {
+    @Id ObjectId id;
+    
+    @Indexed(unique = true)
+    String userId;
+    
+    BigDecimal totalValue;
+    // ...
+}
+```
+
+First document INSERT with userId="123" succeeds. Second attempt to INSERT another doc with same userId fails (unique constraint). Upsert detects this, converts to UPDATE instead.
+
+**Key insight:** Upsert is NOT a replacement for unique constraints. The constraint ensures that no two documents can have the same userId. Upsert's value is that it's atomic (either INSERT or UPDATE, depending on existence) without the application checking first.
+
+### 5.2 @Document and @Indexed Annotations
+
+**@Document(collection = "portfolio_read_models")**
+
+Maps Java class to MongoDB collection name. Equivalent to JPA's `@Table(name = "...")`.
+
+```java
+@Document(collection = "portfolio_read_models")
+public class ReadModelPortfolio {
+    // fields...
+}
+```
+
+Without `@Document`, Spring Data MongoDB still maps the class to a collection, but uses a default name derived from the class name (camelCase conversion). Explicit `@Document` is recommended for clarity.
+
+**@Id — Primary Key Equivalent**
+
+```java
+@Id
+ObjectId id;
+```
+
+Marks the field as MongoDB's `_id` (primary key). MongoDB auto-generates `ObjectId` if not provided. Can also use:
+
+```java
+@Id
+String id;  // Manual string IDs
+```
+
+or
+
+```java
+@Id
+Long id;    // Numeric IDs
+```
+
+When using upsert for denormalization, don't rely on `@Id`. Instead, create a business key unique index (`@Indexed(unique = true)`) to identify documents.
+
+**@Indexed — Secondary Index**
+
+```java
+@Indexed(unique = true)
+String userId;
+
+@Indexed
+LocalDateTime lastUpdatedAt;
+
+@Indexed(sparse = true)
+String promotionCode;  // Index ONLY non-null values
+```
+
+- `unique = true`: Creates unique index; MongoDB rejects inserts/updates that violate it
+- `sparse = true`: Index skips documents where the field is null/missing. Useful when the field is optional.
+- No parameters: Creates standard index for faster queries
+
+**Why separate `@Id` from business key?**
+
+```
+_id: ObjectId("60d5ec49c1d2e8b3f4c2a1b0")  ← MongoDB system field, auto-generated
+userId: "user-123"                          ← Business key, unique index, our upsert query uses this
+```
+
+MongoDB's `_id` is always present and unique. If you were to query `_id` for upserts, you'd need to generate IDs upfront (defeats the purpose). The pattern: let MongoDB manage `_id`, add your own business unique indexes for upserts.
+
+### 5.3 MongoTemplate.upsert() API Reference
+
+```java
+mongoTemplate.upsert(
+    new Query(Criteria.where("userId").is(userId)),
+    new Update()
+        .set("field1", value1)
+        .set("field2", value2)
+        .set("field3", value3),
+    ReadModelPortfolio.class
+);
+```
+
+**Parameters:**
+
+- **Query:** filter condition (`WHERE userId = ?` in SQL terms)
+- **Update:** fields to set (`SET field1 = ?, field2 = ? ...`)
+- **Class:** collection/document type (Spring Data uses this to determine the collection name)
+
+**Return value:** `UpdateResult` with `matchedCount`, `modifiedCount`, `upsertedId`.
+
+**Behavior:**
+
+- No matching documents: INSERT new doc with all `set()` fields
+- One matching document: UPDATE its fields
+- Multiple matching documents: UPDATE all of them (risky if query is not specific enough)
+
+**Safety:** Always ensure Query is specific enough. `new Query()` with no Criteria matches ALL documents — upsert would update every row.
+
+### 5.4 Common MongoTemplate Operations for Read Models
+
+**Upsert (INSERT or UPDATE):**
+```java
+mongoTemplate.upsert(query, update, ReadModelPortfolio.class);
+```
+
+**Insert only (fails if exists):**
+```java
+mongoTemplate.insert(new ReadModelPortfolio(...));
+```
+
+**Save (INSERT if no _id, UPDATE if _id exists):**
+```java
+mongoTemplate.save(document, "collection_name");
+```
+
+**Find and delete:**
+```java
+DeleteResult result = mongoTemplate.remove(
+    new Query(Criteria.where("userId").is(userId)),
+    ReadModelPortfolio.class
+);
+```
+
+**Bulk operations:**
+```java
+BulkOperations bulk = mongoTemplate.bulkOps(BulkOperations.BulkMode.ORDERED, ReadModelPortfolio.class);
+for (String userId : userIds) {
+    bulk.upsert(
+        new Query(Criteria.where("userId").is(userId)),
+        new Update().set("field", value)
+    );
+}
+bulk.execute();
+```
+
+### 5.5 Interview Questions
+
+**Q: "Why use `mongoTemplate.upsert()` instead of `mongoRepository.save()`?" (Phase 10)**  
+A: `save()` always inserts if the document has no ID field set, creating duplicates. Upsert atomically checks if a document matching the query exists — if yes, updates it; if no, inserts. For CQRS projections receiving at-least-once Kafka events, upsert guarantees idempotency: replaying the same event produces the same result without manual deduplication logic.
+
+**Q: "What happens if you upsert with a Query that matches multiple documents?" (Phase 10)**  
+A: MongoTemplate updates ALL matching documents. This is usually a bug. The solution: always query by a unique business key (`userId`, `aggregateId`). Add `@Indexed(unique = true)` to enforce this at the database level — if your query is not specific enough, you'll get a unique constraint error before corrupting data.
+
+**Q: "When should you use `@Indexed(sparse = true)`?" (Phase 10)**  
+A: When the field is optional. Example: `promotionCode` is only present for users who applied a promo. Without `sparse = true`, MongoDB creates an index entry for every document (including those with null/missing promotionCode). This bloats the index. With `sparse = true`, MongoDB skips null/missing values, reducing index size. Trade-off: queries filtering for null values (`promotionCode == null`) won't use the sparse index.
+
+**Q: "Why can't you use @Id for upsert queries in read models?" (Phase 10)**  
+A: Upserts are designed to either insert OR update based on a business condition. MongoDB's `@Id` field is auto-generated on first insert, so you don't know the ID in advance. If you query by `_id`, you'd need to generate IDs upfront (defeating eventual consistency from events). The pattern: let MongoDB auto-manage `_id`, add your own business unique indexes (userId, aggregateId) that are known at upsert-time.
+

@@ -3510,6 +3510,174 @@ When an order paid via sell-to-spend is refunded, the shares must be returned to
 **Q97: "Why use the saga entity for refund data instead of carrying it in the event?" (2026-05-24)**
 A: The event only needs `orderId` + `paymentMethod` to route correctly. The saga entity already stores all sale parameters (ticker, quantity, pricePerShare, saleProceeds). Duplicating this data in the event creates a consistency risk — if the saga was compensated (shares already returned), the event wouldn't know. By looking up the saga, the consumer gets both the data AND the idempotency check (`isRefunded` flag) in one query.
 
+---
+
+## Phase 10 — CQRS Portfolio Read Model (Topic 1: Complete) (2026-01-08)
+
+### Date: 2026-01-08
+
+---
+
+### Roadblocks & Issues Faced
+
+**1. @Lob Incompatibility with Debezium CDC**
+
+- **Problem:** Set `@Lob` on OutboxEvent.payload to store large JSON. Debezium CDC read PostgreSQL WAL but published only the OID number (e.g., `12345`) instead of the JSON content.
+- **Root cause:** PostgreSQL `@Lob` creates an Object Identifier reference. The actual data lives in the `pg_largeobject` system catalog. Debezium reads the WAL which only contains the numeric OID — it cannot dereference to `pg_largeobject` (CDC limitation).
+- **Fix:** Changed to `@Column(columnDefinition = "text")` to store JSON inline. PostgreSQL auto-compresses (TOAST) for values >2KB, but the content is always inline in the main table.
+- **Lesson:** CDC tools cannot follow database object references. For CDC compatibility, always store payload inline in the main table, never use @Lob for data that must be captured.
+
+**2. synchronizeReadModels Scheduled Job — Why Comment It Out?**
+
+- **Initial design:** @Scheduled(fixedDelay = 5000) polling job that continuously synced read models by fetching all users and checking against MongoDB.
+- **Problem:** Redundant polling. Debezium CDC (primary) and OutboxPoller (fallback) already publish events. Event-driven rebuild triggered by Kafka consumer is more efficient than time-based polling.
+- **Solution:** Commented out with multi-paragraph explanation. Event-driven rebuild (via PortfolioReadModelOutboxConsumer) is the primary path. Separate 24-hour reconciliation job handles drift detection. Code kept for reference (shows polling pattern).
+- **Lesson:** Event-driven architectures eliminate time-based polling. Schedule only for drift repair and cleanup, not for happy-path synchronization.
+
+**3. Full Rebuild vs Incremental Delta Projection**
+
+- **Initial question:** Should rebuild only the changed holding, or rebuild the entire user snapshot?
+- **Chosen approach:** Full rebuild per Kafka event. Advantages: guaranteed consistency, simple logic, no complex incremental state tracking.
+- **Trade-off:** More compute per event. Optimization to incremental projection deferred until metrics show rebuild is bottleneck (e.g., >100ms per user, millions of users).
+- **Lesson:** Correctness-first design. Premature optimization for scaling introduces complexity that masks bugs. Wait for evidence of bottleneck before optimizing.
+
+**4. Why userId as Kafka Partition Key, Not Aggregate Root?**
+
+- **Question:** Shouldn't the aggregateId (portfolio/order/reward ID) be the partition key?
+- **Answer:** No. Events for a single user must maintain order and route to same partition for safe rebuild. In saga compensation (sell-to-spend initiated → completed/compensated), same user's events go to same partition → guaranteed order.
+- **userId as key:** All user's events (buys, sells, rewards, refunds) go to same partition → single consumer processes them in order.
+- **If aggregateId were key:** User's buy event goes to partition 0, their sell event to partition 2. Concurrent partition consumers might process sell before buy → incorrect portfolio state.
+- **Lesson:** Partition key strategy depends on consistency boundaries. For user-scoped aggregates, use userId. For independent aggregates, use aggregateId.
+
+---
+
+### Core Concepts Learned
+
+**110. CQRS — Command Query Responsibility Segregation (2026-01-08)**
+
+Separate read and write models. Write model (PostgreSQL) optimized for transactional correctness (normalized, ACIDity). Read model (MongoDB) optimized for query performance (denormalized, one document per user). Updates to write model trigger events → read model rebuild. Decoupling allows independent scaling and recovery strategies.
+
+Tradeoff: eventual consistency (read model lags behind write model by milliseconds/seconds), but bounded — reconciliation job ensures convergence. Simpler than attempting strongly consistent queries across microservices.
+
+**111. Idempotency via MongoDB Upsert by Unique Key (2026-01-08)**
+
+Kafka at-least-once semantics: messages can be retried. MongoDB upsert ensures idempotency:
+
+```
+Query: { userId: "123" }
+Update: { $set: holdings, rewards, ... }
+Upsert: true
+```
+
+First event: userId doesn't exist → INSERT. Retried event: userId exists → UPDATE. Third retry: same UPDATE (idempotent). Unique index on userId prevents duplicates. Contrast with `repository.save()` which always INSERTs → duplicate docs with different ObjectIds.
+
+**112. Full Rebuild as Correctness Strategy (2026-01-08)**
+
+Event-driven rebuild fetches entire user snapshot from PostgreSQL and upserts to MongoDB. Why full instead of incremental (delta)?
+
+- **Full rebuild:** simple, safe, guaranteed correctness (always consistent with write model), easy to reason about
+- **Incremental delta:** faster, but complex (track which field changed, merge with existing state), risky if event order disrupted
+
+Selection: full rebuild. Optimization deferred until performance metrics demand it.
+
+**113. CDC vs Polling — Event Streaming at Database Level (2026-01-08)**
+
+Debezium CDC: reads PostgreSQL WAL (Write-Ahead Log) in real-time via logical replication slot. Events published immediately (sub-second latency). No polling queries, zero DB load.
+
+OutboxPoller: application polls `outbox_events` table every 2 seconds. Additional DB query load, but simpler infrastructure (no Kafka Connect).
+
+Hybrid approach (Phase 10): CDC primary (when running), OutboxPoller fallback (@Profile("!cdc")). Feature flag allows single codebase to run in either mode.
+
+**114. Feature Flags via @Profile — Runtime Deployment Flexibility (2026-01-08)**
+
+```java
+@Configuration
+@Profile("!cdc")
+public class OutboxPollerConfig {
+  @Bean OutboxPoller outboxPoller() { ... }  // Only created if NOT cdc profile
+}
+```
+
+`spring.profiles.active: cdc` → OutboxPoller disabled, Debezium CDC primary.
+`spring.profiles.active: <blank>` → OutboxPoller enabled, Debezium CDC not running.
+
+Single Spring app, two deployment modes. No code changes, just YAML.
+
+**115. MongoDB Document Structure for Denormalized Read Models (2026-01-08)**
+
+One document per user. Nested holdings and rewards arrays (not separate collections). Why?
+
+- **Atomic writes:** single upsert commits entire user state atomically
+- **Fast queries:** no cross-collection joins
+- **Document size:** user with 100 holdings + 50 rewards ≈ 50KB. MongoDB document limit is 16MB — comfortable.
+
+If user state exceeds ~1MB, switch to separate collections (at cost of join logic).
+
+**116. Scheduled Reconciliation for Drift Repair (2026-01-08)**
+
+Separate 24-hour job independent of event stream. Queries write model (PostgreSQL), compares with read model (MongoDB), rebuilds if they differ.
+
+Why separate?
+- Event-driven rebuild handles happy path (99.9% of cases)
+- Reconciliation handles edge cases: CDC connector downtime, Kafka message loss, consumer crash without offset commit
+- Separate job means reconciliation failures don't block main event stream
+
+Runs nightly (low urgency), logs all drift detections, rebuilds mismatched users.
+
+**117. Consumer Group Strategy for Kafka Projection Topic (2026-01-08)**
+
+```
+Topic: portfolio-projection
+Consumer Group: equitycart-portfolio-read-model-sync
+```
+
+Kafka ensures each partition assigned to ONE consumer. Single instance currently listening. For scaling:
+
+```
+Add second PortfolioReadModelOutboxConsumer instance
+→ Kafka rebalances
+→ Partition 0 → Consumer instance A
+→ Partition 1 → Consumer instance B
+→ Events for users in each partition processed in parallel
+```
+
+No explicit coordination needed. Offset management and rebalancing automatic via Kafka.
+
+---
+
+### Interview Questions & Answers
+
+**Q98: "Why use MongoDB for the read model instead of a second PostgreSQL table?" (2026-01-08)**
+
+A: PostgreSQL is write-optimized (normalized for transactional safety). Querying a normalized schema requires expensive JOINs across multiple tables. MongoDB stores one denormalized document per user — query hits one collection, retrieves all holdings/rewards/state in one shot. No JOINs, much faster. Trade-off: MongoDB is eventually consistent (lagging behind write model), but reconciliation job bounds the lag. For a CQRS implementation, separate read and write technologies makes sense.
+
+**Q99: "What if the user document doesn't exist yet when the first event arrives?" (2026-01-08)**
+
+A: MongoDB upsert with `Query: { userId: "123" }` and `upsert: true` handles this: if the userId document doesn't exist, upsert INSERTs a new doc with userId set. No "document not found" error — the upsert creates it. Subsequent events for the same user UPDATE the existing doc.
+
+**Q100: "Why comment out the scheduled synchronization job instead of deleting it?" (2026-01-08)**
+
+A: Code kept for reference. The polling pattern is useful for systems that don't have CDC capability (databases without logical WAL, or organizations that prefer simpler infrastructure). Developers reading this code can understand the polling approach even if it's not active. Comment block explains why it was superseded (event-driven is more efficient). If CDC infrastructure ever needs to be removed, the polling code is ready to un-comment.
+
+**Q101: "How do you handle scaling to millions of users? Doesn't full rebuild get slow?" (2026-01-08)**
+
+A: Full rebuild scales linearly — query takes time proportional to user's holdings/rewards count (typically <50ms). At millions of users, this becomes a bottleneck if many users are active simultaneously. Solution: shift to incremental delta projection (update only the changed holding). But this adds significant complexity (track which fields changed, merge with existing state, handle reordering). Current full-rebuild approach is correct for MVP. At production scale, metrics will show which users trigger slow rebuilds, then optimize incrementally for those users only.
+
+**Q102: "Why synchronizeReadModels logs at DEBUG but rebuild happens at INFO?" (2026-01-08)**
+
+A: Entry/exit logging for method boundaries (DEBUG level). Entry shows userId, exit shows elapsed time. These are diagnostics — many per second. INFO level for important events: reconciliation drift detected, rebuild completed, full stats. DEBUG logs would overwhelm operators; INFO keeps noise low while catching significant state changes.
+
+---
+
+### Lesson Summary
+
+- **CDC gotchas:** @Lob breaks with Debezium — use inline `@Column(columnDefinition = "text")` instead
+- **Event-driven eliminates polling:** Remove time-based sync; let Kafka events trigger rebuilds
+- **Full rebuild for correctness:** Incremental delta optimization deferred until metrics demand it
+- **Idempotency by design:** MongoDB upsert by userId ensures at-least-once Kafka events are idempotent
+- **Feature flags for flexibility:** @Profile("!cdc") lets same code run with CDC or polling
+- **Scheduled reconciliation separate:** Event stream handles happy path; batch job handles drift/edge cases consistency risk — if the saga was compensated (shares already returned), the event wouldn't know. By looking up the saga, the consumer gets both the data AND the idempotency check (`isRefunded` flag) in one query.
+
 **Q98: "Why is `isRefunded` on the saga entity instead of a separate refund table?" (2026-05-24)**
 A: The refund is a 1:1 extension of the saga lifecycle, not an independent entity. Adding a boolean to the saga keeps the refund check atomic with the saga lookup (single query + single save). A separate table would require coordinating writes across two tables for idempotency, introducing the same distributed consistency problem the saga was designed to solve.
 

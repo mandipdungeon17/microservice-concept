@@ -2930,3 +2930,197 @@ This preserves observability capability while documenting the operational constr
 
 3. **"How do you justify a fallback instead of blocking the release until EFK is available?"**  
    → Observability is about operational visibility, not a single vendor stack. Structured logs + metrics + traces + alerting already satisfy core reliability goals; centralized log backend can be deferred behind a known external constraint.
+
+---
+
+## 15. CQRS (Command Query Responsibility Segregation) Pattern — Read-Write Separation
+
+### 15.1 The Problem: Single Model for Everything
+
+Traditional architectures use one data model for both writes and reads:
+
+```
+User places order:
+  Controller → Service → ORM generates normalized INSERT/UPDATE (normalized for concurrency)
+  
+User queries their orders:
+  Controller → Service → ORM joins 5 tables (Order, OrderItem, Product, ...) 
+            → Maps to DTO → returns response
+```
+
+**Problems:**
+- Normalized write-model (good for transactions) is bad for queries (expensive JOINs)
+- Composite queries require cross-service HTTP calls (distributed JOINs) or separate DB
+- Denormalization for reads conflicts with normalization for writes
+- Caching becomes complex (invalidate on every write to stay fresh)
+
+### 15.2 The Solution: CQRS — Separate Models
+
+**Command Side (Write Model):**
+- PostgreSQL, normalized for transactional consistency
+- Business logic lives here (Portfolio, Holding, Reward entities)
+- One source of truth for correctness
+
+**Query Side (Read Model):**
+- MongoDB, denormalized (one document per user)
+- Pre-aggregated, ready-to-return data
+- Events trigger rebuilds from write-model
+
+```
+Write Path:
+  POST /portfolio/buy → TradeServiceImpl → Portfolio.addHolding()
+                    → save to PostgreSQL → OutboxWriter writes event
+                    ↓
+  Debezium CDC reads WAL → publishes PortfolioProjectionEvent to Kafka
+
+Read Path:
+  Kafka consumer PortfolioReadModelOutboxConsumer receives event
+  ↓
+  PortfolioReadModelSynchronizer.rebuildReadModelForUser(userId)
+  ↓
+  Query PostgreSQL: get all Holdings + Rewards for userId
+  ↓
+  Upsert to MongoDB: replace user's read-model document
+  ↓
+  GET /portfolio → queries MongoDB → instant response (no JOINs)
+```
+
+### 15.3 Event-Driven Projection — Keeping Read Model in Sync
+
+Each Kafka event triggers a **full rebuild** of the read model:
+
+```
+PortfolioProjectionEvent received:
+  1. Query PostgreSQL for complete user snapshot (all holdings + rewards)
+  2. Compute aggregates (totalValue, totalRewards)
+  3. Upsert to MongoDB.userId
+  4. Update lastUpdatedAt
+```
+
+**Why full rebuild?**
+- Simple, safe, guaranteed consistency
+- Kafka at-least-once semantics → MongoDB upsert ensures idempotency
+- Defers incremental delta optimization until metrics show bottleneck
+
+### 15.4 Idempotency via MongoDB Upsert
+
+Kafka may retry events. MongoDB upsert ensures replayed events are idempotent:
+
+```java
+Query query = new Query(Criteria.where("userId").is(userId));
+Update update = new Update()
+   .set("holdings", holdings)
+   .set("rewards", rewards)
+   .set("totalValue", computed);
+
+mongoTemplate.upsert(query, update, ReadModelPortfolio.class);
+```
+
+- First event: userId not found → INSERT new document
+- Retry: userId exists → UPDATE (same result)
+- Third retry: same UPDATE again (idempotent)
+
+Unique index on `userId` prevents duplicate user documents.
+
+### 15.5 CDC (Change Data Capture) vs Polling
+
+**Debezium CDC (Primary):**
+- Reads PostgreSQL WAL (Write-Ahead Log)
+- Publishes events in real-time (sub-second latency)
+- No polling queries, minimal DB load
+- External infrastructure (Kafka Connect container required)
+
+**OutboxPoller (Fallback):**
+- Application polls `outbox_events` table
+- Publishes to same Kafka topic
+- Higher latency (5-10 second delay)
+- No external infrastructure
+- Feature flag `@Profile("!cdc")` toggles between modes
+
+### 15.6 Scheduled Reconciliation for Drift Repair
+
+Separate 24-hour job independent of event stream:
+
+```
+for each user:
+  postgresPortfolio = fetch from write-model
+  mongoPortfolio = fetch from read-model
+  
+  if (postgresPortfolio != mongoPortfolio):
+   PortfolioReadModelSynchronizer.rebuildReadModelForUser(userId)
+   log.warn("Detected drift for user {}, reconciled", userId)
+```
+
+Handles edge cases:
+- CDC connector downtime
+- Kafka message loss
+- Consumer crash without offset commit
+- Network partition causing stale read-model
+
+Runs independently so reconciliation failures don't block main event stream.
+
+### 15.7 Eventual Consistency Guarantee
+
+```
+       Write Model                              Read Model
+       (PostgreSQL)                             (MongoDB)
+            │                                        │
+   Time T:  │ INSERT Holding                         │
+            │ save()                                  │
+            │                                        │
+   Time T+1:│                     Debezium CDC        │
+            │─────────────────────────────────────→  │
+            │                                  rebuild│
+            │                                        │
+   Time T+2:└─────────────────────────────────────→  │ Consistent
+                                                upsert│
+                                                      │
+```
+
+Lag: ~0-2 seconds (depends on CDC/Kafka latency). Read model is eventually consistent but good enough for queries. Writes always go to PostgreSQL (consistent).
+
+### 15.8 Pattern Comparison
+
+| Aspect                    | Single Model | CQRS Event-Driven | CQRS Event Sourcing |
+| ------------------------- | ------------ | ----------------- | ------------------- |
+| **Write Model**           | Normalized   | Normalized        | Immutable event log |
+| **Read Model**            | Same as write | Denormalized      | Derived from events |
+| **Query Performance**      | Medium (JOIN) | Fast (pre-computed)| Slow (replay log)   |
+| **Consistency**           | Strong       | Eventual (ms lag) | Eventual (ms lag)   |
+| **Audit Trail**           | Limited (DML logs) | Full event stream | Full (all changes)  |
+| **Complexity**            | Low          | Medium            | High                |
+| **When to use**           | Monoliths    | Read-heavy services | Audit-critical     |
+
+**EquityCart Phase 10:** Event-Driven CQRS. Event Sourcing deferred to later phases.
+
+### 15.9 Bounded Eventual Consistency
+
+CQRS is "eventually consistent," but not unbounded:
+
+```
+SLA: Read model lag ≤ 5 seconds
+
+Monitoring:
+  timestamp_write = write-model entity's updatedAt
+  timestamp_read = read-model document's lastUpdatedAt
+  lag = timestamp_read - timestamp_write
+  
+  Alert if lag > 5000ms → trigger reconciliation
+```
+
+Reconciliation job ensures convergence. Acceptable for internal APIs (backend-to-backend).
+
+### 15.10 Interview Questions
+
+**Q: "When should you use CQRS vs a single model?" (Phase 10)**  
+A: Use single model for systems where read/write patterns are balanced and queries aren't expensive (small entity graphs, few JOINs). Use CQRS when reads are far more frequent than writes, or queries are expensive (big normalized schemas, cross-service queries). EquityCart uses CQRS for portfolio queries because users constantly check holdings (reads) while trading less frequently (writes).
+
+**Q: "Why not just use a denormalized PostgreSQL table instead of MongoDB?" (Phase 10)**  
+A: You could. MongoDB was chosen for flexible schema (holdings/rewards array varies per user) and fast single-document queries (no roundtrips). PostgreSQL would work too but requires more schema complexity (arrays as JSON columns). The key is separation of models, not the specific technology — what matters is the pattern, not the database.
+
+**Q: "What if the reconciliation job fails?" (Phase 10)**  
+A: Failed reconciliations are logged and retried nightly. If drift persists, it surfaces in alerts (read/write latency anomalies). In production, persistent drift would trigger manual investigation (check CDC logs, Kafka offsets, consumer lag). CQRS trades consistency for availability — eventual consistency is by design; the system doesn't block; it repairs asynchronously.
+
+**Q: "How do you handle schema changes to the read model?" (Phase 10)**  
+A: All events are replayed through the projection logic. Add new fields to the projection code (e.g., calculate a new metric). Next event triggers rebuild with the new field. Existing documents lack the new field until they're rebuilt. Backfill job can rebuild all users without waiting for events. Contrast: in Event Sourcing, all historical events must be replayed — much more complex.
+

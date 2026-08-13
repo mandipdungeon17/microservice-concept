@@ -1,454 +1,548 @@
-﻿# Phase 10: Advanced Features & Scale — Design & Learning Plan
+# Phase 10 - Advanced Features and Scale (Master Design Plan)
 
-> **Status**: Pre-Implementation Design Phase
-> **Duration**: 4 weeks (Weeks 23–26)
-> **Primary Focus**: Production-grade features, performance optimization, and scale validation
-
----
-
-## 📋 PHASE 10 OVERVIEW
-
-### What we''re building
-Phase 10 is the **final capstone** of the EquityCart project. After successfully deploying all core microservices (Phases 1–9), Phase 10 adds:
-
-1. **Advanced query patterns** (CQRS) — separate write and read models
-2. **High-performance features** (Flash sales, distributed locking, watchlists)
-3. **Scale validation** (Load testing, performance tuning, bottleneck identification)
-4. **Complex business workflows** (Stock gifting saga, dividend reinvestment, tax reporting)
-
-### Why it matters
-
-Most applications work fine at small scale. Phase 10 teaches you how to:
-- **Scale reads** when thousands of users query portfolio simultaneously
-- **Handle extreme writes** during flash sales or scheduled events
-- **Lock and coordinate** across distributed systems reliably
-- **Measure real performance** under realistic load
-- **Identify and fix bottlenecks** (CPU, I/O, network, DB)
-
-### Success criteria
-✅ CQRS read model serving portfolio queries in <100ms (p99)  
-✅ Flash sale can handle 1000 concurrent buyers without overselling  
-✅ Distributed lock prevents double-spend across service boundaries  
-✅ Portfolio leaderboard aggregation completes in <5s for 1M users  
-✅ Load test validates 500 TPS capacity at 95% CPU utilization  
+> This is the full Phase 10 plan across all topics (not only Topic 1).  
+> It captures current status, completed work, pending work, sequencing, and execution strategy for next sessions.
 
 ---
 
-## 🏗️ ARCHITECTURE DESIGN
+## 1) Phase 10 Objective
 
-### Current State (End of Phase 9)
-```
-User Service (Auth)
-    ↓
-API Gateway (8080)
-    ↓
-    ├── Order Service (8088) — OLTP write-heavy
-    ├── Product Service (8089) — Static catalog reads
-    ├── Portfolio Service (8084) — Complex trades + portfolio queries
-    ├── Ledger Service (8086) — Double-entry bookkeeping
-    ├── Notification Service (8087) — Async event listener
-    ├── Market Data Service (8085) — Real-time prices (Reactive)
-    └── Discovery/Config/Monitoring
-    
-Database Layer:
-    ├── PostgreSQL — user, product, order, portfolio, ledger (normalised)
-    ├── MongoDB — portfolio events (event sourcing)
-    ├── Redis — cache + distributed locks
-    └── Kafka — inter-service messaging + Outbox patterns
+Phase 10 moves EquityCart from "working microservices" to "scale-ready, advanced behavior" by adding:
 
-Observability:
-    ├── Prometheus — metrics collection
-    ├── Grafana — dashboards + alerts
-    ├── Zipkin — distributed tracing
-    └── ELK/Core-Loglens — structured logs
-```
+1. CQRS read scaling patterns
+2. advanced distributed workflows (saga-heavy features)
+3. high-concurrency controls
+4. analytical/reporting capabilities
+5. performance validation and tuning
 
-### Phase 10 Architecture Changes
-
-#### **1. CQRS for Portfolio Queries**
-
-```
-WRITE MODEL (Current)                   READ MODEL (New - MongoDB)
-┌─────────────────────┐                ┌──────────────────────┐
-│ Portfolio Service   │                │ Portfolio Read       │
-│  (PostgreSQL)       │                │  Service             │
-│                     │                │  (MongoDB)           │
-│ Buy → Ledger +      │                │                      │
-│  Event Sourcing     │                │ Query: Holdings      │
-│                     │   Kafka event  │  in <100ms           │
-│ Trade → Holding     │──────────────→ │  (no joins)          │
-│  update             │   via Kafka    │                      │
-│                     │   consumer     │ Denormalized view:   │
-│                     │                │ {                    │
-│ Sell → Ledger +     │                │   userId,            │
-│  Event Sourcing     │                │   holdings: [        │
-│                     │                │     {ticker,         │
-│                     │                │      qty,            │
-│                     │                │      avgPrice,       │
-│                     │                │      currentPrice}   │
-│                     │                │   ],                 │
-│                     │                │   totalValue,        │
-│                     │                │   gain/loss          │
-│                     │                │ }                    │
-└─────────────────────┘                └──────────────────────┘
-```
-
-**Why CQRS here?**
-- Portfolio queries are read-heavy (users check holdings constantly)
-- Current design joins `Holding + Brand + MarketPrice` = 3 table lookups
-- MongoDB denormalized view: single document read + no network calls to market-data
-- Trade writes are infrequent compared to reads (100:1 ratio typical)
-- Eventual consistency acceptable (users see portfolio updated in <5s)
-
-**Trade-offs explained:**
-- ✅ Faster reads (denormalized, indexed, single lookup)
-- ✅ Decoupled Portfolio writes from read model rebuilds
-- ✅ Can replay MongoDB view if corrupted (reprocess Kafka topic)
-- ❌ More infrastructure (separate MongoDB collection + Kafka consumer)
-- ❌ Eventual consistency (user sees slightly stale portfolio for 5s after trade)
-- ❌ Complexity: projection rebuilds, version tracking, catch-up logic
+This phase is where architecture choices become production-grade operating patterns.
 
 ---
 
-#### **2. Distributed Locking for Flash Sales**
+## 2) Phase 10 Topic Tracker (at a glance)
 
-```
-Flash Sale Scenario: 1000 users, 100 discounted shares
-┌──────────────────────────────────────────────────────┐
-│ User 1: BUY 1 @ discount                             │
-│   ↓                                                   │
-│   Product Service                                    │
-│   └─→ Redis SETNX("flash-sale-lock", "user-1", 30s) │
-│       ✅ ACQUIRED LOCK                               │
-│   └─→ Check stock: 100 available                     │
-│   └─→ Deduct: 100 - 1 = 99                          │
-│   └─→ DELETE Redis key (release lock)                │
-│   └─→ Order created, charge wallet                   │
-│                                                      │
-│ User 2: BUY 50 @ discount (concurrent)              │
-│   ↓                                                   │
-│   Product Service                                    │
-│   └─→ Redis SETNX(...) — blocks 30s, fails          │
-│   └─→ Retry with backoff                            │
-│   └─→ Eventually acquires lock                       │
-│   └─→ Check stock: 99 available                      │
-│   └─→ Deduct: 99 - 50 = 49                          │
-│   └─→ DELETE Redis key (release lock)                │
-│   └─→ Order created, charge wallet                   │
-│                                                      │
-│ User 3: BUY 60 @ discount (concurrent)              │
-│   ↓                                                   │
-│   Product Service                                    │
-│   └─→ Waits for lock...                              │
-│   └─→ Eventually acquires lock                       │
-│   └─→ Check stock: 49 available — NOT ENOUGH        │
-│   └─→ Reject: "Only 49 remaining"                    │
-│   └─→ DELETE Redis key (release lock)                │
-│   └─→ User receives error (no charge)                │
-└──────────────────────────────────────────────────────┘
-
-RESULT: Exactly 100 shares sold (no overselling)
-```
-
-**Why distributed locking?**
-- Multiple instances of Product Service running (horizontal scale)
-- Database locks (SELECT FOR UPDATE) work within one DB but not across services
-- Redis SETNX atomic, visible across all service instances
-- Timeout prevents deadlock if instance crashes mid-transaction
-
-**Technology choice: Redisson vs raw Redis commands**
-- **Raw Redis**: `SETNX` + manual retry = 20 lines of error-prone code
-- **Redisson**: `RedissonClient.getLock()` + `lock.lock()` = clean, battle-tested
-- Redisson handles: retry logic, auto-renewal, reentrancy, deadlock prevention
-- Industry standard: used by Netflix, Yahoo, Alibaba for this exact use case
+| Topic | Status | Owner | Next Action | Risk |
+| --- | --- | --- | --- | --- |
+| Topic 1 - CQRS Portfolio Read Model | In Progress (Core done) | You + Assistant | Finish JavaDoc/comments/logging pass in main repo workspace and run compile verification | Medium |
+| Topic 2 - Stock Gifting Saga | Not Started | You + Assistant | Finalize saga state model, idempotency key, and compensation path design | High |
+| Topic 3 - Flash Sale Stock Drops | Not Started | You + Assistant | Design distributed lock strategy, oversell protection, and burst-load behavior | High |
+| Topic 4 - Price Alert Watchlist | Not Started | You + Assistant | Define watchlist model and async evaluation pipeline | Medium |
+| Topic 5 - Dividend DRIP | Not Started | You + Assistant | Design batch workflow and reinvestment idempotency rules | High |
+| Topic 6 - Tax Report Generation | Not Started | You + Assistant | Define report schema and batch output format (CSV/PDF) | Medium |
+| Topic 7 - Portfolio Leaderboard | Not Started | You + Assistant | Define ranking rules and Mongo aggregation plan | Medium |
+| Topic 8 - Return Clawback Saga | Not Started | You + Assistant | Design compensation saga linked to return/refund lifecycle | High |
+| Topic 9 - Load Testing | Not Started | You + Assistant | Build test scenarios and baseline SLA metrics | Medium |
+| Topic 10 - Performance Tuning | Not Started | You + Assistant | Tune from load-test evidence (DB, pool, consumer, queries) | Medium |
 
 ---
 
-#### **3. Price Alert Watchlist (WebSocket + Async Evaluation)**
+## 3) Phase 10 Topic Map (from roadmap)
 
+1. Topic 1 - CQRS Portfolio Read Model (SQL write + Mongo read projection)
+2. Topic 2 - Stock Gifting (atomic portfolio-to-portfolio transfer using saga)
+3. Topic 3 - Flash Sale Stock Drops (distributed lock + burst control)
+4. Topic 4 - Price Alert Watchlist (async rule evaluation + push delivery)
+5. Topic 5 - Dividend DRIP (scheduled reinvestment workflow)
+6. Topic 6 - Tax Report Generation (batch CSV/PDF)
+7. Topic 7 - Portfolio Leaderboard (Mongo aggregation ranking)
+8. Topic 8 - Return Clawback Saga (compensating transaction for returned orders)
+9. Topic 9 - Load Testing (k6/Gatling and bottleneck analysis)
+10. Topic 10 - Performance Tuning (DB pools, thread pools, query/index tuning)
+
+---
+
+## 4) Current Status Snapshot
+
+## 4.1 Completed
+
+### Topic 1 - CQRS Portfolio Read Model
+
+Implemented and verified (core objective complete):
+
+- Mongo read model layer (`portfolio_read_models`)
+- CQRS read controller + DTOs + repository
+- feature-flag-based route switching with legacy fallback
+- portfolio outbox entity/repo/writer/poller scaffolding
+- Debezium connector for portfolio outbox
+- Kafka consumer projecting events to Mongo
+- write-path outbox coverage for:
+  - buy/sell
+  - reward grant/vest/cancel
+  - refund restoration
+  - sell-to-spend + compensation
+- duplicate-key risk fixed using upsert-by-`userId`
+- compile verification completed
+
+Detailed learning + technical narrative is in:
+
+- `phase-10-learning-deep-dive.md`
+
+### Topic 1 caveat (known and accepted for now)
+
+- projector is correctness-first: rebuild full user snapshot per event  
+  (valid now, optimization deferred)
+
+## 4.2 In progress
+
+- Topic 1 code-quality pass in main repo workspace:
+  - JavaDoc/comments/logging refinement on uncommitted files
+
+## 4.3 Not started (implementation)
+
+- Topics 2 through 10 (listed above)
+
+---
+
+## 5) Why the earlier file looked "reverted"
+
+The previous version became Topic-1-centric because recent implementation and verification were concentrated on CQRS/outbox/debezium.  
+This updated file restores full Phase 10 scope while preserving Topic 1 detail.
+
+---
+
+## 6) Sequencing Strategy for Remaining Topics
+
+To reduce risk, Phase 10 should proceed in dependency-aware order:
+
+## Wave A - Consistency-critical financial workflows
+
+1. Topic 8 - Return Clawback Saga
+2. Topic 2 - Stock Gifting Saga
+3. Topic 5 - Dividend DRIP
+
+Why first:
+
+- these directly affect holdings, balances, and ledger correctness.
+
+## Wave B - Scale and user-facing advanced features
+
+4. Topic 4 - Price Alert Watchlist
+5. Topic 7 - Portfolio Leaderboard
+6. Topic 3 - Flash Sale Stock Drops
+
+Why second:
+
+- user engagement + high-traffic control, built on stable transactional core.
+
+## Wave C - Reporting and non-functional hardening
+
+7. Topic 6 - Tax Report Generation
+8. Topic 9 - Load Testing
+9. Topic 10 - Performance Tuning
+
+Why third:
+
+- performance tuning should be informed by real load results, not guessed early.
+
+---
+
+## 7) Topic-wise Design Intent, Deliverables, and Acceptance
+
+## Topic 2 - Stock Gifting Saga
+
+### Design intent
+
+- transfer shares from giver to receiver atomically at workflow level.
+- use orchestrated saga with compensation on downstream failure.
+
+### Core deliverables
+
+- gift request API + idempotency key
+- saga state model and orchestration steps
+- debit giver holdings -> credit receiver holdings
+- compensation path to restore giver on failure
+- audit trail + notification events
+
+### Acceptance criteria
+
+- no net share loss/creation under retry/failure
+- duplicate requests do not double-transfer
+- saga states observable and recoverable
+
+### Detailed Design (Phase 10 Implementation)
+
+#### GiftSagaStatus State Machine
 ```
-User sets alert: "BUY AAPL if price falls below $150"
-┌────────────────────────────────────────────────────────┐
-│ Portfolio Service Watchlist                            │
-│  └─→ Stores alert in PostgreSQL (userId, ticker,     │
-│      condition, price_threshold)                      │
-│  └─→ Subscribes to WebSocket connection for user      │
-│                                                        │
-│ Market Data Service (runs every 5s)                   │
-│  └─→ Fetches AAPL price from API: $149.50             │
-│  └─→ Publishes MarketPriceTick event to Kafka         │
-│                                                        │
-│ Portfolio Service Consumer                            │
-│  └─→ Receives MarketPriceTick(AAPL, 149.50)          │
-│  └─→ Queries: SELECT * FROM watchlist WHERE           │
-│      ticker=AAPL AND condition=BELOW                  │
-│  └─→ Evaluates: 149.50 < 150? YES                    │
-│  └─→ Sends WebSocket frame to subscribed user         │
-│  └─→ Push notification: "AAPL fell to $149.50"        │
-│                                                        │
-│ User sees real-time alert in browser                  │
-└────────────────────────────────────────────────────────┘
+INITIATED → DEBITING_GIVER → GIVER_DEBITED → CREDITING_RECEIVER 
+  → RECEIVER_CREDITED → RECORDING_LEDGER → LEDGER_RECORDED → COMPLETED
+
+Compensation (on failure):
+(any state) → COMPENSATING → COMPENSATED | FAILED
+
+Terminal states: COMPLETED, COMPENSATED, FAILED
 ```
 
-**Why async evaluation?**
-- Synchronous: price tick arrives → loop 100K watchlists → 5s latency ❌
-- Async: price tick → Kafka consumer evaluates subscribed watchlists → 100ms ✅
-- Kafka consumer parallelism: 10 consumer instances × 100ms = 100K/sec throughput
+#### Saga Steps (Orchestration)
 
-**WebSocket vs HTTP polling:**
-- Polling: browser requests every 5s = 17K requests/day per user ❌ (waste)
-- WebSocket: persistent connection, push-based = 1 connection per user ✅ (efficient)
-- Graceful degradation: if WebSocket unavailable, fall back to REST poll
+**Step 1: Debit Giver Holding**
+- Remove shares from giver's portfolio
+- Status: INITIATED → GIVER_DEBITED
+- Failure: triggers compensation
 
----
+**Step 2: Credit Receiver Holding**
+- Add shares to receiver's portfolio
+- Status: GIVER_DEBITED → RECEIVER_CREDITED
+- Failure: undo Step 1, then compensate
 
-#### **4. Dividend DRIP (Scheduled Batch Reinvestment)**
+**Step 3: Record Ledger Entries**
+- Create dual ledger entries (debit giver, credit receiver)
+- Status: RECEIVER_CREDITED → LEDGER_RECORDED → COMPLETED
+- Ledger records after holdings to ensure consistency
 
+#### Compensation Path
+Reverses in opposite order:
+- If RECORDING_LEDGER/LEDGER_RECORDED: delete ledger entries
+- If CREDITING_RECEIVER/RECEIVER_CREDITED: reduce receiver holding
+- If DEBITING_GIVER/GIVER_DEBITED: restore giver holding
+- Final: status = COMPENSATED
+
+#### Idempotency
+- idempotencyKey (unique constraint) prevents duplicate requests
+- Same key sent twice returns existing saga result
+- Checked BEFORE saga execution
+
+#### Timeout Detection
+- @Scheduled job polls for sagas exceeding 30-second threshold
+- Resumes from last persisted state (intermediate states visible)
+- Timeout detector respects @Version optimistic locking
+
+#### Validation (Pre-Saga)
 ```
-Daily at 9:00 AM UTC:
-┌────────────────────────────────────────────────────────┐
-│ Spring Batch Job: ProcessDividendDRIP                 │
-│                                                        │
-│ Step 1: Read                                          │
-│   SELECT * FROM portfolio_dividend_drip               │
-│   WHERE enabled=true AND last_executed < TODAY        │
-│   → 50,000 accounts returned (chunked)                │
-│                                                        │
-│ Step 2: Process                                       │
-│   For each account:                                   │
-│   - Calculate: dividend payout = cash_balance * 2%    │
-│   - Fetch current market price (via Market Data SVC)  │
-│   - Calculate shares to buy = payout / price          │
-│   - Create BUY transaction                            │
-│                                                        │
-│ Step 3: Write                                         │
-│   Save transactions in batch to ledger-service        │
-│   Update portfolio holdings (batch)                   │
-│   Update drip status (last_executed = TODAY)          │
-│   Publish DividendReinvested event to Kafka           │
-│                                                        │
-│ Step 4: Skip                                          │
-│   If account has < $10 cash → skip (not worth it)     │
-│   If market price unavailable → log error + skip      │
-│                                                        │
-│ Result: 50,000 reinvestments processed in 2 minutes   │
-└────────────────────────────────────────────────────────┘
-
-Why Spring Batch for this?
-- 50K accounts too many for one HTTP request
-- Need retry/skip logic if market data API unavailable
-- Need transaction atomicity per account
-- Spring Batch handles chunking, pagination, error recovery
+1. idempotencyKey uniqueness check
+2. giver.userId != receiverId (not self-gift)
+3. Holding(giver, ticker).quantity >= requested quantity
+4. User(receiverId) exists
+5. quantity > 0
 ```
 
----
-
-#### **5. Portfolio Leaderboard (MongoDB Aggregation Pipeline)**
-
+#### API Contract
 ```
-Query: Top 100 portfolios by total return (YTD)
-┌────────────────────────────────────────────────────────┐
-│ Traditional SQL (SLOW)                                │
-│                                                        │
-│ SELECT u.username, SUM(h.qty * mp.current_price)     │
-│   - SUM(h.qty * h.avg_cost)                           │
-│   AS return                                           │
-│ FROM holdings h                                       │
-│ JOIN portfolio p ON h.portfolio_id = p.id             │
-│ JOIN market_price mp ON h.ticker = mp.ticker          │
-│ JOIN user u ON p.user_id = u.id                       │
-│ WHERE h.created_at > DATE_SUB(TODAY, 365 DAYS)        │
-│ GROUP BY u.id                                         │
-│ ORDER BY return DESC                                  │
-│ LIMIT 100                                             │
-│                                                        │
-│ Execution time: 45 seconds (4 table joins, index miss) │
-│                                                        │
-│ ────────────────────────────────────────────────────  │
-│                                                        │
-│ MongoDB Aggregation (FAST)                            │
-│                                                        │
-│ db.portfolioReadModel.aggregate([                     │
-│   {$match: {createdAt: {$gt: oneYearAgo}}},          │
-│   {$project: {                                        │
-│      userId: 1,                                       │
-│      username: 1,                                     │
-│      return: {$subtract: [                            │
-│        {$sum: "$holdings.currentValue"},              │
-│        {$sum: "$holdings.costBasis"}                  │
-│      ]}                                               │
-│    }},                                                │
-│   {$sort: {return: -1}},                             │
-│   {$limit: 100}                                       │
-│ ]).toArray()                                          │
-│                                                        │
-│ Execution time: 2 seconds (denormalized, no joins)    │
-│                                                        │
-└────────────────────────────────────────────────────────┘
+POST /api/portfolio/gift
+{
+  "receiverId": 456,
+  "tickerSymbol": "AAPL",
+  "quantity": "10.500000",
+  "idempotencyKey": "gift-2024-08-12-uuid"
+}
 
-Why MongoDB aggregation pipeline?
-- Denormalized data (no joins needed)
-- Aggregation operations happen on Mongo server (not in app)
-- Can use MongoDB indexes on createdAt + return fields
-- Scales better: MongoDB can parallelize across shards if needed
+Response (200):
+{
+  "sagaId": "uuid",
+  "status": "INITIATED|COMPLETED",
+  "giver": { "userId": 123, "holdingAfter": {...} },
+  "receiver": { "userId": 456, "holdingAfter": {...} },
+  "createdAt": "2026-08-12T12:45:54Z"
+}
 ```
 
----
+#### Database Entities
 
-## 📚 LEARNING OBJECTIVES (Interview Prep)
+**GiftSaga**:
+- sagaId (UUID, unique) - correlation ID
+- userId (Long) - giver
+- receiverId (Long) - receiver
+- tickerSymbol (String) - stock
+- quantity (BigDecimal, scale=6)
+- idempotencyKey (String, unique)
+- status (GiftSagaStatus enum)
+- giftStartedAt, compensationStartedAt (LocalDateTime)
+- failureReason (String)
+- version (Long) - optimistic locking
 
-### 1. **CQRS Pattern**
-- **What**: Command Query Responsibility Segregation
-- **When**: Read/write patterns highly asymmetric (100:1 ratio)
-- **How**: Separate write model (PostgreSQL) from read model (MongoDB)
-- **Trade-off**: More infrastructure, eventual consistency
-- **Real-world**: Amazon uses CQRS for product catalog (1B reads/sec, 1K writes/sec), Stripe for customer dashboards
+**GiftSagaRepository queries**:
+- findByIdempotencyKey() - idempotency check
+- findActiveGiftsByUserId() - user-centric queries
+- findTimedOutGifts(LocalDateTime) - timeout detection
+- findByReceiverId() - receiver-side audit
 
-### 2. **Distributed Locking**
-- **What**: Atomic, multi-service coordination
-- **When**: Multiple instances, shared resource (inventory, balance)
-- **How**: Redis SETNX or Redisson library
-- **Gotcha**: Clock skew, network delays, zombie locks (solved by Redisson)
-- **Real-world**: Uber uses Redis locks for ride assignment (can't double-book a driver)
+#### Key Design Decisions
 
-### 3. **WebSocket Architecture**
-- **What**: Persistent bidirectional connection (not polling)
-- **When**: Real-time updates (alerts, live prices, notifications)
-- **How**: Spring WebSocket + SockJS for fallback + STOMP message broker
-- **Gotcha**: Stateful connections hard to scale (need Redis Pub/Sub for multi-instance)
-- **Real-world**: Bloomberg terminals, trading platforms, live dashboards
+1. **NOT @Transactional on orchestrator**
+   - Each step commits independently (eventual consistency)
+   - Allows timeout detector to resume from intermediate states
+   - If crash mid-saga, no automatic rollback (must compensate explicitly)
 
-### 4. **Spring Batch at Scale**
-- **What**: Chunked, parallelizable batch processing
-- **When**: 10K+ records, need retry/skip logic, atomic per-chunk
-- **How**: ItemReader → ItemProcessor → ItemWriter, configurable chunk size
-- **Tuning**: Thread pool size, chunk size, fetch size (database pagination)
-- **Real-world**: Daily reconciliation jobs (JP Morgan processes $4T/day via batch)
+2. **Separate DEBITING_GIVER and CREDITING_RECEIVER steps**
+   - Clear responsibility boundary per step
+   - Compensation maps 1:1 to steps
+   - Easier to test and debug
 
-### 5. **Performance Tuning Mindset**
-- **Measure first**: Use load testing, profilers, APM tools
-- **Identify bottleneck**: CPU, I/O wait, network, database
-- **Fix one thing**: Thread pool size, connection pool, batch size, query optimization
-- **Validate**: Re-run load test, confirm latency improved
-- **Repeat**: Move to next bottleneck
+3. **Record ledger AFTER holdings update**
+   - Holdings = source of truth (actual portfolio state)
+   - Ledger = audit trail (can be regenerated)
+   - If ledger fails, holdings correct; reconciliation can fix it
 
----
+4. **Separate idempotencyKey from sagaId**
+   - sagaId is internal system ID (correlation across events/logs)
+   - idempotencyKey is API contract
+   - Decoupled concerns
 
-## 🎯 PHASE 10 TOPICS (Week-by-Week Breakdown)
+5. **Orchestration not choreography**
+   - Single orchestrator class shows full flow
+   - Easier to read, test, and maintain
 
-### **Week 23: CQRS & Event Projection**
-1. Design portfolio read model schema (MongoDB)
-2. Create projection service (Kafka consumer → MongoDB)
-3. Implement projection rebuild logic (idempotent)
-4. Add catch-up logic (resume from checkpoint)
-5. Validation: Query latency <100ms with 1M portfolios
+#### Edge Cases
 
-### **Week 24: Distributed Locking & Flash Sales**
-1. Set up Redisson (Redis client library)
-2. Implement distributed lock abstraction
-3. Refactor flash sale logic (old: database lock → new: Redis lock)
-4. Add lock timeout + TTL configuration
-5. Validation: 1000 concurrent buyers, zero overselling
+| Case | Handling |
+| --- | --- |
+| Giver has 10, requests 15 | Validation rejects (400) |
+| Receiver doesn't exist | Validation rejects (400) |
+| Self-gift (userId == receiverId) | Validation rejects (400) |
+| Duplicate idempotencyKey | Idempotency check returns existing saga |
+| Step 2 fails | Exception caught; compensation undoes Step 1 |
+| Timeout during RECORDING_LEDGER | Timeout detector resumes, retries step 3 |
+| Compensation fails | Saga marked FAILED; requires manual intervention |
 
-### **Week 25: WebSocket Alerts & Batch Reinvestment**
-1. Implement WebSocket endpoint for watchlist alerts
-2. Add market price consumer (Kafka → evaluate watches → WebSocket push)
-3. Create dividend DRIP batch job (Spring Batch)
-4. Configure scheduler (cron: daily 9:00 AM UTC)
-5. Validation: Leaderboard query <5s, batch processes 50K/2 min
+#### Logging Strategy
 
-### **Week 26: Load Testing & Performance Tuning**
-1. Set up load test framework (Gatling or k6)
-2. Define realistic user scenarios (500 TPS, mixed read/write)
-3. Run baseline test (identify bottlenecks)
-4. Tune: thread pools, DB connection pools, Kafka consumer counts
-5. Verify target SLAs: p99 latency <1s, p95 <500ms
+**Entry** (GiftController): `DEBUG: Gift request received { receiverId, ticker, quantity, idempotencyKey }`
 
----
+**Steps** (GiftSagaOrchestrator):
+```
+DEBUG: [sagaId={sagaId}] Step 1 starting: debit giver userId={giver}
+DEBUG: [sagaId={sagaId}] Step 1 success: holding reduced to {qty}
+DEBUG: [sagaId={sagaId}] Step 2 starting: credit receiver userId={receiver}
+DEBUG: [sagaId={sagaId}] Step 2 success: holding increased to {qty}
+DEBUG: [sagaId={sagaId}] Step 3 starting: record ledger
+DEBUG: [sagaId={sagaId}] Step 3 success: ledger recorded
+DEBUG: [sagaId={sagaId}] Saga COMPLETED in {ms}ms
+```
 
-## 🛠️ TECHNOLOGIES & PATTERNS
+**Compensation** (on failure):
+```
+WARN: [sagaId={sagaId}] Exception in step {n}: {exception}
+WARN: [sagaId={sagaId}] Starting compensation from status {status}
+DEBUG: [sagaId={sagaId}] Undo step {n}: {action}
+WARN: [sagaId={sagaId}] Saga COMPENSATED
+```
 
-| Topic | Technology | Why This |
-|-------|-----------|---------|
-| **Read Model** | MongoDB | Denormalized, fast queries, scales horizontally |
-| **Projection** | Kafka consumer | Decoupled, can replay, horizontal scale |
-| **Distributed Lock** | Redisson | Simple API, handles retry/TTL/deadlock |
-| **WebSocket** | Spring WebSocket + STOMP | Standard, Spring integration, SockJS fallback |
-| **Batch** | Spring Batch | Chunking, retry, skip, Spring integration |
-| **Load Test** | Gatling (Scala DSL) or k6 (JavaScript) | Realistic scenarios, easy reporting |
-| **Monitoring** | Prometheus + Grafana (existing) | Already deployed, add Phase 10 metrics |
+#### E2E Test Scenarios
 
----
+1. **Happy Path**: Giver 100→90, Receiver +10, ledger dual entries, COMPLETED
+2. **Validation Error**: Insufficient holdings → 400, no saga created
+3. **Idempotency**: Duplicate request with same key → same sagaId, no double-transfer
+4. **Timeout Recovery**: Stuck saga resumed from intermediate state → completes successfully
 
-## 📊 SUCCESS METRICS (Testable)
+#### Kafka Events
 
-| Metric | Baseline | Target | How to Measure |
-|--------|----------|--------|-----------------|
-| Portfolio query latency (p99) | 500ms | <100ms | Query response time logs |
-| Flash sale overselling | N/A | 0% | Order count vs inventory |
-| Watchlist alert latency (mean) | N/A | <100ms | WebSocket frame timestamp |
-| Batch DRIP throughput | N/A | 50K/2min | Batch job execution logs |
-| Leaderboard query (p50) | 45s | <5s | Query response time logs |
-| Load test throughput | N/A | 500 TPS | Gatling/k6 report |
-| Error rate under load | N/A | <0.1% | Gatling/k6 report |
+Events published via SagaOutboxWriter:
+- GiftInitiatedEvent
+- GiftCompletedEvent  
+- GiftFailedEvent
+
+Partition key: `giverId` (ensures user's gifts ordered by partition)
 
 ---
 
-## ⚠️ RISKS & MITIGATION
+## Topic 3 - Flash Sale Stock Drops
 
-| Risk | Impact | Mitigation |
-|------|--------|-----------|
-| MongoDB projection falls behind (lag >5s) | Users see stale portfolios | Implement lag detection alert; replay logic for catch-up |
-| Distributed lock contention (lock wait >1s) | Flash sale users see timeout | Tune lock timeout; add metric for lock wait times |
-| WebSocket connection exhaustion (10K users = ?MB) | Service runs out of memory | Set max connection limit; monitor connections; add load balancer websocket support |
-| Batch job runs long (>10 min) | Next execution skipped (missing dividend) | Add job restart logic; increase chunk size if bottleneck is I/O |
-| Load test doesn't match production (test ≠ real) | Tuning won't help production | Include realistic network latency in test; use production-like data volume |
+### Design intent
 
----
+- protect inventory and portfolio mutation consistency under burst traffic.
 
-## 🔄 KNOWLEDGE DEPENDENCIES (MUST KNOW)
+### Core deliverables
 
-Before Phase 10, you need solid understanding of:
-1. ✅ **Kafka** — topics, consumers, partitions, offset management (Phase 6)
-2. ✅ **Event Sourcing** — immutable events, replay, projections (Phase 5–6)
-3. ✅ **Distributed transactions** — saga pattern, compensation (Phase 6)
-4. ✅ **Spring Batch** — used in Phase 2, extended here for scale
-5. ✅ **Redis** — data structures, atomic operations (Phase 3, cached)
-6. ✅ **Performance measurement** — load testing, profiling (Phase 9 metrics)
+- distributed lock strategy (Redis/Redisson with expiration)
+- oversell prevention + bounded retries
+- cache burst invalidation strategy
+- fairness approach (optional queue/windowing)
+
+### Acceptance criteria
+
+- no overselling under parallel load
+- p95/p99 remains within defined SLA targets
+- lock leak/fencing risk documented and mitigated
 
 ---
 
-## 📖 HISTORICAL CONTEXT
+## Topic 4 - Price Alert Watchlist
 
-Why do companies need Phase 10?
+### Design intent
 
-**Problem (2010s):**
-- Monolith grows to 10M users
-- Queries slow down (5s → 10s)
-- High-volume sales cause inventory overselling (lost revenue)
-- Batch jobs finish too late
-- No one knows if system can handle Black Friday
+- allow users to define alert rules and receive asynchronous notifications.
 
-**Solution:**
-- CQRS separates scaling concerns (read model ≠ write model)
-- Distributed locking prevents coordination bugs
-- Batch processing handles volume without user-facing slowdown
-- Load testing predicts problems before they hit production
+### Core deliverables
 
-**Industry examples:**
-- **Netflix**: CQRS for 200M user profiles (reads >> writes)
-- **Airbnb**: Distributed locks for inventory management (no double-booking)
-- **Stripe**: Batch processing for daily settlement (1M+ transactions)
-- **Uber**: Flash sales for surge pricing (demand locks prevent race conditions)
+- watchlist CRUD model
+- async evaluator (scheduled or stream-triggered)
+- dedupe/cooldown logic to avoid alert spam
+- push path (websocket/event notification)
+
+### Acceptance criteria
+
+- correct trigger behavior for threshold crossing
+- no repeated spam for same steady-state condition
+- bounded evaluation latency
 
 ---
 
-## 📝 NEXT STEPS
+## Topic 5 - Dividend DRIP
 
-1. ✅ **Review & Approve** this design plan
-2. 📖 **Deep-dive learning** (interview-style Q&A for each topic)
-3. 🏗️ **Implementation roadmap** (step-by-step for each topic)
-4. 💻 **Code implementation** (CQRS, locks, batch, WebSocket, tests)
-5. 🧪 **Load testing & validation** (verify SLAs met)
-6. 📊 **Performance tuning** (iterate until targets met)
-7. 📚 **Documentation** (update progress.md, learning_log.md, etc.)
+### Design intent
+
+- periodically reinvest dividends into holdings while preserving ledger correctness.
+
+### Core deliverables
+
+- dividend accrual model
+- scheduled DRIP batch job (idempotent)
+- fractional share handling rules
+- ledger + portfolio update linkage
+
+### Acceptance criteria
+
+- deterministic reinvestment calculations
+- safe restart/replay of batch without double credit
+- full auditability per user run
+
+---
+
+## Topic 6 - Tax Report Generation
+
+### Design intent
+
+- generate compliance-friendly annual/periodic user tax artifacts.
+
+### Core deliverables
+
+- report job inputs (user, year, jurisdiction mode)
+- realized/unrealized gain calculation policy
+- CSV/PDF output generation pipeline
+- storage/download access control
+
+### Acceptance criteria
+
+- reproducible output for same input snapshot
+- traceable source transactions per report row
+- secure access only for owner/admin
+
+---
+
+## Topic 7 - Portfolio Leaderboard
+
+### Design intent
+
+- derive ranked portfolio insights with efficient read-side aggregations.
+
+### Core deliverables
+
+- ranking dimensions (returns, growth, consistency)
+- Mongo aggregation pipelines
+- pagination + caching strategy
+- anti-gaming guardrails (minimum activity threshold, etc.)
+
+### Acceptance criteria
+
+- query performance under expected dataset
+- stable ranking semantics across refresh windows
+- no sensitive financial leakage
+
+---
+
+## Topic 8 - Return Clawback Saga
+
+### Design intent
+
+- on order returns/refunds, reverse prior stock-back effects through compensation flow.
+
+### Core deliverables
+
+- clawback eligibility and decision rules
+- saga steps for reverse adjustments
+- failure compensation path and retries
+- linkage to existing reward lifecycle events
+
+### Acceptance criteria
+
+- holdings/rewards converge to expected post-return state
+- idempotent under duplicate return events
+- clear compensating action logs
+
+---
+
+## Topic 9 - Load Testing
+
+### Design intent
+
+- quantify real bottlenecks before tuning.
+
+### Core deliverables
+
+- scenario scripts (buy/sell/reward/read-heavy/flash-sale)
+- baseline SLA targets
+- resource telemetry capture during tests
+- bottleneck report with ranked findings
+
+### Acceptance criteria
+
+- repeatable test scripts and environments
+- clear throughput/latency/error breakdown
+- actionable bottleneck ranking
+
+---
+
+## Topic 10 - Performance Tuning
+
+### Design intent
+
+- apply evidence-driven optimizations from Topic 9 findings.
+
+### Core deliverables
+
+- DB index/query plan improvements
+- connection pool tuning (Hikari)
+- thread pool and consumer concurrency tuning
+- cache and serialization optimizations
+
+### Acceptance criteria
+
+- measurable improvement vs baseline
+- no functional regression in transactional correctness
+- tunings documented with rollback strategy
+
+---
+
+## 8) Cross-Topic Technical Guardrails
+
+Apply to every remaining topic:
+
+1. Idempotency on externally-triggered workflows
+2. Explicit failure visibility (no silent catch-and-skip)
+3. Correlation IDs across saga/event boundaries
+4. Transaction boundary clarity for each step
+5. Backward-compatible API evolution
+6. Feature flags for risky rollouts
+
+---
+
+## 9) Dependency Notes from Current Architecture
+
+1. Topic 1 produced read-model/event infrastructure that future topics should reuse for portfolio read updates.
+2. Existing saga patterns from sell-to-spend can be reused as blueprint for Topics 2 and 8.
+3. Observability from Phase 9 should be reused to track new Topic 10 workloads and SLIs.
+
+---
+
+## 10) What to execute next (immediate)
+
+1. Finish Topic 1 doc/logging polish in **main repo workspace**.
+2. Start Topic 8 design (Return Clawback Saga) as next high-value correctness feature.
+3. Then Topic 2 design (Stock Gifting Saga) using same reliability principles.
+
+---
+
+## 11) Handoff prompt for next chat
+
+Use:
+
+> Continue Phase 10 using `phase-10-design-plan.md` and `phase-10-learning-deep-dive.md`.  
+> First verify Topic 1 implementation state and close pending JavaDoc/logging polish on uncommitted Topic 1 files in main repo.  
+> Then begin Topic 8 (Return Clawback Saga) design: data model, saga steps, idempotency, failure compensation, and manual E2E validation plan.
+
+---
+
+## 12) Final status summary
+
+- **Phase 10 overall:** In progress (Topic 1 complete; Topics 2-10 pending)
+- **Topic 1:** Functionally complete, with final code-quality polish pending in main repo workspace
+- **Next best step:** Move to Topic 8 design after Topic 1 polish closure

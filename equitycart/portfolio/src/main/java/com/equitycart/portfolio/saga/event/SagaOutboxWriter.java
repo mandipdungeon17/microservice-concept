@@ -47,8 +47,7 @@ public class SagaOutboxWriter {
 
     String json = convertObjToJsonString(event);
 
-    OutboxEvent outboxEvent =
-        getOutboxEvent(saga, json, event.getClass().getName(), eventType, "sell-to-spend-saga");
+    OutboxEvent outboxEvent = getOutboxEvent(saga, json, event.getClass().getName(), eventType);
 
     outboxEventRepository.save(outboxEvent);
     log.info(
@@ -73,12 +72,12 @@ public class SagaOutboxWriter {
   }
 
   private static OutboxEvent getOutboxEvent(
-      SellToSpendSaga saga, String json, String className, String eventType, String topic) {
+      SellToSpendSaga saga, String json, String className, String eventType) {
     return OutboxEvent.builder()
         .aggregateType("SellToSpendSaga")
         .aggregateId(saga.getId())
         .eventType(eventType)
-        .topic(topic)
+        .topic("sell-to-spend-saga")
         .payload(json)
         .payloadType(className)
         .status(OutboxStatus.PENDING)

@@ -6,6 +6,7 @@ import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
 import com.equitycart.order.dto.UpdateOrderStatusRequest;
 import com.equitycart.order.enums.OrderStatus;
+import com.equitycart.portfolio.async.event.PortfolioOutboxWriter;
 import com.equitycart.portfolio.dto.SellToSpendRequest;
 import com.equitycart.portfolio.event.NotificationPublisher;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
@@ -87,6 +88,7 @@ public class SellToSpendSagaOrchestrator {
   private final SagaOutboxWriter sagaOutboxWriter;
   private final PortfolioEventStore portfolioEventStore;
   private final NotificationPublisher notificationPublisher;
+  private final PortfolioOutboxWriter portfolioOutboxWriter;
 
   @Value("${equitycart.saga.timeout-seconds:30}")
   private long timeoutSeconds;
@@ -208,7 +210,7 @@ public class SellToSpendSagaOrchestrator {
         Map.of("orderId", saga.getOrderId(), "sagaId", saga.getSagaId().toString()));
 
     sagaOutboxWriter.writeSagaLifecycleEvent(savedSaga, "SAGA_STEP_COMPLETED", "REDUCE_HOLDING");
-
+    portfolioOutboxWriter.writeSellToSpendEvent(savedSaga);
     log.info(
         "Saga step 1 completed: reduced {} shares of {} for userId={}",
         saga.getQuantity(),
@@ -316,6 +318,8 @@ public class SellToSpendSagaOrchestrator {
       SellToSpendSaga savedSaga = sellToSpendSagaRepository.save(saga);
 
       sagaOutboxWriter.writeSagaLifecycleEvent(savedSaga, "SAGA_COMPENSATED", null);
+
+      portfolioOutboxWriter.writeSellToSpendCompensatedEvent(savedSaga);
 
     } catch (Exception e) {
       saga.setStatus(SagaStatus.FAILED);

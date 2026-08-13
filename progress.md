@@ -1073,6 +1073,59 @@ API Gateway (port 8080, Netty/WebFlux)
 - Infra networking hardened for split-compose startup using a shared external Docker network and startup-time network creation.
 - Centralized EFK/Fluentd stack documented as **environment-blocked** by corporate Zscaler image access policy; accepted fallback is structured per-service logs + `core-loglens`.
 
+## Phase 10 — CQRS & Advanced Features (Topic 1: Portfolio Read Model — COMPLETE)
+
+### Topic 1 Completion Summary (2026-01-08)
+
+**Phase 10 Topic 1 — CQRS Portfolio Read Model (Event-Driven Projection):**
+
+- **Deliverables Completed:**
+  - CQRS Architecture: Write-model (PostgreSQL) + Read-model (MongoDB)
+  - Event-driven projection: PortfolioReadModelOutboxConsumer listens to portfolio-projection Kafka topic
+  - Full-rebuild strategy: each Kafka event triggers complete user snapshot rebuild from PostgreSQL
+  - Idempotency via MongoDB upsert by userId: Kafka at-least-once + upsert = exactly-once semantics
+  - Debezium CDC primary path: PostgreSQL WAL → Kafka topic (via Kafka Connect)
+  - OutboxPoller fallback path: application polls outbox_events table → publishes to Kafka
+  - Feature flag (@Profile("!cdc")): single Spring app runs in CDC mode or polling mode
+  - userId as Kafka partition key: all user events route to same partition → consistent rebuild order
+  - Scheduled 24-hour reconciliation job: detects and repairs drift between PostgreSQL and MongoDB
+  - Method-level JavaDoc and logging: PortfolioReadModelSynchronizer (rebuildReadModelForUser algorithm), PortfolioOutboxWriter (8 event methods with parameter docs)
+  - Explained why synchronizeReadModels scheduled job is commented (event-driven supersedes polling)
+  - @Lob gotcha documented: use @Column(columnDefinition = "text") instead (CDC compatibility)
+
+- **Code Quality:**
+  - All Topic 1 files compile successfully (gradle clean build -p portfolio)
+  - Spotless formatting applied and validated
+  - Comprehensive JavaDoc and logging at debug/info/error levels
+  - No unrelated code changes — focused on documentation polish only
+
+- **Manual E2E Validation Checklist (Ready for execution):**
+  - BUY trade → outbox row → Debezium → Kafka → consumer rebuilds → API returns updated portfolio
+  - SELL trade → outbox row → Debezium → Kafka → consumer rebuilds → API returns updated portfolio
+  - REWARD_GRANTED → outbox row → Debezium → Kafka → consumer rebuilds → API returns pending reward
+  - REWARD_VESTED → outbox row → Debezium → Kafka → consumer rebuilds → API returns vested reward
+  - SELL_TO_SPEND_INITIATED → outbox row → Debezium → Kafka → consumer rebuilds → API returns saga state
+  - REFUND_RESTORED (compensation) → outbox row → Debezium → Kafka → consumer rebuilds → API returns restored holdings
+
+- **Architectural Decisions Documented:**
+  - Correctness-first over premature optimization (full rebuild vs incremental delta)
+  - Event-driven eliminates time-based polling
+  - Scheduled reconciliation for drift detection and repair (separate from happy path)
+  - Separate read and write technologies for CQRS performance tradeoff
+  - @Profile for deployment flexibility (CDC vs polling mode)
+
+- **Learning Files Updated:**
+  - kafka-learning.md: Section 15 (Phase 10 Topic 1 CQRS, CDC implementation, event-driven rebuild)
+  - learning_log.md: Phase 10 Topic 1 section (10 roadblocks, 9 core concepts, 5 interview Q&A)
+  - progress.md: Topic 1 marked COMPLETE
+  - (Pending: java-reference.md, microservice-patterns.md, springboot-reference.md — see tasks below)
+
+- **Residual Risks & Open Questions:**
+  - Full rebuild latency: scaling to millions of users may require incremental delta projection (deferred to when metrics show bottleneck)
+  - Manual E2E validation in progress (not automated JUnit suite) — sufficient for MVP confidence
+  - CDC requires external Kafka Connect infrastructure — production dependency
+  - Consumer group rebalancing on partition count changes (not tested yet)
+
 ## Phase Checklist
 
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -1085,7 +1138,7 @@ API Gateway (port 8080, Netty/WebFlux)
 - [x] Phase 7: Microservices Decomposition (Weeks 16-18) — COMPLETE (E2E testing deferred to Phase 8)
 - [x] Phase 8: Security Hardening (Weeks 19-20) — COMPLETE (E2E integration tests deferred)
 - [x] Phase 9: Observability (Weeks 21-22) — COMPLETE (EFK/Fluentd blocked by enterprise network policy; fallback accepted)
-- [ ] Phase 10: Advanced Features & Scale (Weeks 23-26)
+- [~] Phase 10: Advanced Features & Scale (Weeks 23-26) — Topic 1 COMPLETE
 
 ### Known Issues
 

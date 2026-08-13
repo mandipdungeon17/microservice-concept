@@ -11,6 +11,7 @@ import com.equitycart.ledger.enums.AccountType;
 import com.equitycart.ledger.enums.ReferenceType;
 import com.equitycart.ledger.service.api.LedgerService;
 import com.equitycart.marketdata.service.api.MarketDataService;
+import com.equitycart.portfolio.async.event.PortfolioOutboxWriter;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
@@ -68,6 +69,7 @@ public class StockBackRewardConsumer {
   private final LedgerService ledgerService;
   private final SellToSpendSagaRepository sellToSpendSagaRepository;
   private final PortfolioEventStore portfolioEventStore;
+  private final PortfolioOutboxWriter portfolioOutboxWriter;
 
   @KafkaListener(
       topics = "order-delivered",
@@ -185,6 +187,8 @@ public class StockBackRewardConsumer {
                 "Cancelled PENDING reward for orderId={}, ticker={}",
                 event.getOrderId(),
                 stockBackReward.getTickerSymbol());
+
+            portfolioOutboxWriter.writeRewardCancelledEvent(stockBackReward);
           } else if (stockBackReward.getStatus().equals(VestingStatus.VESTED)) {
             log.warn(
                 "Reward for orderId={}, ticker={} already vested, cannot cancel. Manual review needed.",
@@ -272,6 +276,8 @@ public class StockBackRewardConsumer {
         saga.getPricePerShare(),
         saga.getSaleProceeds(),
         Map.of("orderId", event.orderId(), "sagaId", saga.getSagaId().toString()));
+
+    portfolioOutboxWriter.writeRefundRestoredEvent(saga, event.orderId());
 
     log.info(
         "Stock refund completed: re-added {} shares of {} at {} for orderId={}",

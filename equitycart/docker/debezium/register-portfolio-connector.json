@@ -1,0 +1,28 @@
+{
+  "name": "equitycart-portfolio-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "postgres",
+    "database.dbname": "equitycart_portfolio",
+    "database.server.name": "equitycart-portfolio-db",
+    "table.include.list": "public.outbox_events",
+    "topic.prefix": "equitycart-portfolio-db",
+    "slot.name": "portfolio_outbox_slot",
+    "publication.name": "portfolio_outbox_publication",
+    "plugin.name": "pgoutput",
+    "transforms": "outbox",
+    "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.field.event.id": "id",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.aggregate.type": "aggregate_type",
+    "transforms.outbox.table.field.aggregate.id": "aggregate_id",
+    "transforms.outbox.table.field.event.type": "event_type",
+    "transforms.outbox.route.by.field": "topic",
+    "transforms.outbox.table.field.event.payload": "payload",
+    "transforms.outbox.route.topic.replacement": "${routedByValue}"
+  }
+}

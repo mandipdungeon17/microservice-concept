@@ -2,6 +2,7 @@ package com.equitycart.portfolio.service.impl;
 
 import com.equitycart.commons.exception.InsufficientSharesException;
 import com.equitycart.commons.exception.ResourceNotFoundException;
+import com.equitycart.portfolio.async.event.PortfolioOutboxWriter;
 import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.entity.Portfolio;
 import com.equitycart.portfolio.entity.StockBackReward;
@@ -54,6 +55,7 @@ public class PortfolioServiceImpl implements PortfolioService {
   private final StockBackRewardRepository stockBackRewardRepository;
   private final VestingHelper vestingHelper;
   private final PortfolioEventStore portfolioEventStore;
+  private final PortfolioOutboxWriter portfolioOutboxWriter;
   private final PortfolioMetrics portfolioMetrics;
 
   private static final int retryOptimisticLocking = 3;
@@ -202,7 +204,9 @@ public class PortfolioServiceImpl implements PortfolioService {
           dollarVal,
           Map.of("orderId", orderId, "vestingDate", vestingDate.toString()));
 
+      portfolioOutboxWriter.writeRewardGrantedEvent(savedStockBackReward);
       portfolioMetrics.recordRewardGranted();
+
       return savedStockBackReward;
     }
   }
