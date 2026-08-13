@@ -1395,6 +1395,36 @@ mongoTemplate.upsert(query, update, ReadModelPortfolio.class);
 
 **Alternative approach (rejected):** Using `repository.save(newDoc)` always inserts → duplicate docs with different ObjectIds → manual deduplication logic → complex.
 
+**Idempotency in Saga State Machines (Topic 8 - Clawback):**
+
+The same principle applies to saga orchestration. When a `ClawbackSagaOrchestrator` receives a message for an in-flight saga (e.g., during timeout recovery or retry), it must not duplicate state transitions:
+
+```java
+// ClawbackSaga saga state machine (persisted to database):
+// Initial: INITIATED (vested reward, refund approved, status CLAWBACK_INITIATED)
+// Step 1 → LEDGER_ADJUSTED (reversal ledger entry recorded)
+// Step 2 → HOLDING_REDUCED (shares removed from portfolio)
+// Step 3 → COMPLETED (clawback finished)
+
+// Idempotency pattern:
+if (saga.status == ClawbackStatus.LEDGER_ADJUSTED) {
+    // Kafka retry or timeout recovery calls this method again
+    // Skip ledger reversal (already done), proceed to step 2
+    skipToStep(ClawbackStep.HOLDING_REDUCTION);
+} else if (saga.status == ClawbackStatus.INITIATED) {
+    // First time seeing this saga, execute normally
+    performLedgerReversal(saga);
+    saga.status = ClawbackStatus.LEDGER_ADJUSTED;
+    sagaRepository.save(saga);
+}
+```
+
+**Key difference from read-model upsert:**
+- **Read models** (MongoDB): Idempotency via upsert (latest value wins)
+- **Sagas** (state machines): Idempotency via status gate (skip completed steps)
+
+Both achieve eventual consistency: repeated events produce the same outcome, but the mechanism differs. Sagas must guard against re-executing already-committed step logic (which may have side effects), while read-model projections can safely re-apply the same state transformation.
+
 ### @Lob Gotcha: PostgreSQL WAL + Debezium CDC
 
 **Problem discovered in Phase 10:**
@@ -1431,6 +1461,44 @@ Each user's events always route to the same partition.
 2. **Concurrent rebuilds:** Multiple users (different partitions) rebuild in parallel safely
 3. **Saga compensation:** Sell-to-spend saga sends events in sequence (SELL_TO_SPEND_INITIATED, SELL_TO_SPEND_COMPLETED or COMPENSATED). Same user partition guarantees order.
 
+**Topic 8 Addition - Clawback Saga Compensation Ordering:**
+
+The partition key strategy is **critical for compensation safety**. The clawback saga for a vested reward follows this sequence:
+
+```
+Partition key: userId (same for all events in the clawback flow)
+
+Event Sequence (MUST arrive in order):
+1. CLAWBACK_INITIATED → saga persisted with status INITIATED
+2. LEDGER_REVERSAL_RECORDED → saga updated, status LEDGER_ADJUSTED
+3. HOLDING_REDUCED → saga updated, status HOLDING_REDUCED
+4. CLAWBACK_COMPLETED → saga terminal state
+   OR
+   CLAWBACK_COMPENSATING → saga entering compensation path (timeout or failure)
+   LEDGER_REVERSAL_UNDONE → restore ledger to original
+   HOLDING_RESTORED → restore shares
+   CLAWBACK_FAILED → saga terminal state (manual intervention needed)
+```
+
+**Partition key guarantee:** By routing all clawback events for user 123 to the same Kafka partition, the consumer processes them sequentially. This ensures:
+- Compensation steps cannot execute before the steps they're undoing have committed
+- No race condition where HOLDING_REDUCED arrives before LEDGER_REVERSAL_RECORDED is persisted
+- If timeout detection retriggers compensation, the events arrive in order again (idempotency via saga status gate)
+
+**Without the partition key strategy (hash-based on different keys):**
+```
+User 123's clawback events scattered across partitions:
+  Partition 0: HOLDING_REDUCED (consumer A)
+  Partition 1: LEDGER_REVERSAL_RECORDED (consumer B)
+  Partition 2: CLAWBACK_INITIATED (consumer C)
+
+Result: Consumer A processes HOLDING_REDUCED before saga is even created (CLAWBACK_INITIATED).
+        Foreign key lookup fails or creates inconsistent state.
+        Compensation safety violated.
+```
+
+This is why `ClawbackOutboxWriter` must use `userId` as the Kafka message key, not `orderId`, `refundId`, or any other domain identifier.
+
 ### How Scheduled Reconciliation Handles Drift
 
 **Background job (ReadModelReconciliation, 24-hour interval):**
@@ -1450,6 +1518,45 @@ for each user:
 - Event-driven rebuild (via Kafka consumer) handles happy path (99.9% of cases)
 - Reconciliation job handles edge cases: Kafka message loss (rare), consumer crash+replay, CDC connector downtime
 - 24-hour interval acceptable because projection is not critical-path (caching/read-only) — business operations use write-model
+
+**Topic 8 Addition - Saga Timeout Detection (Different Purpose, Similar Mechanism):**
+
+While `ReadModelReconciliation` detects projection drift, `ClawbackSagaTimeoutDetector` (also scheduled, 30-second interval for dev/test) detects stuck sagas:
+
+```java
+@Scheduled(fixedRate = 30000)  // Every 30 seconds in dev; hours in production
+void detectTimedOutSagas() {
+  List<ClawbackSaga> stuck = sagaRepository.findByStatusNotInAndUpdatedAtBefore(
+    terminalStates: [COMPLETED, FAILED],
+    threshold: now - 30_seconds
+  );
+  
+  for (ClawbackSaga saga : stuck) {
+    ClawbackStatus lastKnownStep = deriveLastCompletedStep(saga);
+    if (saga.attemptCount >= MAX_RETRIES) {
+      compensateAndFail(saga);  // Give up, go to FAILED state
+    } else {
+      retryFromStep(saga, lastKnownStep);  // Resume from known-good state
+    }
+  }
+}
+```
+
+**Key differences between reconciliation and saga recovery:**
+
+| Aspect | ReadModelReconciliation | ClawbackSagaTimeoutDetector |
+|--------|------------------------|----------------------------|
+| **Purpose** | Detect read-model divergence (state mismatch) | Detect stuck sagas (incomplete transactions) |
+| **Source of truth** | PostgreSQL write-model | ClawbackSaga state machine + Kafka offset history |
+| **Action on detection** | Rebuild entire user portfolio from events | Retry last known step or enter compensation |
+| **Frequency** | 24 hours (acceptable drift window) | 30 seconds (dev) to minutes (prod) |
+| **Business impact if missed** | Stale reads, eventual consistency delay | Uncredited rewards (financial reconciliation miss) |
+
+Both are **eventual consistency repair mechanisms** — neither is a fast path. Fast paths are event-driven:
+- Read-model: Debezium CDC + Kafka consumer (< 1 second)
+- Saga: Kafka listener on `clawback-saga-events` (milliseconds)
+
+Scheduled jobs are **insurance policies** for failure modes that escape the fast path.
 
 ### Why synchronizeReadModels Is Commented Out
 
@@ -1539,7 +1646,7 @@ Phase 10 uses manual E2E validation checklist (auto-testing deferred):
 Each flow verified: PostgreSQL write-model → outbox_events → Kafka → MongoDB read-model → CQRS API response
 ```
 
-### Lessons Learned (Phase 10 Topic 1)
+### Lessons Learned (Phase 10 Topic 1 + Topic 8 Reinforcement)
 
 1. **Correctness-first over optimization:** Full rebuild is simpler, safer, deferred premature optimization to delta projection
 2. **Idempotency via upsert by aggregateId:** Kafka at-least-once + MongoDB upsert by userId = guaranteed exactly-once semantics
@@ -1548,4 +1655,11 @@ Each flow verified: PostgreSQL write-model → outbox_events → Kafka → Mongo
 5. **Partition key strategy matters:** userId as Kafka key ensures replay order and saga compensation safety
 6. **Feature flags for deployment flexibility:** `@Profile("!cdc")` toggles between Debezium and OutboxPoller without code change
 7. **Separate reconciliation for drift repair:** CDC handles happy path, scheduled 24h job handles edge cases
-8. **Manual E2E is sufficient for CQRS validation:** Full JUnit suite would require mocking Kafka/MongoDB complexity; manual checklist provides business confidence
+
+**Topic 8 Reinforcement (Clawback Saga):**
+
+8. **Saga compensation ≠ automatic retry:** Compensation is a NEW forward-operation (ledger reversal, holding restoration) that semantically undoes a failed saga step. It is NOT a database rollback. Confused compensation with retry (thinking "just re-exec the failed step") leads to partial state left behind or duplicate side effects.
+9. **Status gates prevent duplicate saga steps:** Idempotency for sagas doesn't use upsert (like read-models); it uses status checks before each step. If saga.status already shows LEDGER_ADJUSTED, skip `performLedgerReversal()` again even if Kafka retries the same message.
+10. **Timeout detection is event-independent reconciliation:** ClawbackSagaTimeoutDetector runs on a schedule, independent of event streams. It's insurance for "events that never arrived." Contrast with event-driven paths (Debezium → consumer) which are the fast/primary repair mechanism.
+11. **Partition key must propagate through entire saga flow:** The `userId` key that routed the initial `CLAWBACK_INITIATED` event must be used for ALL downstream events (LEDGER_REVERSAL_RECORDED, HOLDING_REDUCED, etc.). Mixing keys (orderId on one step, userId on another) breaks partition-level ordering guarantees and can cause compensation steps to execute out-of-order.
+12. **Manual E2E is sufficient for CQRS + Saga validation:** Full JUnit suite would require mocking Kafka/MongoDB/saga state complexity; manual checklist provides business confidence

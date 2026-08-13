@@ -5,9 +5,11 @@ package com.equitycart.portfolio.eventsourcing.enums;
  * a distinct business operation that mutates (or would have mutated) holding state.
  *
  * <p>Events that ADD shares to holdings: {@link #SHARES_PURCHASED}, {@link #REWARD_VESTED}, {@link
- * #SELL_TO_SPEND_COMPENSATED}, {@link #REFUND_RESTORED}.
+ * #SELL_TO_SPEND_COMPENSATED}, {@link #REFUND_RESTORED}, {@link
+ * #REWARD_CLAWBACK_COMPENSATED}.
  *
- * <p>Events that REMOVE shares from holdings: {@link #SHARES_SOLD}, {@link #SELL_TO_SPEND}.
+ * <p>Events that REMOVE shares from holdings: {@link #SHARES_SOLD}, {@link #SELL_TO_SPEND}, {@link
+ * #REWARD_CLAWED_BACK}.
  *
  * <p>Informational events (no holding change): {@link #REWARD_GRANTED}, {@link #REWARD_CANCELLED}.
  */
@@ -19,5 +21,7 @@ public enum PortfolioEventType {
   REWARD_CANCELLED,
   SELL_TO_SPEND,
   SELL_TO_SPEND_COMPENSATED,
-  REFUND_RESTORED;
+  REFUND_RESTORED,
+  REWARD_CLAWED_BACK,
+  REWARD_CLAWBACK_COMPENSATED
 }

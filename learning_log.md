@@ -5070,3 +5070,31 @@ A: Elastic images were blocked by enterprise Zscaler policy (`docker.elastic.co`
 **Q195: "Where should custom business metrics be instrumented for correctness?" (2026-08-07)**
 
 A: At business-transaction boundaries where outcome is definitive (success/failure/latency finalization), not at controller entry. This avoids counting requests that fail before domain execution and prevents double counting on retries or idempotent short-circuit paths. Example: in order placement, mark idempotent duplicate-return path as success before early return so failure counters are not polluted.
+
+---
+
+**Q196: "What is the difference between saga compensation and saga retry?" (2026-10-15, Topic 8 - Clawback)**
+
+A: **Retry** re-executes the failed step operation unchanged, hoping a transient issue (network timeout, database lock) is now resolved. **Compensation** executes a NEW forward operation that semantically undoes the effect of a completed step. Example: clawback saga fails after ledger reversal (step 1) but before holding reduction (step 2). Retry would re-attempt the holding reduction (retry). Compensation for step 1 would create a reversal-of-reversal ledger entry (undo). These are opposite concerns. Confusion between them leads to mistakes like applying retry logic when you need compensation (step was committed; retrying won't fix it), or trying to compensate a transient error that should be retried (connection timeout on step 2 — re-execute step 2, don't undo step 1).
+
+**Q197: "Why does the ClawbackSaga use status gates instead of unique constraints for idempotency?" (2026-10-15, Topic 8)**
+
+A: Status gates (checking `saga.status >= ClawbackStatus.LEDGER_ADJUSTED` before executing step 1) serve a different idempotency function than unique constraints. Unique constraints prevent duplicate saga creation (e.g., two clawback sagas for the same reward). Status gates prevent re-execution of already-completed steps within a single saga. If a Kafka retry message arrives after app restart, the saga entity exists in the database with status = LEDGER_ADJUSTED. The status gate says "skip this step, move to next." Without the status gate, the step would execute again (creating a duplicate ledger entry, even if the underlying operation is naturally idempotent). The three-layer idempotency strategy (status gates + natural idempotency + unique constraints) provides defense in depth: if one layer fails, the next prevents data corruption.
+
+**Q198: "How does ClawbackSagaTimeoutDetector decide whether to retry or compensate?" (2026-10-15, Topic 8)**
+
+A: It tracks `saga.attemptCount` to distinguish transient failures from systemic ones. On timeout detection: if `attemptCount < MAX_RETRY_ATTEMPTS`, increment and retry from the last known-good step. If `attemptCount >= MAX_RETRY_ATTEMPTS`, give up retrying and enter compensation phase. This prevents infinite retry loops (e.g., a permanently-down ledger service) while still giving transient issues (temporary network glitch) a chance to recover. Compensation is expensive (must undo multiple steps in reverse order), so it's only triggered when retries are exhausted. Without this distinction, either all timeouts would retry forever (hanging the system) or all timeouts would immediately compensate (unnecessary if the issue was transient).
+
+**Q199: "In ClawbackSaga compensation, why reverse the ledger reversal instead of deleting the entry?" (2026-10-15, Topic 8)**
+
+A: Deleting the ledger entry breaks the audit trail and creates idempotency issues. If compensation crashes after deleting the entry, a retry can't detect that the deletion already happened (the entry is gone). Additionally, other processes may have already queried the ledger entry for reconciliation or reporting — deleting it violates those read-side contracts. Instead, compensation creates a NEW ledger entry (reversal-of-reversal) that semantically restores the original state. Net effect: +200 (original) - 200 (reversal) + 200 (undo reversal) = +200. The audit trail shows all three entries, idempotency is safe (creating the undo entry twice produces the same ledger state), and read-side consumers are never confused by missing entries.
+
+**Q200: "How does the Kafka partition key (userId) ensure saga compensation ordering?" (2026-10-15, Topic 8)**
+
+A: The partition key determines which Kafka partition each event routes to. By using `userId` as the key, all clawback events for user 123 route to the same partition. Kafka guarantees per-partition ordering: consumer always processes events in partition order. If clawback events are CLAWBACK_INITIATED, LEDGER_REVERSED, HOLDING_REDUCED, COMPLETED — and they all route to partition 1 — the consumer must process them in that order. Compensation steps depend on this: if HOLDING_REDUCED arrives before LEDGER_REVERSED is persisted, the saga's foreign key lookup fails. Without the partition key strategy (using random hash instead), events could scatter across partitions, and consumers process them concurrently out-of-order — compensation safety violated. The partition key is the foundational guarantee that makes saga orchestration safe.
+
+**Q201: "What triggers ClawbackSaga, and how does it relate to the return/refund lifecycle?" (2026-10-15, Topic 8)**
+
+A: ClawbackSaga is triggered when a **refund is approved for an order that included vested rewards**. Scenario: customer purchases item + earns stock-back reward (vested 30 days later). Customer returns item within 60 days; order status = RETURNED. Refund approved by payment system. At this point, the reward is still VESTED (3 months of holding is now less valuable because order is refunded). The business rule: if refund is approved, any VESTED rewards from that order must be clawed back (customer gets refund but doesn't keep free stocks). So ClawbackSaga is initiated: remove vested reward from portfolio, reverse the ledger entries that granted it, reduce the user's stock position. This is a **remediation transaction** (reversal of a previously-good state) not a failure recovery (undo of an incomplete transaction). The saga pattern is used because this involves cross-service operations (Portfolio + Ledger) that can't atomically roll back. Once started, the saga either completes clawback or enters compensation (if it times out).
+
+---

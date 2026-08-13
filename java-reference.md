@@ -720,12 +720,34 @@ The interface LOOKS like a collection (`findBy...`, `save()`, `delete()`), but u
 
 **EquityCart implementation:**
 
+**SellToSpendSaga (Phase 6):**
 - `SellToSpendSagaOrchestrator` drives 3 steps sequentially
 - Each step commits independently (no wrapping @Transactional)
 - Failure at step N → compensate steps N-1 through 1 in reverse order
 - Saga entity persisted at each boundary (crash recovery)
 
-**Best Practice:** Use orchestration (central coordinator) when steps have complex dependencies. Use choreography (event-driven, no coordinator) when steps are independent. EquityCart uses orchestration because step 2 (ledger) depends on step 1's output.
+**ClawbackSaga (Topic 8):**
+- `ClawbackSagaOrchestrator` handles refund-triggered reward clawback
+- Two forward paths: normal (INITIATED → LEDGER_ADJUSTED → HOLDING_REDUCED → COMPLETED) OR timeout (→ COMPENSATING → FAILED)
+- Compensation on timeout: undo holding reduction, undo ledger reversal, fail saga and alert ops
+- Includes timeout detector (`@Scheduled` task) to find stuck sagas and either retry or compensate
+- Idempotency via 3-layer strategy: status gates (skip completed steps), natural idempotency (ledger service uses idempotency keys), unique constraints (DB)
+- Key propagation: `userId` is Kafka partition key for ALL events to ensure ordering
+
+**Comparison:**
+
+| Aspect | SellToSpendSaga | ClawbackSaga |
+|--------|-----------------|--------------|
+| **Trigger** | User-initiated trade | System-initiated on refund approval |
+| **Flow** | Portfolio → Ledger → Order (forward) | Ledger ← Portfolio (reverse) |
+| **Steps** | 3: reduce, record, confirm | 3: reverse ledger, reduce, complete |
+| **Compensation** | Only on failure | On timeout or max retries reached |
+| **State persistence** | After each step | After each step (+ attemptCount tracking) |
+| **Error handling** | Simple: compensate if step fails | Advanced: retry vs compensate decision |
+
+**Best Practice:** Use orchestration (central coordinator) when steps have complex dependencies or when compensation logic is intricate. Use choreography (event-driven, no coordinator) when steps are independent and each service owns its own compensation. EquityCart uses orchestration for both sagas because:
+1. SellToSpendSaga: step 2 (ledger record) depends on step 1's output (shares reduced)
+2. ClawbackSaga: compensation order is critical (undo in reverse of forward execution order)
 
 ---
 
@@ -787,13 +809,13 @@ WebFlux SecurityWebFilterChain (API Gateway):
 | Observer                | Behavioral | Kafka Pub/Sub notifications                           | Decoupled event reactions                                  |
 | Facade                  | Structural | PortfolioFacade                                       | Simplified controller interface                            |
 | Builder                 | Creational | Entity/DTO construction (@Builder)                    | Readable multi-field construction                          |
-| State                   | Behavioral | OrderStatus, SagaStatus enums                         | Enforced valid transitions                                 |
+| State                   | Behavioral | OrderStatus, SagaStatus, ClawbackStatus enums         | Enforced valid transitions                                 |
 | Decorator               | Structural | Resilience4j stacking, ServerHttpResponseDecorator    | Layered cross-cutting concerns                             |
 | Template Method         | Behavioral | Spring Batch chunk processing                         | Framework controls skeleton                                |
 | Repository              | Domain     | Spring Data JPA interfaces                            | Collection-like data access                                |
 | Singleton               | Creational | All Spring beans (default scope)                      | One instance, DI-managed                                   |
-| Saga                    | Enterprise | SellToSpendSagaOrchestrator                           | Distributed transaction recovery                           |
-| Outbox                  | Enterprise | OutboxEvent + OutboxPoller                            | Reliable event publishing                                  |
+| Saga                    | Enterprise | SellToSpendSagaOrchestrator, ClawbackSagaOrchestrator | Distributed transaction recovery + compensation            |
+| Outbox                  | Enterprise | OutboxEvent + OutboxPoller / Debezium CDC             | Reliable event publishing with eventual consistency        |
 | Chain of Responsibility | Behavioral | SecurityFilterChain, SecurityWebFilterChain (Phase 8) | Ordered security processing, short-circuit on auth failure |
 
 ---

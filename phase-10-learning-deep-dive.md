@@ -407,4 +407,3 @@ Net impact:
 - better read scalability and latency posture,
 - cleaner separation of write/read concerns,
 - safer migration path with operational resilience.
-

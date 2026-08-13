@@ -2932,3 +2932,52 @@ A: The bean with higher `@Ordered` value wins (or arbitrary if no order specifie
 **Q: "Can you mix @Profile and @ConditionalOnProperty on the same bean?" (Phase 10)**  
 A: Yes. Both conditions must be satisfied (AND). Example: `@Profile("prod") @ConditionalOnProperty(name="feature.expensive-check", havingValue="true")` — bean active only if deployment is prod AND the feature flag is on. Useful for expensive features that should only run in production when explicitly enabled.
 
+---
+
+## Part 25: Spring Boot Saga Orchestration Patterns (Topic 2 Completion Learning)
+
+### 1) Service boundary and transaction layering
+
+In Spring Boot, saga orchestration typically sits in a dedicated `@Service` class.  
+Use `@Transactional` at method level for **each step unit**, not as an assumption of end-to-end distributed atomicity.
+
+### 2) Exception propagation strategy
+
+Rule used in Topic 2 reasoning:
+
+- step failure -> compensate -> persist failure status -> rethrow.
+
+Why: `@KafkaListener` + container error handler needs the exception signal to trigger retry/DLT path.
+
+### 3) Suggested Spring components
+
+- `GiftSagaOrchestrator` (`@Service`) - step coordinator.
+- `GiftSagaRepository` (`JpaRepository`) - saga lookup/idempotency/timeout queries.
+- `GiftOutboxWriter` (`@Service`) - lifecycle event rows.
+- `@Scheduled` timeout scanner - resumes/marks stale in-flight sagas.
+
+### 4) Flow wiring diagram
+
+```text
+Controller / KafkaConsumer
+          |
+          v
+  GiftSagaOrchestrator
+   |    |     |     |
+   v    v     v     v
+holding repo  ledger  outbox  saga repo(status)
+          |
+          v
+       exception?
+          |
+       yes -> compensate -> throw
+       no  -> complete
+```
+
+### 5) Interview Q/A
+
+**Q: "Why not annotate the whole orchestrator with one giant @Transactional?"**  
+A: It gives false safety for distributed workflow boundaries. Saga correctness comes from persisted step state + compensators + retry policy, not only one transaction annotation.
+
+**Q: "What role does @Scheduled play in saga?"**  
+A: It detects stalled in-progress sagas (`updatedAt` threshold), enabling timeout handling and reducing orphaned workflow risk.

@@ -1073,7 +1073,7 @@ API Gateway (port 8080, Netty/WebFlux)
 - Infra networking hardened for split-compose startup using a shared external Docker network and startup-time network creation.
 - Centralized EFK/Fluentd stack documented as **environment-blocked** by corporate Zscaler image access policy; accepted fallback is structured per-service logs + `core-loglens`.
 
-## Phase 10 — CQRS & Advanced Features (Topic 1: Portfolio Read Model — COMPLETE)
+## Phase 10 — CQRS & Advanced Features (Topic 1 COMPLETE, Topic 2 Concept Complete)
 
 ### Topic 1 Completion Summary (2026-01-08)
 
@@ -1195,3 +1195,30 @@ API Gateway (port 8080, Netty/WebFlux)
 - **2026-06-23**: Phase 8 Step 5 COMPLETE — Keycloak Docker setup. Added Keycloak 26.0 (quay.io) to docker-pets.yml sharing existing PostgreSQL container. Created equitycart-realm.json: 4 realm roles (CUSTOMER/SELLER/ADMIN/SERVICE), 3 OAuth2 clients (equitycart-gateway confidential, equitycart-frontend public+PKCE, equitycart-services client-credentials), protocol mappers (roles flattener + userId attribute for backward compat), 3 test users with pre-assigned roles. Updated init-db.sh (+keycloak DB), start-pets.sh (OIDC discovery readiness check). Obstacles: (1) /health/ready on separate management port 9000, fixed by checking OIDC discovery endpoint instead; (2) KEYCLOAK_ADMIN deprecated in 26.x, replaced with KC_BOOTSTRAP_ADMIN_USERNAME; (3) --import-realm only runs on first boot (realm doesn't exist yet). Keycloak admin console accessible at http://localhost:8180. Token acquisition verified via ROPC flow. Conceptual foundation written to security-reference.md Section 13 (OAuth2/OIDC/Keycloak history, flows, RS256, JWKS, competitors). Next: Step 6 — OAuth2 Resource Server migration.
 - **2026-06-18**: Phase 8 Steps 1-4 COMPLETE — Per-service JWT validation distributed to all services via commons SecurityAutoConfig. 13 obstacles resolved during E2E testing: ReadOnlyHttpHeaders (ServerHttpResponseDecorator), PATCH unsupported (feign-hc5), Kafka consumer 403 (ServiceTokenProvider with subject=0, role=[SERVICE], 60s expiry), anyRequest() terminal matcher bug, Zscaler TLS interception (keytool CA import in Dockerfile), Docker port mapping (9432:5432), config migration gap (sell-to-spend strategy), .gitignore path resolution. Full business flow verified end-to-end: Register → Login → Browse → Cart → Order → Deliver → Stock-Back Reward → Vest → Trade → Sell-to-Spend. All 10 services running in Docker with auth enforced. Documentation updated: security-reference.md (Sections 11-12), microservice-patterns.md (Sections 12-13), springboot-reference.md (Sections 11-13), learning_log.md (Q155-Q163). Javadoc updated on ServiceTokenProvider, ServiceTokenProviderImpl, FeignAuthorizationInterceptor, SecurityAutoConfig, CorrelationIdGatewayFilter, Dockerfile. Next: Step 5 — Keycloak Docker setup.
 - **2026-08-07**: Phase 9 COMPLETE — observability rollout validated. Structured logging (Log4j2 JSON + correlation IDs), Prometheus scraping, Grafana dashboards, Zipkin tracing, custom business metrics, and alert rules are in place. Docker split-compose networking was stabilized via shared external network creation in startup scripts. Centralized EFK/Fluentd was blocked by corporate image policy (Zscaler), and fallback (`core-loglens` + JSON logs) was accepted and documented.
+
+- **2026-10-15**: Phase 10 Topic 1 Implementation Summary — CQRS Portfolio Read Model (SQL write + Mongo read projection via Kafka/Debezium):
+  - [x] Mongo read model layer (portfolio_read_models collection)
+  - [x] CQRS read controller (GetPortfolioReadModel endpoint) + feature-flag-based routing
+  - [x] Portfolio outbox entity/repo/writer/poller scaffolding
+  - [x] Debezium connector for portfolio outbox (PostgreSQL WAL → Kafka)
+  - [x] Kafka consumer projecting to Mongo (upsert-by-userId for idempotency)
+  - [x] Manual E2E validation (buy/sell/reward grant/vest/sell-to-spend/refund-restored flows)
+  - [x] JavaDoc/logging/comments on all Topic 1 files
+  - [x] Topic 1 compilation verification PASSED
+  - [x] Learning & Documentation: kafka-learning.md (idempotency, partition keys, reconciliation, lessons learned), microservice-patterns.md (saga section expanded with clawback examples), learning_log.md (Q&A on compensation vs retry, saga idempotency, timeout detection, partition key ordering), java-reference.md (saga pattern section enhanced with ClawbackSaga comparison).
+
+- **2026-10-15**: Phase 10 Topic 8 (Return Clawback Saga) Implementation Summary — Compensation-based saga for VESTED reward clawback on refund approval:
+  - [x] ClawbackStatus enum (INITIATED, LEDGER_ADJUSTED, HOLDING_REDUCED, COMPLETED, COMPENSATING, FAILED)
+  - [x] ClawbackSaga entity + ClawbackSagaRepository (findByRewardId, findStuck, findExpired)
+  - [x] ClawbackSagaOrchestrator (3-step forward + reverse-order compensation on timeout)
+  - [x] ClawbackOutboxWriter (publishes saga lifecycle events to clawback-saga-events Kafka topic)
+  - [x] ClawbackSagaTimeoutDetector (@Scheduled, 30s interval, retry vs compensate decision via attemptCount)
+  - [x] Three-layer idempotency: status gates + natural idempotency (ledger idempotency keys) + unique DB constraints
+  - [x] Partition key strategy reinforced: userId as Kafka key ensures per-user event ordering (critical for compensation safety)
+  - [x] Learning integrated into existing documentation (NOT appended as new sections):
+    - kafka-learning.md: Idempotency section enhanced with saga status-gate pattern, partition key section explains clawback compensation ordering, reconciliation section clarifies timeout detection as separate concern, lessons learned list expanded with compensation/idempotency/partition-key rules
+    - microservice-patterns.md: Saga section (2.5-2.9) massively expanded with ClawbackSaga as second implementation example, idempotency table includes clawback details, timeout detection includes full retry/compensate logic, compensating transaction design rules include detailed clawback scenarios (why forward ops not deletes), implementation section now compares SellToSpend vs Clawback sagas
+    - java-reference.md: Saga pattern section (2.10) updated with ClawbackSaga, pattern summary table includes ClawbackSagaOrchestrator
+    - learning_log.md: 7 new Q&A entries (Q196–Q201) on saga compensation vs retry, idempotency layers, timeout detection logic, partition key propagation, clawback trigger scenario
+  - [x] Topic 8 implementation verified as correct during review sessions.
+

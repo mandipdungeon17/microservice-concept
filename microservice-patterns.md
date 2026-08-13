@@ -492,6 +492,51 @@ Sagas execute in an at-least-once environment (retries, timeout recovery). Every
 | Natural idempotency | The operation itself rejects duplicates                             | `updateOrderStatus(CONFIRMED)` on already-confirmed order throws `InvalidStatusTransitionException` |
 | Unique constraints  | DB constraint prevents double-write                                 | Saga entity with `orderId` lookup prevents duplicate saga creation                                  |
 
+**Topic 8 Deep Dive - ClawbackSaga Idempotency Pattern:**
+
+The clawback saga (return/refund flow for VESTED rewards) combines all three idempotency strategies:
+
+```
+ClawbackSaga flow (simplified):
+Status progression: INITIATED → LEDGER_ADJUSTED → HOLDING_REDUCED → COMPLETED
+
+Step 1: Perform ledger reversal (VESTED reward → record reversal entry)
+  if (saga.status >= ClawbackStatus.LEDGER_ADJUSTED) {
+    log.info("Ledger reversal already recorded, skipping");
+    return;  // Status gate: already past this step
+  }
+  
+  LedgerEntry reversal = ledgerService.createReversal(saga.rewardId, saga.vaultPosition);
+  // Natural idempotency: createReversal uses idempotency key (rewardId + CLAWBACK_TYPE)
+  // Database constraint: UNIQUE(rewardId, ledgerType) prevents duplicate reversals
+  
+  saga.ledgerEntryId = reversal.id;
+  saga.status = ClawbackStatus.LEDGER_ADJUSTED;
+  sagaRepository.save(saga);
+
+Step 2: Reduce holding
+  if (saga.status >= ClawbackStatus.HOLDING_REDUCED) {
+    log.info("Holding already reduced, skipping");
+    return;  // Status gate
+  }
+  
+  portfolioService.reduceHolding(saga.userId, saga.ticker, saga.shares);
+  // Natural idempotency: Kafka idempotency key + outbox idempotency key
+  
+  saga.status = ClawbackStatus.HOLDING_REDUCED;
+  sagaRepository.save(saga);
+```
+
+**Why multiple strategies are necessary:**
+
+1. **Status gate** (first line of defense): If a Kafka message is retried after app restart, the saga record already exists in the database. Checking `saga.status` before executing step logic prevents re-invoking business operations.
+
+2. **Natural idempotency** (second line): Even if status check passes (due to a bug or unforeseen edge case), the underlying operation is idempotent. `createReversal()` with the same idempotency key (rewardId + operation type) produces the same ledger entry, not a duplicate.
+
+3. **Unique constraints** (third line): The database schema enforces uniqueness. Even if both status gate and natural idempotency fail, the constraint prevents duplicate saga creation or duplicate ledger entries.
+
+**Common mistake:** Developers often think "I'll just check status before the step and skip if already done" — forgetting that the check itself can fail (database connection lost, saga not fetched yet). Relying on only the status gate without natural idempotency can lead to partial retries or missed compensations.
+
 ### 2.6 Timeout Detection
 
 A scheduled job polls for "stuck" sagas — those in non-terminal states beyond a configurable threshold:
@@ -505,6 +550,76 @@ detectTimedOutSagas():
 ```
 
 In production (distributed services with network latency), timeouts are minutes to hours. For the EquityCart monolith (same-JVM calls), 30 seconds demonstrates the concept without slowing tests.
+
+**Topic 8 Deep Dive - ClawbackSagaTimeoutDetector Implementation:**
+
+The clawback saga timeout detector extends the basic pattern with explicit retry logic and escalation:
+
+```java
+@Scheduled(fixedRate = 30000)
+void detectAndRecoverTimedOutClawbacks() {
+  List<ClawbackSaga> timedOut = clawbackSagaRepository.findStuck(
+    notTerminal: [INITIATED, LEDGER_ADJUSTED, HOLDING_REDUCED],
+    olderThan: now - 30_seconds
+  );
+  
+  for (ClawbackSaga saga : timedOut) {
+    log.warn("Timeout detected for clawback saga {}, attempting recovery", saga.id);
+    
+    // Determine how far the saga progressed before getting stuck
+    ClawbackStatus lastKnownStep = saga.status;
+    
+    if (saga.attemptCount >= MAX_RETRY_ATTEMPTS) {
+      // Give up: saga has been retried too many times, enter compensation
+      compensateAndFail(saga);
+      log.error("Saga {} exceeded max retries, entering compensation", saga.id);
+    } else {
+      // Retry from the last known-good state
+      retryFromStep(saga, lastKnownStep);
+      saga.attemptCount++;
+      sagaRepository.save(saga);
+      log.info("Saga {} retry #{} initiated", saga.id, saga.attemptCount);
+    }
+  }
+}
+
+void compensateAndFail(ClawbackSaga saga) {
+  // HOLDING_REDUCED → reverse to INITIATED
+  if (saga.status == HOLDING_REDUCED) {
+    portfolioService.addOrUpdateHolding(saga.userId, saga.ticker, saga.shares);
+    saga.status = ClawbackStatus.COMPENSATING_HOLDING;
+  }
+  
+  // LEDGER_ADJUSTED or COMPENSATING_HOLDING → reverse ledger entry
+  if (saga.status == LEDGER_ADJUSTED || saga.status == COMPENSATING_HOLDING) {
+    ledgerService.createReversal(saga.ledgerEntryId);  // Creates undo entry
+    saga.status = ClawbackStatus.COMPENSATING_LEDGER;
+  }
+  
+  saga.status = ClawbackStatus.FAILED;
+  saga.failureReason = "Timeout + max retries exceeded. Manual investigation required.";
+  sagaRepository.save(saga);
+  
+  // Alert ops team
+  alertingService.sendAlert(AlertLevel.CRITICAL, 
+    "Clawback saga {} for user {} failed after {redeemable retry attempts", 
+    saga.id, saga.userId, saga.attemptCount);
+}
+```
+
+**Key aspects:**
+
+1. **Stuck detection criteria:** Status NOT in terminal states AND last update > threshold. This avoids false positives from sagas that are actually progressing but slowly.
+
+2. **Retry vs Compensation decision:** Track `attemptCount` to distinguish "transient failures we can retry" from "systematic failures requiring compensation." Without this distinction, a permanently-broken downstream service causes infinite retry loops instead of graceful escalation.
+
+3. **Reverse-order compensation:** If saga stopped at HOLDING_REDUCED, first undo holding, then undo ledger. This mirrors the saga's original forward order (ledger first, holding second).
+
+4. **Alerting on failure:** Once compensation is exhausted (MAX_RETRIES), send critical alert to ops. Manual intervention is needed to determine root cause (was the refund actually approved? Did the reward really exist?) and potentially retry with corrected data.
+
+**Compensation differs from retry:**
+- **Retry:** Re-attempt the same operation (may succeed if transient issue is fixed)
+- **Compensation:** Execute a NEW forward operation that semantically undoes the previous effect
 
 ### 2.7 Saga vs. @Transactional — When to Use Which
 
@@ -522,6 +637,9 @@ In production (distributed services with network latency), timeouts are minutes 
 
 ### 2.8 EquityCart Implementation
 
+Two main saga implementations demonstrate the pattern:
+
+**1. SellToSpendSaga (Phase 6 - Trading → Ledger → Order confirmation)**
 ```
 equitycart/portfolio/src/main/java/com/equitycart/portfolio/saga/
 ├── enums/SagaStatus.java                    ← State machine enum
@@ -534,6 +652,32 @@ equitycart/portfolio/src/main/java/com/equitycart/portfolio/saga/
 
 **Toggle:** `equitycart.sell-to-spend.strategy=saga` vs `transactional` in `application.yml`. Both implement the same `SellToSpendService` interface — controller/facade code unchanged.
 
+**2. ClawbackSaga (Topic 8 - Refund/Return clawback of VESTED rewards)**
+```
+equitycart/portfolio/src/main/java/com/equitycart/portfolio/saga/
+├── enums/ClawbackStatus.java                ← State machine enum (5 states: INITIATED→LEDGER_ADJUSTED→HOLDING_REDUCED→COMPLETED; or COMPENSATING→FAILED)
+├── entity/ClawbackSaga.java                 ← JPA entity with rewardId, userId, shares, attemptCount
+├── repository/ClawbackSagaRepository.java   ← findByRewardId(), findStuck(), findExpired()
+├── orchestrator/ClawbackSagaOrchestrator.java ← Orchestrates: 1) ledger reversal, 2) holding reduction, 3) completion
+├── event/ClawbackOutboxWriter.java          ← Publishes saga lifecycle events (CLAWBACK_INITIATED, LEDGER_REVERSED, HOLDING_REDUCED, COMPLETED, COMPENSATED)
+└── timeout/ClawbackSagaTimeoutDetector.java ← @Scheduled poller, detects stuck sagas, triggers retry or compensation
+```
+
+**Key differences between SellToSpendSaga and ClawbackSaga:**
+
+| Aspect | SellToSpendSaga | ClawbackSaga |
+|--------|-----------------|--------------|
+| **Trigger** | User initiates trade (sell holdings + use proceeds) | System initiates on refund approval (undo VESTED reward) |
+| **Data flow** | Portfolio → Ledger → Order (forward, business transaction) | Portfolio ← Ledger ← Reward (reverse, remediation) |
+| **Steps** | 3 (reduce holding, record ledger, confirm order) | 3 (reverse ledger, reduce holding, mark complete) |
+| **Compensation trigger** | Order confirmation fails → undo ledger, restore holding | Timeout or failure → undo all steps in reverse order |
+| **State machine** | STARTED → REDUCING_HOLDING → HOLDING_REDUCED → RECORDING_LEDGER → CONFIRMING_ORDER → COMPLETED | INITIATED → LEDGER_ADJUSTED → HOLDING_REDUCED → COMPLETED |
+| **Failure path** | COMPENSATING → FAILED | COMPENSATING → FAILED |
+| **Compensation order** | Undo ledger (reverse entry), restore holding | Undo holding (re-add shares), undo ledger (reverse entry) |
+| **Idempotency key** | orderId (unique per user trade) | rewardId + CLAWBACK_TYPE (unique per reward) |
+
+Both follow the same orchestration pattern but represent different business flows — SellToSpendSaga moves forward through a user action, ClawbackSaga reverses a previously-completed transaction.
+
 ### 2.9 Compensating Transaction Design Rules
 
 1. **Compensations are forward operations** — never try to "undo" at the database level (DELETE the row). Instead, create a new operation that semantically reverses the effect.
@@ -541,6 +685,97 @@ equitycart/portfolio/src/main/java/com/equitycart/portfolio/saga/
 3. **Order matters** — compensate in REVERSE order of execution (last completed step first).
 4. **Not all steps need compensation** — the last step in a saga never needs compensation (nothing runs after it to fail).
 5. **Compensation can fail** — if it does, the saga is FAILED and requires manual intervention (alerts, admin dashboard).
+
+**Topic 8 Deep Dive - ClawbackSaga Compensation Examples:**
+
+**Scenario 1: Normal happy path (compensation never needed)**
+```
+ClawbackSaga for reward-123 (user=42, ticker=AAPL, shares=0.125):
+Step 1: INITIATED → ledgerService.createReversal(reward-123)
+        → Creates reversal ledger entry: VESTED_REWARD_REVERSED (matches original VESTED_REWARD_GRANTED in opposite direction)
+        → Status: LEDGER_ADJUSTED
+        → Persists: saga.ledgerEntryId = reversal-entry-456
+
+Step 2: LEDGER_ADJUSTED → portfolioService.reduceHolding(userId=42, ticker=AAPL, shares=0.125)
+        → Reduces user's AAPL holdings by 0.125 (removes vested shares from portfolio)
+        → Status: HOLDING_REDUCED
+        
+Step 3: HOLDING_REDUCED → markComplete()
+        → Status: COMPLETED
+        → Clawback done, reward state updated to CLAWED_BACK
+
+(Compensation never runs — all steps succeeded)
+```
+
+**Scenario 2: Timeout after step 1 (ledger reversed, but holding reduction never attempted)**
+```
+ClawbackSaga stuck at LEDGER_ADJUSTED (> 30 seconds old, no further progress)
+TimeoutDetector triggers compensateAndFail():
+
+Compensation step 1 (undo ledger reversal):
+  if (saga.status == LEDGER_ADJUSTED) {
+    ledgerService.createReversal(saga.ledgerEntryId);
+    // This is counter-intuitive: we reverse the reversal
+    // Original: VESTED_REWARD_GRANTED (200 shares)
+    // Step 1: VESTED_REWARD_REVERSED (-200 shares) → ledger entry 456
+    // Compensation: VESTED_REWARD_REVERSAL_UNDONE (+200 shares) → ledger entry 789
+    // Net effect: 200 - 200 + 200 = +200 (back to original)
+    saga.status = ClawbackStatus.COMPENSATING_LEDGER;
+  }
+
+(No holding compensation needed because step 2 never ran — holdings were never reduced)
+
+Final status: FAILED (clawback did not complete, but no partial state left behind)
+Alert ops: "ClawbackSaga for reward-123 failed after 3 retries. Manual review: was refund actually approved?"
+```
+
+**Scenario 3: Timeout after step 2 (both ledger and holding changed, full compensation needed)**
+```
+ClawbackSaga stuck at HOLDING_REDUCED (ledger reversed + holdings reduced, but completion never committed)
+
+Compensation step 1 (reverse holding reduction):
+  if (saga.status == HOLDING_REDUCED) {
+    portfolioService.addOrUpdateHolding(userId=42, ticker=AAPL, shares=0.125);
+    // Reverses the holding reduction from step 2
+    saga.status = ClawbackStatus.COMPENSATING_HOLDING;
+  }
+
+Compensation step 2 (reverse the ledger reversal):
+  if (saga.status == COMPENSATING_HOLDING) {
+    ledgerService.createReversal(saga.ledgerEntryId);
+    // Creates reversal of reversal (undo step 1)
+    saga.status = ClawbackStatus.COMPENSATING_LEDGER;
+  }
+
+Final result:
+  Ledger: VESTED_REWARD_GRANTED → VESTED_REWARD_REVERSED → VESTED_REWARD_REVERSAL_UNDONE = net zero
+  Portfolio: Holdings = original (shares re-added)
+  Reward status: Back to VESTED (clawback did not complete, reverted to pre-clawback state)
+  Saga status: FAILED
+```
+
+**Why forward operations for compensation?**
+
+❌ **Bad (database-level undo):**
+```java
+// DO NOT DO THIS
+saga.status = LEDGER_ADJUSTED;
+ledgerRepository.deleteById(saga.ledgerEntryId);  // Removes the reversal entry
+// Problem: If this crashes, the ledger entry is partially deleted, audit trail is broken
+// Problem: Other transactions may have already read this entry for reconciliation
+// Problem: Not idempotent — a retry will fail (entry already deleted)
+```
+
+✅ **Good (forward compensation operation):**
+```java
+// Correct approach
+ledgerService.createReversal(saga.ledgerEntryId);  
+// New ledger entry undoes the previous one semantically
+// Creates new entry: VESTED_REWARD_REVERSAL_UNDONE
+// Audit trail preserved, idempotent (repeat creates same reversal), no deletions
+```
+
+**Common mistake:** Confusing "compensation" with "rollback." Compensation writes NEW data (ledger entries, outbox events). Rollback deletes/overwrites existing data. In distributed systems, rollback is unsafe; compensation is idempotent and auditable.
 
 ---
 

@@ -18,6 +18,7 @@ import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
 import com.equitycart.portfolio.eventsourcing.service.api.PortfolioEventStore;
 import com.equitycart.portfolio.repository.StockBackRewardRepository;
 import com.equitycart.portfolio.saga.enums.SagaStatus;
+import com.equitycart.portfolio.saga.orchestrator.ClawbackSagaOrchestrator;
 import com.equitycart.portfolio.saga.repository.SellToSpendSagaRepository;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import feign.FeignException;
@@ -41,8 +42,9 @@ import org.springframework.transaction.annotation.Transactional;
  * <ul>
  *   <li>{@code order-delivered} — calculates fractional share rewards per brand/ticker, groups by
  *       ticker, and calls {@link PortfolioService#grantReward} once per ticker (idempotent).
- *   <li>{@code order-returned} — cancels any PENDING rewards for the returned order. Already-VESTED
- *       rewards cannot be cancelled (requires manual review).
+ *   <li>{@code order-returned} — cancels PENDING rewards; for VESTED rewards it triggers
+ *       {@link com.equitycart.portfolio.saga.orchestrator.ClawbackSagaOrchestrator} to reverse
+ *       vested shares with compensation support.
  *   <li>{@code order-refunded} — restores shares sold via Sell-to-Spend back to the user's
  *       portfolio. Only processes STOCK-payment orders. Idempotent via {@code isRefunded} flag on
  *       the saga entity.
@@ -70,6 +72,7 @@ public class StockBackRewardConsumer {
   private final SellToSpendSagaRepository sellToSpendSagaRepository;
   private final PortfolioEventStore portfolioEventStore;
   private final PortfolioOutboxWriter portfolioOutboxWriter;
+  private final ClawbackSagaOrchestrator clawbackSagaOrchestrator;
 
   @KafkaListener(
       topics = "order-delivered",
@@ -183,17 +186,27 @@ public class StockBackRewardConsumer {
                 null,
                 Map.of("orderId", event.getOrderId()));
 
+            portfolioOutboxWriter.writeRewardCancelledEvent(stockBackReward);
+
             log.info(
                 "Cancelled PENDING reward for orderId={}, ticker={}",
                 event.getOrderId(),
                 stockBackReward.getTickerSymbol());
 
-            portfolioOutboxWriter.writeRewardCancelledEvent(stockBackReward);
           } else if (stockBackReward.getStatus().equals(VestingStatus.VESTED)) {
             log.warn(
-                "Reward for orderId={}, ticker={} already vested, cannot cancel. Manual review needed.",
+                "Reward already VESTED for orderId={}, rewardId={}, ticker={}. Starting clawback saga.",
                 event.getOrderId(),
+                stockBackReward.getId(),
                 stockBackReward.getTickerSymbol());
+
+            clawbackSagaOrchestrator.handleOrderReturned(event, stockBackReward);
+
+          } else if (stockBackReward.getStatus().equals(VestingStatus.CLAWED_BACK)) {
+            log.info(
+                "Reward already CLAWED_BACK for orderId={}, rewardId={}, skip.",
+                event.getOrderId(),
+                stockBackReward.getId());
           }
         });
   }
