@@ -14,5 +14,9 @@ public enum ReferenceType {
   /** Primary clawback ledger entry for vested reward reversal. */
   REWARD_CLAWBACK,
   /** Compensation entry if clawback ledger step must be reversed. */
-  REWARD_CLAWBACK_REVERSAL
+  REWARD_CLAWBACK_REVERSAL,
+  /** Primary ledger reference for stock gift transfer saga. */
+  GIFT_TRANSFER,
+  /** Compensation ledger reference when a gift transfer is reversed. */
+  GIFT_TRANSFER_REVERSAL
 }

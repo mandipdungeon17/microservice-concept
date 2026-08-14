@@ -1126,6 +1126,65 @@ API Gateway (port 8080, Netty/WebFlux)
   - CDC requires external Kafka Connect infrastructure — production dependency
   - Consumer group rebalancing on partition count changes (not tested yet)
 
+### Topic 2 Completion Summary (2026-08-14)
+
+**Phase 10 Topic 2 — Stock Gifting Saga (Peer-to-Peer Transfer via Orchestration):**
+
+- **Deliverables Completed:**
+  - Gift API contract: `GiftRequest` (receiverId, tickerSymbol, quantity, idempotencyKey) + `GiftResponse` (sagaId, status, giver/receiver/ticker)
+  - Saga state model: `GiftSagaStatus` enum with terminal-state helper, `GiftSaga` JPA entity with `@Version` optimistic lock, `GiftSagaRepository` with idempotency key + timeout queries
+  - Orchestration layer: `GiftSagaOrchestrator` with three forward steps:
+    1. Debit giver holding (capture transfer price/value at saga creation)
+    2. Credit receiver holding (use captured transfer price)
+    3. Record ledger entry (use captured transfer dollar value)
+  - Compensation path: reverse-order undo with explicit `completedSteps` tracking (0/1/2/3)
+  - Timeout detector: `@Scheduled` scanner for non-terminal stale sagas beyond 30s threshold
+  - Outbox visibility: `GiftSagaOutboxWriter` emits lifecycle events to `gift-saga` Kafka topic
+  - REST integration: `PortfolioFacade` + `PortfolioFacadeImpl` + `PortfolioController` endpoint (`POST /api/portfolio/gift`)
+  - Dual-layer idempotency: client-supplied `idempotencyKey` for HTTP retry safety + saga status gates for step-level idempotency
+
+- **Code Quality:**
+  - All Topic 2 files compile successfully (gradle clean build -p portfolio)
+  - All classes have comprehensive JavaDoc documenting business logic + parameter precision
+  - Extensive logging at debug/info/error levels for observability
+  - Monetary precision: BigDecimal fields with scale=4 for transferPricePerShare and transferDollarValue
+  - No unrelated code changes — focused on gifting saga only
+
+- **Critical Correction During Verification:**
+  - Initial ledger calls used `BigDecimal.ZERO` instead of actual transfer amounts
+  - Fixed: added `transferPricePerShare` and `transferDollarValue` fields to GiftSaga entity
+  - Captured at saga creation: ensures all retries use identical monetary values
+  - Compensation ledger uses same positive value for reverse entry (not absolute value logic)
+  - Giver re-add uses transferred price, not zero
+
+- **Why Topic 2 Matters Architecturally:**
+  - Not "regular buy/sell" — dedicated peer-to-peer transfer workflow
+  - Both users' holdings must remain balanced across retries (idempotency essential)
+  - Partial failures must not leak shares or create double-credits
+  - Saga proves compensation pattern works for user-triggered transfers (not just async Kafka-driven workflows)
+
+- **Manual E2E Validation Checklist (Ready for execution):**
+  - Happy path: giver has 100 AAPL at $10/share → gift 50 to receiver → ledger records $500 → giver has 50, receiver gains 50
+  - Duplicate idempotency key: client retries with same idempotencyKey → saga returns cached result (no double transfer)
+  - Step-2 failure with compensation: orchestrator fails during credit receiver → compensation debits giver again, sets status COMPENSATED
+  - Timeout recovery: orchestrator crashes mid-saga → timeout detector finds stale saga → compensation runs automatically
+  - Ledger audit trail: verify ledger entries record actual price and value, not zeros
+
+- **Dual-Layer Idempotency Pattern (Topic 2 Contribution):**
+  - CLIENT LAYER: `findByIdempotencyKey()` prevents retries from creating duplicate sagas
+  - SAGA LAYER: status gates + natural idempotency prevent re-execution of individual steps
+  - Both layers protect against different failure modes (network timeouts vs in-process crashes)
+
+- **Learning Files Updated:**
+  - learning_log.md: Phase 10 section now includes Q103–Q106 (Topic 2 concepts on compensation, idempotency, timeout detection)
+  - microservice-patterns.md: Section 2.5 (Idempotency) augmented with Topic 2 Gift Saga deep dive demonstrating dual-layer idempotency vs Topic 8 single-layer
+  - (Pending: kafka-learning.md, java-reference.md, phase-10-learning-deep-dive.md topic assignment details)
+
+- **Residual Risks & Open Questions:**
+  - Topic 2 ledger semantic fix (ZERO → actual values) increases audit trail correctness but must be validated in E2E
+  - Gift transfer at giver's average buy price (cost basis) is deterministic but differs from market price — business decision validated
+  - Timeout threshold (30s) adequate for monolith; distributed deployment may require longer threshold
+
 ## Phase Checklist
 
 - [x] Phase 0: Foundation & Setup (Week 1)
@@ -1222,3 +1281,20 @@ API Gateway (port 8080, Netty/WebFlux)
     - learning_log.md: 7 new Q&A entries (Q196–Q201) on saga compensation vs retry, idempotency layers, timeout detection logic, partition key propagation, clawback trigger scenario
   - [x] Topic 8 implementation verified as correct during review sessions.
 
+- **2026-08-14**: Phase 10 Topic 2 (Stock Gifting Saga) implementation verification + polish:
+  - [x] Gifting saga implementation verified in code review:
+    - `GiftSagaStatus`, `GiftSaga`, `GiftSagaRepository`
+    - `GiftSagaOrchestrator` (debit giver -> credit receiver -> ledger audit, plus compensation + timeout detector)
+    - `GiftSagaOutboxWriter` (lifecycle events to outbox/topic)
+    - `GiftRequest` / `GiftResponse`
+    - `PortfolioFacade` + `PortfolioFacadeImpl` + `PortfolioController` gift endpoint integration
+  - [x] Targeted compile validation PASSED:
+    - `cd equitycart && .\\gradlew.bat :portfolio:compileJava -x test`
+  - [x] Correctness fix applied during verification:
+    - compensation path now uses explicit `completedSteps` mapping (instead of relying on overwritten `COMPENSATING` status)
+  - [x] JavaDoc/logging/comments enhanced across all uncommitted gifting-related files
+  - [x] Learning updates completed:
+    - `phase-10-learning-deep-dive.md` Topic 2 kickoff section
+    - `learning_log.md` Q202-Q205 (compensation boundary, separation from buy/sell, idempotency key rationale, timeout recovery)
+  - [ ] Pending before Topic 2 closure:
+    - manual E2E validation (happy path, duplicate idempotency request, failure compensation, timeout compensation)

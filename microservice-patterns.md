@@ -537,6 +537,74 @@ Step 2: Reduce holding
 
 **Common mistake:** Developers often think "I'll just check status before the step and skip if already done" — forgetting that the check itself can fail (database connection lost, saga not fetched yet). Relying on only the status gate without natural idempotency can lead to partial retries or missed compensations.
 
+**Topic 2 Deep Dive - GiftSaga Idempotency Pattern:**
+
+The gifting saga (peer-to-peer stock transfer between users) adds a client-level idempotency dimension: idempotency keys from REST clients:
+
+```
+GiftSaga flow (simplified):
+Status progression: INITIATED → DEBITING_GIVER → CREDITING_RECEIVER → LEDGER_RECORDED → COMPLETED
+
+Idempotency at two levels:
+
+1) CLIENT LEVEL (HTTP retry safety):
+   Request contains: idempotencyKey = UUID.randomUUID()
+   
+   First request:
+     → Server checks: findByIdempotencyKey(idempotencyKey) → not found
+     → Proceed to create saga
+     → Save saga with idempotencyKey
+     → Return GiftResponse with sagaId
+   
+   Retry (before client receives response):
+     → Server checks: findByIdempotencyKey(idempotencyKey) → found
+     → Return cached GiftResponse immediately (no saga re-execution)
+   
+   This prevents double-debit/double-credit during network timeouts.
+
+2) SAGA-LEVEL (post-processing idempotency):
+   After saga acceptance, steps are protected by status gates + natural idempotency:
+   
+   Step 1: Debit giver holding
+     if (saga.status >= GiftStatus.DEBITING_GIVER) {
+       return;  // Already completed
+     }
+     portfolioService.reduceHolding(saga.giverId, saga.ticker, saga.quantity, saga.transferPricePerShare);
+     saga.status = GiftStatus.DEBITING_GIVER;
+     sagaRepository.save(saga);
+   
+   Step 2: Credit receiver holding
+     if (saga.status >= GiftStatus.CREDITING_RECEIVER) {
+       return;
+     }
+     portfolioService.addOrUpdateHolding(saga.receiverId, saga.ticker, saga.quantity, saga.transferPricePerShare);
+     saga.status = GiftStatus.CREDITING_RECEIVER;
+     sagaRepository.save(saga);
+   
+   Step 3: Record ledger entry
+     if (saga.status >= GiftStatus.LEDGER_RECORDED) {
+       return;
+     }
+     ledgerService.recordTransaction(saga.giverId, saga.receiverId, saga.ticker, saga.transferDollarValue, ReferenceType.GIFT_TRANSFER);
+     saga.status = GiftStatus.LEDGER_RECORDED;
+     sagaRepository.save(saga);
+```
+
+**Key differences from ClawbackSaga idempotency:**
+
+- ClawbackSaga: uses `findByOrderIdAndRewardIdAndStatusNotIn()` (server-generated aggregate keys)
+- GiftSaga: uses `findByIdempotencyKey()` (client-supplied key for REST layer) + status gates for saga steps
+- ClawbackSaga: no client-level idempotency (triggered by async Kafka consumer, not HTTP)
+- GiftSaga: dual-layer idempotency (client HTTP layer + saga step layer) for correctness under retries
+
+**Why monetary values on saga entity matter:**
+
+Transfer happens at a specific price (`transferPricePerShare = giver's average buy price`). If price varies per execution, idempotency breaks:
+- First attempt: transfer at $10/share = 100 shares * $10 = $1000 ledger entry
+- Timeout, retry: if system used current price ($12/share), retry would record $1200 = INCONSISTENT
+
+By capturing `transferPricePerShare` and `transferDollarValue` at saga creation, all retry attempts use identical values. Ledger entry is deterministic.
+
 ### 2.6 Timeout Detection
 
 A scheduled job polls for "stuck" sagas — those in non-terminal states beyond a configurable threshold:

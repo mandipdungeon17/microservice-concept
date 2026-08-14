@@ -3,6 +3,8 @@ package com.equitycart.portfolio.controller;
 import com.equitycart.portfolio.config.CQRSFeatureFlag;
 import com.equitycart.portfolio.cqrs.controller.PortfolioReadController;
 import com.equitycart.portfolio.cqrs.dtos.PortfolioReadResponse;
+import com.equitycart.portfolio.dto.GiftRequest;
+import com.equitycart.portfolio.dto.GiftResponse;
 import com.equitycart.portfolio.dto.HoldingRequest;
 import com.equitycart.portfolio.dto.HoldingResponse;
 import com.equitycart.portfolio.dto.PortfolioAnalyticsResponse;
@@ -163,6 +165,26 @@ public class PortfolioController {
     }
     logger.debug("Routing to legacy analytics path (PostgreSQL)");
     return portfolioFacade.getAnalytics(userId);
+  }
+
+  /**
+   * Transfers shares from authenticated user to another user.
+   *
+   * @param authentication JWT principal containing giver userId
+   * @param request gifting payload with receiver, ticker, quantity, idempotency key
+   * @return gifting saga response including sagaId and current status
+   */
+  @PostMapping("/gift")
+  @ResponseStatus(HttpStatus.OK)
+  public GiftResponse gift(Authentication authentication, @Valid @RequestBody GiftRequest request) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info(
+        "POST /api/portfolio/gift — userId={}, receiverId={}, ticker={}, quantity={}",
+        userId,
+        request.receiverId(),
+        request.tickerSymbol(),
+        request.quantity());
+    return portfolioFacade.giftStock(userId, request);
   }
 
   // Helper to convert CQRS response to legacy format (backward compat)

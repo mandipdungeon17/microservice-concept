@@ -42,9 +42,9 @@ import org.springframework.transaction.annotation.Transactional;
  * <ul>
  *   <li>{@code order-delivered} — calculates fractional share rewards per brand/ticker, groups by
  *       ticker, and calls {@link PortfolioService#grantReward} once per ticker (idempotent).
- *   <li>{@code order-returned} — cancels PENDING rewards; for VESTED rewards it triggers
- *       {@link com.equitycart.portfolio.saga.orchestrator.ClawbackSagaOrchestrator} to reverse
- *       vested shares with compensation support.
+ *   <li>{@code order-returned} — cancels PENDING rewards; for VESTED rewards it triggers {@link
+ *       com.equitycart.portfolio.saga.orchestrator.ClawbackSagaOrchestrator} to reverse vested
+ *       shares with compensation support.
  *   <li>{@code order-refunded} — restores shares sold via Sell-to-Spend back to the user's
  *       portfolio. Only processes STOCK-payment orders. Idempotent via {@code isRefunded} flag on
  *       the saga entity.

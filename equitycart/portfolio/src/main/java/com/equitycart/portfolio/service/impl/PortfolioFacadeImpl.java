@@ -1,5 +1,7 @@
 package com.equitycart.portfolio.service.impl;
 
+import com.equitycart.portfolio.dto.GiftRequest;
+import com.equitycart.portfolio.dto.GiftResponse;
 import com.equitycart.portfolio.dto.HoldingAnalyticsResponse;
 import com.equitycart.portfolio.dto.HoldingRequest;
 import com.equitycart.portfolio.dto.HoldingResponse;
@@ -15,6 +17,7 @@ import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.entity.Portfolio;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.enums.VestingStatus;
+import com.equitycart.portfolio.saga.service.GiftSagaServiceImpl;
 import com.equitycart.portfolio.service.api.PortfolioFacade;
 import com.equitycart.portfolio.service.api.PortfolioService;
 import com.equitycart.portfolio.service.api.SellToSpendService;
@@ -40,6 +43,7 @@ public class PortfolioFacadeImpl implements PortfolioFacade {
   private final PortfolioService portfolioService;
   private final TradeService tradeService;
   private final SellToSpendService sellToSpendService;
+  private final GiftSagaServiceImpl giftSagaService;
 
   /** {@inheritDoc} */
   @Override
@@ -118,6 +122,18 @@ public class PortfolioFacadeImpl implements PortfolioFacade {
   @Override
   public SellToSpendResponse sellToSpend(Long userId, SellToSpendRequest request) {
     return sellToSpendService.sellToSpend(userId, request);
+  }
+
+  /** {@inheritDoc} */
+  @Override
+  public GiftResponse giftStock(Long giverUserId, GiftRequest request) {
+    logger.info(
+        "Portfolio facade gift request: giverUserId={}, receiverUserId={}, ticker={}, qty={}",
+        giverUserId,
+        request.receiverId(),
+        request.tickerSymbol(),
+        request.quantity());
+    return giftSagaService.gift(giverUserId, request);
   }
 
   /** {@inheritDoc} */

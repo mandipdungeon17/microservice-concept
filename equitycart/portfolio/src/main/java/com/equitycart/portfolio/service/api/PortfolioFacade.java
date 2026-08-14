@@ -1,5 +1,7 @@
 package com.equitycart.portfolio.service.api;
 
+import com.equitycart.portfolio.dto.GiftRequest;
+import com.equitycart.portfolio.dto.GiftResponse;
 import com.equitycart.portfolio.dto.HoldingRequest;
 import com.equitycart.portfolio.dto.HoldingResponse;
 import com.equitycart.portfolio.dto.PortfolioAnalyticsResponse;
@@ -70,4 +72,13 @@ public interface PortfolioFacade {
    * @return analytics dashboard view with computed metrics
    */
   PortfolioAnalyticsResponse getAnalytics(Long userId);
+
+  /**
+   * Transfers shares from authenticated giver to another user via compensatable gifting saga.
+   *
+   * @param giverUserId source user gifting shares
+   * @param request gifting payload with receiver/ticker/quantity/idempotencyKey
+   * @return gifting saga response for client-side tracking
+   */
+  GiftResponse giftStock(Long giverUserId, GiftRequest request);
 }

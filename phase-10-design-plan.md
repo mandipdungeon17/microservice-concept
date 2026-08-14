@@ -24,13 +24,13 @@ This phase is where architecture choices become production-grade operating patte
 | Topic | Status | Owner | Next Action | Risk |
 | --- | --- | --- | --- | --- |
 | Topic 1 - CQRS Portfolio Read Model | In Progress (Core done) | You + Assistant | Finish JavaDoc/comments/logging pass in main repo workspace and run compile verification | Medium |
-| Topic 2 - Stock Gifting Saga | Not Started | You + Assistant | Finalize saga state model, idempotency key, and compensation path design | High |
+| Topic 2 - Stock Gifting Saga | In Progress (Implementation + compile verified) | You + Assistant | Manual E2E validation (happy path, duplicate key, step-failure compensation, timeout recovery) and docs closeout | High |
 | Topic 3 - Flash Sale Stock Drops | Not Started | You + Assistant | Design distributed lock strategy, oversell protection, and burst-load behavior | High |
 | Topic 4 - Price Alert Watchlist | Not Started | You + Assistant | Define watchlist model and async evaluation pipeline | Medium |
 | Topic 5 - Dividend DRIP | Not Started | You + Assistant | Design batch workflow and reinvestment idempotency rules | High |
 | Topic 6 - Tax Report Generation | Not Started | You + Assistant | Define report schema and batch output format (CSV/PDF) | Medium |
 | Topic 7 - Portfolio Leaderboard | Not Started | You + Assistant | Define ranking rules and Mongo aggregation plan | Medium |
-| Topic 8 - Return Clawback Saga | Not Started | You + Assistant | Design compensation saga linked to return/refund lifecycle | High |
+| Topic 8 - Return Clawback Saga | Completed | You + Assistant | Monitor with manual E2E and timeout/compensation checks | Medium |
 | Topic 9 - Load Testing | Not Started | You + Assistant | Build test scenarios and baseline SLA metrics | Medium |
 | Topic 10 - Performance Tuning | Not Started | You + Assistant | Tune from load-test evidence (DB, pool, consumer, queries) | Medium |
 
@@ -84,12 +84,14 @@ Detailed learning + technical narrative is in:
 
 ## 4.2 In progress
 
-- Topic 1 code-quality pass in main repo workspace:
-  - JavaDoc/comments/logging refinement on uncommitted files
+- Topic 2 stock gifting saga:
+  - saga implementation complete (enum/entity/repository/orchestrator/outbox/service/controller)
+  - targeted compile passed (`:portfolio:compileJava`)
+  - pending: manual E2E validation and final closure checklist
 
 ## 4.3 Not started (implementation)
 
-- Topics 2 through 10 (listed above)
+- Topics 3, 4, 5, 6, 7, 9, 10
 
 ---
 
@@ -106,8 +108,8 @@ To reduce risk, Phase 10 should proceed in dependency-aware order:
 
 ## Wave A - Consistency-critical financial workflows
 
-1. Topic 8 - Return Clawback Saga
-2. Topic 2 - Stock Gifting Saga
+1. Topic 8 - Return Clawback Saga ✅ Completed
+2. Topic 2 - Stock Gifting Saga ← current
 3. Topic 5 - Dividend DRIP
 
 Why first:
@@ -191,7 +193,7 @@ Terminal states: COMPLETED, COMPENSATED, FAILED
 
 #### Compensation Path
 Reverses in opposite order:
-- If RECORDING_LEDGER/LEDGER_RECORDED: delete ledger entries
+- If RECORDING_LEDGER/LEDGER_RECORDED: write reversal ledger entry (never delete audit rows)
 - If CREDITING_RECEIVER/RECEIVER_CREDITED: reduce receiver holding
 - If DEBITING_GIVER/GIVER_DEBITED: restore giver holding
 - Final: status = COMPENSATED
