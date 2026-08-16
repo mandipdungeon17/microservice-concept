@@ -763,7 +763,238 @@ The interface LOOKS like a collection (`findBy...`, `save()`, `delete()`), but u
 
 ---
 
-### 2.12 Chain of Responsibility Pattern — Security Filter Chains
+### 2.12 Distributed Locking Pattern — Flash Sale Stock Drops (Topic 3)
+
+**Intent:** Protect shared resource (product inventory) from concurrent over-mutation under burst traffic using a distributed lock.
+
+**Problem:** Multiple concurrent requests for the same limited-stock item can all see inventory as "10 units available" and proceed to sell 15 units total (overselling). Local `synchronized` blocks don't work in distributed systems (multiple JVM instances).
+
+**Solution: Redis-Based Optimistic Locking**
+
+EquityCart Topic 3 uses Redis `SET NX EX` (set-if-not-exists with expiration) + Lua script for atomic compare-and-delete:
+
+```java
+// Acquire: SET flash-sale:lock:{productId} "{ownerToken}" NX EX 10
+// Only succeeds if key doesn't exist (only one request per productId gets the lock)
+
+// Release: Lua script validates owner before deleting
+// if redis.call('get', key) == ownerToken then
+//   redis.call('del', key)
+// end
+// Prevents stale release (clock skew between servers)
+```
+
+**Why Redis SET NX EX over other locking strategies:**
+
+| Strategy             | Pros                                              | Cons                                           |
+| -------------------- | ------------------------------------------------- | ---------------------------------------------- |
+| `synchronized`       | JVM-native, zero overhead                         | Doesn't work across JVM instances (monolith ok) |
+| Pessimistic DB lock  | Part of same transactional boundary              | Scales badly (blocks table rows, deadlock risk)  |
+| Redis SET NX EX      | Distributed, fast, expires automatically          | External dependency (Redis must stay up)         |
+| Consensus (Zookeeper)| Guaranteed safety across network partitions       | Overkill for flash sales; high latency          |
+
+**EquityCart Topic 3 Implementation:**
+
+```java
+// Dual-phase idempotency: prevents duplicate orders even if request retries under lock
+@Transactional
+public OrderResponse placeFlashSaleOrder(FlashSalePurchaseRequest req) {
+    // PHASE 1: Fast-path idempotency check (before lock)
+    Optional<Order> cachedOrder = orderRepository.findByIdempotencyKey(req.idempotencyKey());
+    if (cachedOrder.isPresent()) {
+        return orderFacade.toResponse(cachedOrder.get());  // Return cached result, no lock needed
+    }
+    
+    // Check if sale is active (config-driven ISO-8601 window)
+    if (!isFlashSaleActive()) {
+        throw new FlashSaleInactiveException("Window closed");
+    }
+    
+    // PHASE 2: Acquire lock (product-scoped)
+    String lockToken = UUID.randomUUID().toString();
+    boolean acquiredLock = flashSaleLockManager.tryAcquireLock(req.productId(), lockToken, 10);  // 10s TTL
+    
+    if (!acquiredLock) {
+        throw new FlashSaleBusyException("Too many concurrent purchases");  // Retry client-side
+    }
+    
+    try {
+        // PHASE 3: Re-check idempotency under lock (race-safe)
+        Optional<Order> raceOrder = orderRepository.findByIdempotencyKey(req.idempotencyKey());
+        if (raceOrder.isPresent()) {
+            return orderFacade.toResponse(raceOrder.get());
+        }
+        
+        // PHASE 4: Deduct stock (protected by lock)
+        Product product = productService.deductStock(req.productId(), req.quantity());
+        Order order = new Order(...);  // Create order
+        boolean stockDeducted = true;
+        
+        try {
+            Order saved = orderRepository.save(order);  // May fail (constraint, etc.)
+            return orderFacade.toResponse(saved);
+        } catch (DataIntegrityViolationException e) {
+            // Stock deducted but order save failed → restore
+            if (stockDeducted) {
+                productService.restoreStock(req.productId(), req.quantity());
+            }
+            throw e;
+        }
+    } finally {
+        // Always release lock (even on exception)
+        flashSaleLockManager.releaseLock(req.productId(), lockToken);  // Lua script validates owner
+    }
+}
+
+// Why this works:
+// 1. Lock serializes stock deduction: only 1 request per product mutates at a time
+// 2. If request crashes after deduction, lock expires (10s TTL) → next requester can proceed
+// 3. If request crashes after order save, compensation restores stock → no orphaned deductions
+// 4. Dual-phase idempotency prevents duplicates even if request retries twice (both lock attempts)
+// 5. Different productIds = different lock keys → concurrent buys of different products (e.g., 100 AAPL + 100 TSLA simultaneously)
+```
+
+**Cache Invalidation (Critical for consistency):**
+
+```java
+@Caching(evict = {
+    @CacheEvict(value = "products", allEntries = true),      // Invalidate all cached products
+    @CacheEvict(value = "product", key = "#productId")       // Invalidate specific product
+})
+public void deductStock(Long productId, Integer quantity) {
+    // ... deduct logic ...
+}
+
+// Why both caches:
+// - "products" cache: LIST operations (e.g., /api/products?category=electronics)
+// - "product" cache: GET operations (e.g., /api/products/{id})
+// - allEntries=true on "products" ensures any LIST result is fresh
+// - key-specific on "product" is fine because product ID is predictable
+```
+
+**Lock Acquisition Retries (Bounded, Exponential Backoff):**
+
+```java
+private static final int FLASH_SALE_LOCK_RETRY_ATTEMPTS = 3;
+private static final long FLASH_SALE_LOCK_BASE_BACKOFF_MS = 50;
+
+public boolean acquireFlashSaleLock(Long productId, String token, int ttlSeconds) {
+    for (int attempt = 1; attempt <= FLASH_SALE_LOCK_RETRY_ATTEMPTS; attempt++) {
+        boolean acquired = redisTemplate.opsForValue()
+            .setIfAbsent("flash-sale:lock:" + productId, token, ttlSeconds, TimeUnit.SECONDS);
+        
+        if (acquired) {
+            log.debug("Lock acquired for productId={} on attempt={}", productId, attempt);
+            return true;
+        }
+        
+        if (attempt < FLASH_SALE_LOCK_RETRY_ATTEMPTS) {
+            long backoffMs = FLASH_SALE_LOCK_BASE_BACKOFF_MS * attempt;  // 50ms, 100ms, 150ms
+            log.info("Lock contention on productId={}. Retrying in {}ms (attempt {}/{})",
+                productId, backoffMs, attempt, FLASH_SALE_LOCK_RETRY_ATTEMPTS);
+            Thread.sleep(backoffMs);
+        }
+    }
+    
+    log.warn("Failed to acquire lock for productId={} after {} attempts (300ms max wait)",
+        productId, FLASH_SALE_LOCK_RETRY_ATTEMPTS);
+    return false;  // Give up, throw FlashSaleBusyException to client
+}
+
+// Rationale:
+// - 3 retries with exponential backoff covers transient lock contention
+// - Max 300ms wait (50+100+150) is acceptable for user-facing API
+// - Backoff prevents thundering herd (all 100 concurrent requests don't retry in lockstep)
+// - If still locked after 300ms, external traffic is truly overwhelming → reject gracefully
+```
+
+**Active Window Validation (Config-Driven, Fail-Closed):**
+
+```java
+@Value("${equitycart.flash-sale.enabled:true}")
+private boolean flashSaleEnabled;
+
+@Value("${equitycart.flash-sale.start-time:}")  // Empty = always active
+private String flashSaleStartTime;
+
+@Value("${equitycart.flash-sale.end-time:}")
+private String flashSaleEndTime;
+
+private boolean isFlashSaleActive() {
+    if (!flashSaleEnabled) {
+        log.debug("Flash sale disabled via configuration");
+        return false;
+    }
+    
+    // If start/end times are empty, sale always runs (when enabled)
+    if (flashSaleStartTime.isBlank() || flashSaleEndTime.isBlank()) {
+        log.debug("Flash sale window open (no time bounds configured)");
+        return true;
+    }
+    
+    try {
+        Instant now = Instant.now();
+        Instant start = Instant.parse(flashSaleStartTime);
+        Instant end = Instant.parse(flashSaleEndTime);
+        
+        boolean active = now.isAfter(start) && now.isBefore(end);
+        if (!active) {
+            log.warn("Flash sale window closed. Now={}, Start={}, End={}", now, start, end);
+        }
+        return active;
+    } catch (DateTimeParseException e) {
+        log.error("Invalid flash sale window timestamp format. Treating as inactive.", e);
+        return false;  // Fail-closed: on config error, disable sale
+    }
+}
+
+// Config example (application.yml):
+// equitycart:
+//   flash-sale:
+//     enabled: true
+//     start-time: "2026-08-15T10:00:00Z"    # ISO-8601 Instant
+//     end-time: "2026-08-15T18:00:00Z"
+```
+
+**Concurrent Scenarios (How Multiple Users Experience This):**
+
+```
+Scenario: 100 concurrent requests for 10 AAPL shares at $150/each during flash sale
+
+User 1 (Time=0ms):       User 2 (Time=0ms):        User 3 (Time=0ms):
+  Lock key exists? NO       Lock key exists? YES      Lock key exists? YES
+  SET NX succeeds           → return false            → return false
+  Acquires lock             BackoffMs=50              BackoffMs=50
+                            Thread.sleep(50)         Thread.sleep(50)
+  
+  Checks stock: 10 OK       User 1 deducts 10 units   User 1 deducts 10 units
+  Deducts 10 units          Stock now = 0             Stock now = 0
+  Saves order               (User 1 release lock)
+  Releases lock
+  → Success 201             (Time ~50ms)              (Time ~50ms)
+                            Lock key exists? NO       Lock key exists? NO
+                            SET NX succeeds           SET NX succeeds
+                            Checks stock: 0 FAIL      Checks stock: 0 FAIL
+                            Throws InsufficientShare  Throws InsufficientShare
+                            exception 400             exception 400
+                            
+Users 4-100: Similar to User 2/3, fail with 400
+
+RESULT: First user got 10 shares, rest got error. NO OVERSELLING.
+        All responses < 300ms (lock wait bounded).
+        Cache invalidated → /api/products/{productId} now shows 0 remaining.
+```
+
+**EquityCart Production Considerations:**
+
+- **Lock TTL (10s):** Conservative to prevent permanent locks. In distributed deployment, may need longer for high-latency networks.
+- **Backoff strategy (50ms × attempt):** Tuned for sub-millisecond Redis latency. High-latency environments may need longer backoffs.
+- **Cache invalidation:** `allEntries=true` on "products" is safe but impacts other concurrent reads. If list endpoint shows stale data, product cache was not invalidated.
+- **Configuration reload:** Changing `flash-sale.start-time` at runtime requires app restart (ConfigServer refresh not implemented). For true dynamic windows, consider a database table instead.
+
+---
+
+### 2.13 Chain of Responsibility Pattern — Security Filter Chains
 
 **Intent (GoF):** Pass a request along a chain of handlers. Each handler decides whether to process the request or pass it to the next handler.
 

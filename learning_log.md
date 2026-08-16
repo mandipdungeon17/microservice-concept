@@ -5114,3 +5114,213 @@ A: The partition key determines which Kafka partition each event routes to. By u
 A: ClawbackSaga is triggered when a **refund is approved for an order that included vested rewards**. Scenario: customer purchases item + earns stock-back reward (vested 30 days later). Customer returns item within 60 days; order status = RETURNED. Refund approved by payment system. At this point, the reward is still VESTED (3 months of holding is now less valuable because order is refunded). The business rule: if refund is approved, any VESTED rewards from that order must be clawed back (customer gets refund but doesn't keep free stocks). So ClawbackSaga is initiated: remove vested reward from portfolio, reverse the ledger entries that granted it, reduce the user's stock position. This is a **remediation transaction** (reversal of a previously-good state) not a failure recovery (undo of an incomplete transaction). The saga pattern is used because this involves cross-service operations (Portfolio + Ledger) that can't atomically roll back. Once started, the saga either completes clawback or enters compensation (if it times out).
 
 ---
+
+## Phase 10 — Topic 3: Flash Sale Stock Drops (Distributed Locking) (2026-08-15)
+
+### Roadblocks & Issues Faced
+
+**1. Initial Lock Leak Risk — Unbounded TTL Would Leave Stale Locks**
+
+- **Problem:** Without TTL on Redis lock, a service crash holding the lock would permanently block future requests for that product.
+- **Fix:** Set `EX 10` (10-second expiration) on lock acquisition. Service may crash, but lock auto-releases after 10s → next requester can proceed.
+- **Trade-off:** If lock-holding operation takes >10s, lock expires prematurely. Conservative setting: 10s acceptable for inventory check + order save (typically <100ms). For longer operations, increase TTL (but increases recovery latency on crashes).
+
+**2. Stale Release Race Condition — Token Ownership Validation**
+
+- **Problem:** Without ownership validation during release, a thread could release another thread's lock (due to clock skew or cascading crashes).
+- **Fix:** Lua script checks `if redis.call('GET', key) == ownerToken` before delete. Only the owner can release their lock.
+- **Lesson:** Distributed systems must account for clock skew and out-of-order events. Atomic multi-step operations (GET + compare + DELETE) require Lua or similar.
+
+**3. Retry Storm Under Burst Load — No Backoff Strategy**
+
+- **Problem:** 100 concurrent requests all spinning in tight loop trying to acquire lock, flooding Redis with SET NX commands.
+- **Fix:** Exponential backoff (50ms, 100ms, 150ms) staggers retries → smooth sequential load on Redis → reduces CPU spike.
+- **Lesson:** Bounded retry with backoff prevents thundering herd. Without it, congestion amplifies (more clients trying locks → more failures → more retries).
+
+**4. Cache Coherence Failure — Stale Stock After Deduction**
+
+- **Problem:** User's /api/products/{id} endpoint returned stale stock (showed 10 units, but 10 just sold). User thinks product still available → places buy request → gets "insufficient stock."
+- **Fix:** @Caching(evict) on deductStock() invalidates both "products" (all-entries) and "product" (key-specific) caches. Next read forces fresh query.
+- **Lesson:** Cache invalidation timing is critical. Invalidate AFTER the database write commits, not before. Spring's @Caching applies eviction in right order (after method succeeds).
+
+**5. Config-Driven Window Parsing — Defensive Against Format Errors**
+
+- **Problem:** Invalid ISO-8601 timestamp in application.yml (e.g., "2026-08-15T10:00:00" — missing Z) causes DateTimeParseException at runtime → sale stops working.
+- **Fix:** Wrap parsing in try-catch, log error, treat as inactive (fail-closed). Flash sale remains disabled until config is fixed.
+- **Lesson:** For config-driven business logic, always have a safe default. "Sale inactive" is safer than "sale crashes."
+
+### Core Concepts Learned
+
+**118. Distributed Locking via Redis SET NX EX + Lua Release (2026-08-15, Topic 3)**
+
+Protect a shared resource (inventory, limited slots) from concurrent over-mutation across multiple JVM instances using Redis as a distributed lock store.
+
+```
+Acquisition: SET flash-sale:lock:{productId} "{ownerToken}" NX EX 10
+             → Only succeeds if key doesn't exist
+             → TTL ensures lock auto-expires on crash
+
+Release:     Lua script: if GET(key) == ownerToken then DELETE
+             → Atomic ownership check + delete
+             → Prevents token mismatch from stale threads
+```
+
+Why Redis over alternatives: fast (sub-millisecond latency), distributed (works across JVMs), auto-expires (prevents permanent locks). Why Lua: makes (GET + compare + DELETE) atomic (prevents release race).
+
+**119. Dual-Phase Idempotency for Client Retries (2026-08-15, Topic 3)**
+
+Protects against duplicate orders when client retries a request multiple times:
+
+```
+Phase 1 (Before Lock): findByIdempotencyKey() → if cached, return immediately (no lock wait)
+Phase 2 (After Lock):  Re-check cache under lock → if another thread already succeeded, return their result
+
+Two phases required because:
+  - Phase 1 alone: two concurrent identical requests both miss cache, both acquire lock, both create orders
+  - Phase 2 alone: first lock holder creates order, but if crashes before releasing, next acquirer doesn't know
+  - Both: first thread creates order, second thread passes Phase 1 (cache miss), but Phase 2 re-check hits the newly-created order
+```
+
+**120. Exponential Backoff Strategy to Prevent Retry Storms (2026-08-15, Topic 3)**
+
+On lock contention, sleep before retrying: 50ms, 100ms, 150ms (max 300ms total wait). Why?
+
+```
+Without backoff (spinning):
+  100 clients all try SET NX simultaneously
+  99 fail → retry immediately → 99 more SET NX commands next microsecond
+  Redis CPU spikes → latency thrashes → timeouts propagate
+
+With backoff (staggered):
+  Client 1: acquires lock → works → releases
+  Client 2: sleeps 50ms → tries lock → acquires → works → releases
+  Client 3: sleeps 100ms → tries lock → acquires → works
+  → Smooth sequential load → Redis handles easily
+```
+
+Exponential (not linear) because we want most contention to resolve within first retry (small backoff), but still give slow-starters a chance (larger backoff for 3rd attempt).
+
+**121. Stock Compensation on Order Save Failure (2026-08-15, Topic 3)**
+
+Deduct stock, then attempt to save order. If save fails:
+
+```
+1. Track flag: stockDeducted = true (after successful deduction)
+2. Try: orderRepository.save(...)
+3. Catch DataIntegrityViolationException:
+     if (stockDeducted) {
+         productService.restoreStock(...)  // Undo deduction
+     }
+     throw exception → client retries
+```
+
+Why needed: if deduction commits but order save fails, next retry can't detect this (stock is already gone). Compensation prevents orphaned deductions + ledger inconsistency.
+
+**122. Cache Invalidation Dual-Layer Strategy (2026-08-15, Topic 3)**
+
+```
+@Caching(evict = {
+    @CacheEvict(value = "products", allEntries = true),      // LIST cache
+    @CacheEvict(value = "product", key = "#productId")       // GET cache
+})
+public void deductStock(Long productId, Integer quantity) { ... }
+```
+
+Why both?
+- GET /api/products/{id} → reads "product" cache (specific)
+- GET /api/products → reads "products" cache (list)
+- After deduction, both must be fresh (no stale availability)
+- `allEntries=true` on "products" nukes the entire list → forces re-query
+
+Alternative: key-specific invalidation only (finer granularity, less wasteful), but riskier (if cache key logic changes, gets out of sync).
+
+**123. Config-Driven Flash Sale Window — Fail-Closed on Errors (2026-08-15, Topic 3)**
+
+```yaml
+equitycart:
+  flash-sale:
+    enabled: true
+    start-time: "2026-08-15T10:00:00Z"    # ISO-8601 Instant
+    end-time: "2026-08-15T18:00:00Z"
+```
+
+Validation logic:
+```java
+if (!enabled) return false;
+if (startTime.isBlank() || endTime.isBlank()) return true;  // No bounds = always active
+try {
+    Instant now = Instant.now();
+    return now.isAfter(Instant.parse(startTime)) && now.isBefore(Instant.parse(endTime));
+} catch (DateTimeParseException e) {
+    log.error("Config error", e);
+    return false;  // Fail-closed: disable sale if config is broken
+}
+```
+
+Design decisions:
+- **Fail-closed:** On parse error or window closed, reject request (safe for business: lost sale is better than wrong sale)
+- **Blank times = open:** Allows admin to enable sales indefinitely without hardcoding times
+- **ISO-8601 Instant:** Unambiguous across timezones (always UTC-Z format)
+
+**124. Lock Acquisition Logging for Observability (2026-08-15, Topic 3)**
+
+Each acquisition attempt logged at debug/warn level:
+
+```
+DEBUG: Lock acquisition attempt for productId=123, attempt 1/3
+WARN:  Lock contention on productId=123, retrying in 50ms (attempt 1/3)
+DEBUG: Lock acquired for productId=123 on attempt=1
+```
+
+Why important:
+- DEBUG: traces successful acqui sitions (understand contention baseline)
+- WARN: highlights lock failures (alerts on pathological congestion)
+- Combines with metrics (lock-wait-ms histogram) to detect capacity issues
+
+**125. Product-Scoped Concurrency — Different ProductIds Enable Parallelism (2026-08-15, Topic 3)**
+
+Lock key format: `flash-sale:lock:{productId}`
+
+```
+User A buying AAPL:          User B buying TSLA (same moment):
+  Tries: flash-sale:lock:1     Tries: flash-sale:lock:2
+  → Gets lock                  → Gets lock (different key!)
+  
+Both execute concurrently (different locks). Neither blocks the other.
+Only concurrent buyers of SAME product (productId=1) serialize.
+```
+
+This is why product is scoped to the key: allows true parallelism across products, but ensures serial execution within a product's limited inventory.
+
+### Interview Questions & Answers
+
+**Q202: "Why Redis locks instead of database row locks?" (2026-08-15, Topic 3)**
+
+A: Database row locks (SELECT ... FOR UPDATE) are pessimistic — they block readers and writers. At 100 concurrent requests, the database serializes all of them, latency becomes unacceptable. Redis locks fail fast (409 Busy after 300ms max wait) with exponential backoff, so the user perceives "too much traffic, try again" instead of hanging. Also, Redis is in-process (sub-millisecond), while database has network RTT overhead. For flash sales where we expect burst traffic, fail-fast is better UX than queuing.
+
+**Q203: "What happens if the service crashes while holding a Redis lock?" (2026-08-15, Topic 3)**
+
+A: The lock expires via TTL (10 seconds). No permanent lock leak. Tradeoff: if the operation takes >10s, the lock expires prematurely while the service is still working (another requester acquires lock, both execute concurrently). Conservative TTL settings balance: short (10s) prevents hangs, long (30s+) risks premature expiration. For flash sales, 10s is safe (order placement typically <100ms). In microservices with network latency, may need 30s+.
+
+**Q204: "How do you test distributed locking locally?" (2026-08-15, Topic 3)**
+
+A: Use Docker Redis + Java Thread simulation: spawn N threads, each tries to acquire lock, records acquisition order. Verify: exactly one thread acquires on each attempt, others backoff correctly. Load test with k6/Gatling to simulate 100+ concurrent users, measure max lock-wait latency (should stay <300ms). Integration tests via testcontainers(redis-container) to test retry logic + backoff without mocks (real Redis behavior).
+
+**Q205: "Does idempotency key need to be globally unique?" (2026-08-15, Topic 3)**
+
+A: No. Must be unique per user + operation. Example: (userId, "flash-sale-buy", productId, timestamp) makes a good composite. Prevents *this user* from double-purchasing same product; doesn't prevent *someone else* from buying. Client-side: generate UUID + store locally, send on all retries. Server-side: index on (userId, idempotencyKey) for fast lookup.
+
+**Q206: "How does this scale to millions of concurrent users?" (2026-08-15, Topic 3)**
+
+A: Redis (single-node) becomes the bottleneck at ~10k concurrent lock attempts/sec (depends on Redis hardware). For higher scale: Redis Cluster (shard lock keys by productId) or custom hash-based routing (send productId=123 → lock-service-1 for determinism). No code changes needed — just change lock manager implementation from single Redis to clustered version. Current approach is correct for MVP; optimize when metrics show Redis is saturated.
+
+**Q207: "Why do you check isFlashSaleActive() before acquiring lock?" (2026-08-15, Topic 3)**
+
+A: Fail fast. If the window is closed, reject the request immediately (no lock acquisition waste). Lock acquisition involves network RTT to Redis + CPU spend on backoff. If window is closed, that spend is wasted. By checking first (cheap CPU compare), we save resources. Downside: race condition possible (window closes between check and lock), but acceptable because in-window requests that race through still get their order created (consistency is maintained; business just lost a sale to timing).
+
+**Q208: "What if two requests have the same idempotency key but are for different products?" (2026-08-15, Topic 3)**
+
+A: This is prevented by including productId in the idempotency key (composite key = userId + productId + timestamp). Same userId, different products → different keys → both can proceed. If you used just userId + timestamp as the key (not including productId), you'd create this problem. Good lesson: idempotency key design must be specific enough to distinguish different operations.
+
+---
+

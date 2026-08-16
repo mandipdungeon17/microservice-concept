@@ -5,6 +5,7 @@ import com.equitycart.commons.dto.ValidationErrorResponse;
 import com.equitycart.commons.exception.AccountDisabledException;
 import com.equitycart.commons.exception.AuthenticationException;
 import com.equitycart.commons.exception.DuplicateResourceException;
+import com.equitycart.commons.exception.FlashSaleBusyException;
 import com.equitycart.commons.exception.InsufficientSharesException;
 import com.equitycart.commons.exception.InsufficientStockException;
 import com.equitycart.commons.exception.InvalidStatusTransitionException;
@@ -130,6 +131,18 @@ public class GlobalExceptionHandler {
             .map(
                 fe -> new ValidationErrorResponse.FieldError(fe.getField(), fe.getDefaultMessage()))
             .toList());
+  }
+
+  /** Handles flash-sale lock/window contention. */
+  @ExceptionHandler(FlashSaleBusyException.class)
+  @ResponseStatus(HttpStatus.CONFLICT)
+  public ErrorResponse handleFlashSaleBusyException(FlashSaleBusyException ex) {
+    logger.warn("Flash sale busy: {}", ex.getMessage());
+    return new ErrorResponse(
+        HttpStatus.CONFLICT.value(),
+        HttpStatus.CONFLICT.getReasonPhrase(),
+        ex.getMessage(),
+        LocalDateTime.now());
   }
 
   /**

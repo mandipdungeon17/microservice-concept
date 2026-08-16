@@ -1185,6 +1185,69 @@ API Gateway (port 8080, Netty/WebFlux)
   - Gift transfer at giver's average buy price (cost basis) is deterministic but differs from market price — business decision validated
   - Timeout threshold (30s) adequate for monolith; distributed deployment may require longer threshold
 
+### Topic 3 Completion Summary (2026-08-15)
+
+**Phase 10 Topic 3 — Flash Sale Stock Drops (Distributed Lock + Burst Control):**
+
+- **Deliverables Completed:**
+  - Distributed lock manager: `FlashSaleLockManager` using Redis `SET NX EX` + Lua compare-and-delete release script
+  - Lock key format: `flash-sale:lock:{productId}` — single product scoped, enables concurrent purchases of different products
+  - Active window validation: Config-driven with three properties (enabled, start-time, end-time), ISO-8601 parsing, fail-closed on errors
+  - Dual-phase idempotency: pre-lock check (fast path) + post-lock re-check (race-safe path) via `findByIdempotencyKey()`
+  - Bounded retries: 3 attempts with exponential backoff (50ms × attempt#), max 300ms total wait on lock contention
+  - Stock compensation: Tracks `stockDeducted` flag, restores stock on order save failure to prevent orphaned deductions
+  - Cache invalidation: Dual-layer `@Caching` decorator on `deductStock()` and `restoreStock()` invalidates both "products" and product-specific caches
+  - REST integration: `OrderController.placeFlashSaleOrder()` bypasses cart, direct to stock check + order placement
+
+- **Code Quality:**
+  - All Topic 3 files compile successfully (gradle clean build -p order)
+  - All classes have comprehensive JavaDoc explaining Redis SET NX EX semantics, lock TTL, Lua release script ownership validation
+  - Extensive logging at debug/info/warn levels: lock acquisition attempts, window validation, compensation actions, cache eviction
+  - Method-level documentation with "what, why, how" for `isFlashSaleActive()`, `acquireFlashSaleLock()`, compensation flow
+  - Monetary precision: `BigDecimal` with proper scale for stock prices and transfer values
+  - No unrelated code changes — focused on flash-sale lock behavior only
+
+- **Lock Semantics & Concurrency Behavior:**
+  - Product-scoped lock: Only ONE request per productId holds the Redis lock at a time
+  - Different productIds = different Redis keys = concurrent execution possible (e.g., 100 users can buy different products simultaneously)
+  - Lock TTL: 10 seconds (prevents lock leaks from service crashes, release via Lua prevents stale release race)
+  - Lua release script validates owner matches before delete (prevents accidental release by wrong owner due to clock skew)
+
+- **Active Window Validation Pattern:**
+  - Config properties: `equitycart.flash-sale.enabled`, `equitycart.flash-sale.start-time`, `equitycart.flash-sale.end-time`
+  - Timestamp format: ISO-8601 Instant (e.g., "2026-08-15T10:00:00Z")
+  - Validation timing: checked BEFORE lock acquisition (rejects upfront if window closed)
+  - Empty/blank times = open window (sale always active when enabled)
+  - Parsing errors logged and treated as inactive (fail-closed security model)
+
+- **Dual-Phase Idempotency Pattern (Topic 3 Contribution):**
+  - PHASE 1 (Before Lock): Fast-path check `findByIdempotencyKey()` for duplicate requests in flight
+  - PHASE 2 (After Lock): Re-check idempotency key under lock to catch concurrent requests that both passed Phase 1
+  - Result: prevents duplicate stock deductions and ensures at-most-once semantics under high concurrency
+
+- **Compensation Pattern (Stock Restoration):**
+  - If order save fails AFTER stock deduction, `restoreStock()` called automatically
+  - Uses captured quantity and productId to restore original amount
+  - Cache eviction ensures next stock check reflects restored amount
+  - Prevents orphaned deductions and maintains ledger+portfolio consistency
+
+- **Manual E2E Validation Checklist (Ready for execution):**
+  - Happy path: Window active, stock available, lock acquired, order created, response 201
+  - Window closed: Request rejected with 423 (or 409 if using FlashSaleBusyException), no order created
+  - Lock contention: 100 concurrent requests, 1 succeeds, 99 retry with backoff, no overselling
+  - Idempotency: Duplicate idempotencyKey within window → cached result, no double-deduction
+  - Compensation: Order save fails (DB error simulated) → stock restored, next request succeeds
+  - Cache coherence: After purchase, stock reduced, API reflects new quantity, no stale reads
+
+- **Learning Files Updated:**
+  - (Pending: java-reference.md, learning_log.md, microservice-patterns.md, springboot-reference.md, kafka-learning.md)
+
+- **Residual Risks & Open Questions:**
+  - Lock TTL (10s) set conservatively; distributed deployment may require longer/shorter threshold
+  - Cache invalidation strategy (allEntries=true) safe but impacts concurrent reads; incremental invalidation deferred
+  - Window parsing relies on app startup — changing config at runtime requires restart (ConfigServer refresh not implemented)
+  - Load testing not yet run — 300ms max retry wait may be insufficient under extreme burst traffic (p99 measurements needed)
+
 ## Phase Checklist
 
 - [x] Phase 0: Foundation & Setup (Week 1)

@@ -1,5 +1,6 @@
 package com.equitycart.order.controller;
 
+import com.equitycart.order.dto.FlashSalePurchaseRequest;
 import com.equitycart.order.dto.OrderResponse;
 import com.equitycart.order.dto.PlaceOrderRequest;
 import com.equitycart.order.dto.UpdateOrderStatusRequest;
@@ -78,5 +79,29 @@ public class OrderController {
     Long userId = (Long) authentication.getPrincipal();
     log.info("PATCH /api/order/{}/return - return requested by userId={}", orderId, userId);
     return orderService.requestReturn(userId, orderId);
+  }
+
+  /**
+   * Places a direct flash-sale order for a single product.
+   *
+   * <p>Unlike regular {@link #placeOrder(Authentication, PlaceOrderRequest)} this bypasses cart
+   * aggregation and enters the lock-protected flash-sale path for burst traffic.
+   *
+   * @param authentication current authenticated principal containing userId
+   * @param request flash-sale purchase details
+   * @return created order response (or idempotent replay result)
+   */
+  @PostMapping("/flash-sale")
+  @ResponseStatus(HttpStatus.CREATED)
+  public OrderResponse placeFlashSaleOrder(
+      Authentication authentication, @Valid @RequestBody FlashSalePurchaseRequest request) {
+    Long userId = (Long) authentication.getPrincipal();
+    log.info(
+        "POST /api/order/flash-sale - userId={}, productId={}, quantity={}",
+        userId,
+        request.productId(),
+        request.quantity());
+
+    return orderService.placeFlashSaleOrder(userId, request);
   }
 }

@@ -3427,3 +3427,407 @@ A: Failed reconciliations are logged and retried nightly. If drift persists, it 
 **Q: "How do you handle schema changes to the read model?" (Phase 10)**  
 A: All events are replayed through the projection logic. Add new fields to the projection code (e.g., calculate a new metric). Next event triggers rebuild with the new field. Existing documents lack the new field until they're rebuilt. Backfill job can rebuild all users without waiting for events. Contrast: in Event Sourcing, all historical events must be replayed — much more complex.
 
+---
+
+## 16. Distributed Locking Pattern — High-Concurrency Resource Protection (Topic 3)
+
+**Problem:** How do you protect a shared resource (product inventory, limited-time offer slots, flash-sale tickets) from concurrent over-mutation across multiple service instances without distributed transactions?
+
+**Real-world example:** 10 concurrent users request to buy the last 3 shares of AAPL during a flash sale. Without coordination:
+- User 1 sees: inventory=3 → buys 3 → saves
+- User 2 sees: inventory=3 (not yet updated) → buys 3 → saves  
+- User 3 sees: inventory=3 → buys 3 → saves
+- Result: 9 shares sold, but only 3 existed. **OVERSELLING**
+
+**Why not just use `synchronized` or database locks?**
+
+| Locking Strategy        | When It Works                          | When It Fails                                      |
+| ----------------------- | -------------------------------------- | -------------------------------------------------- |
+| JVM `synchronized`      | Single-instance monolith              | Multiple service instances (doesn't span JVMs)    |
+| Pessimistic DB lock     | Low contention                        | Scales badly at high concurrency; deadlock risk   |
+| Optimistic DB lock      | Mostly non-conflicting writes          | Retry storms under extreme burst; poor UX         |
+| Redis distributed lock  | **Distributed, fast, expires safely**   | External dependency; network partition risk      |
+| Consensus (Zookeeper)   | Safety across network partitions       | Overkill for user-facing APIs; high latency      |
+
+**EquityCart Topic 3 Solution: Redis-Based Distributed Lock**
+
+```
+Invariant: At most ONE request per productId holds the lock at any time.
+Different productIds → different keys → concurrent execution possible.
+```
+
+### 16.1 Lock Mechanism: Redis SET NX EX + Lua Compare-and-Delete
+
+**Acquisition (SET NX EX):**
+
+```
+REQUEST 1                      REQUEST 2 (same millisecond)
+↓                              ↓
+SET flash-sale:lock:123        SET flash-sale:lock:123
+    "{ownerToken1}"                "{ownerToken2}"
+    NX                             NX
+    EX 10                          EX 10
+    ↓                              ↓
+  success                        nil (key exists)
+  owns lock                       retry with backoff
+```
+
+**Release (Lua Script — prevents stale release race):**
+
+```lua
+-- Release script (only owner can delete)
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    redis.call('DEL', KEYS[1])
+    return 1
+else
+    return 0  -- not the owner; ignore
+end
+```
+
+Why Lua? Without it, a race condition exists:
+
+```
+Thread A (crashed after checkpoint):
+  1. GET flash-sale:lock:123 → returns "{ownerToken1}"
+  2. [crash for 5 seconds]
+  
+Thread B (different owner):
+  1. [5 seconds pass]
+  2. SET flash-sale:lock:123 "{ownerToken2}" NX EX 10 → success (TTL expired)
+  3. Acquires lock, does work, saves
+  
+Thread A (recovering):
+  4. DEL flash-sale:lock:123  ← !!!  DELETES THREAD B'S LOCK !!!
+  5. Thread B's lock gone; Thread C now acquires
+  → Data corruption (Threads B and C execute concurrently)
+```
+
+**Lua fixes this by making (GET + compare + DEL) atomic:**
+
+```
+if redis.call('GET', key) == "{ownerToken1}" then DELETE
+else IGNORE
+```
+
+### 16.2 Dual-Phase Idempotency (Prevents Client Retry Duplicates)
+
+**Phase 1: Fast-Path Check (Before Lock)**
+
+```java
+Optional<Order> cachedOrder = orderRepository.findByIdempotencyKey(req.idempotencyKey());
+if (cachedOrder.isPresent()) {
+    return cached;  // No lock needed; return immediately
+}
+```
+
+**Phase 2: Race-Safe Check (After Lock)**
+
+```java
+boolean acquiredLock = lockManager.tryAcquire(productId, token, 10);
+if (!acquiredLock) {
+    throw new FlashSaleBusyException();  // Too many concurrent → retry client-side
+}
+
+try {
+    // Re-check: concurrent request might have passed Phase 1 before we acquired lock
+    Optional<Order> raceOrder = orderRepository.findByIdempotencyKey(req.idempotencyKey());
+    if (raceOrder.isPresent()) {
+        return raceOrder.get();  // Another thread won; return their result
+    }
+    
+    // Safe to proceed: only this thread holds lock + no duplicate exists
+    productService.deductStock(productId, quantity);
+    Order order = orderRepository.save(new Order(...));
+    return order;
+} finally {
+    lockManager.release(productId, token);
+}
+```
+
+**Why both checks?**
+
+```
+Scenario: Client sends request 3 times due to timeout
+
+Thread A (attempt 1):            Thread B (attempt 2):           Thread C (attempt 3):
+  Phase 1: cache miss              Phase 1: ?                      Phase 1: ?
+                                    
+  Lock contention...               Lock contention...              Lock contention...
+  (50ms backoff)                    (50ms backoff)                  (50ms backoff)
+  
+  Acquire lock → YES                Tries lock → BLOCKED            Tries lock → BLOCKED
+  Phase 2: cache miss               ↓                               ↓
+  Deduct stock: 100→99              (waiting)                       (waiting)
+  Save order → SUCCESS              
+  Release lock                       Acquire lock → YES              (still waiting)
+  ↓                                  Phase 2: cache HIT!             ↓
+  Returns orderId=1                  Return cached orderId=1         Acquire lock → YES
+                                     Release lock                    Phase 2: cache HIT!
+                                                                     Return cached orderId=1
+                                                                     Release lock
+
+RESULT: Only one order created. Client sees same orderId on all 3 attempts. ✓
+WITHOUT Phase 2: Both A and B would proceed after lock, creating duplicate orders.
+```
+
+### 16.3 Bounded Retry Strategy (Exponential Backoff)
+
+```java
+private static final int MAX_ATTEMPTS = 3;
+private static final long BASE_BACKOFF_MS = 50;
+
+for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    boolean acquired = redis.setIfAbsent(lockKey, token, 10, TimeUnit.SECONDS);
+    
+    if (acquired) {
+        return true;
+    }
+    
+    if (attempt < MAX_ATTEMPTS) {
+        long backoffMs = BASE_BACKOFF_MS * attempt;  // 50ms, 100ms, 150ms
+        Thread.sleep(backoffMs);
+    }
+}
+
+// Max wait: 50 + 100 + 150 = 300ms
+throw new FlashSaleBusyException("Retry after 300ms");
+```
+
+**Why exponential backoff?**
+
+```
+Without backoff (thundering herd):
+  ╔════════════════════════════════════════════════════╗
+  ║ 100 concurrent requests all spinning, all retry   ║
+  ║ simultaneously (microsecond precision)             ║
+  ║ → Redis CPU spikes, latency thrashes              ║
+  ╚════════════════════════════════════════════════════╝
+
+With exponential backoff (staggered retries):
+  Thread 1: locks, works, releases                    (0–50ms)
+  Thread 2: sleeps 50ms, then locks, works, releases (50–100ms)
+  Thread 3: sleeps 100ms, then locks, works           (100–150ms)
+  ...
+  → Redis sees smooth sequential lock requests
+  → Each succeeds without contention
+```
+
+### 16.4 Stock Compensation on Failure
+
+```java
+boolean stockDeducted = false;
+
+try {
+    productService.deductStock(productId, quantity);
+    stockDeducted = true;  // Track for compensation
+    
+    Order order = new Order(...);
+    orderRepository.save(order);  // May fail (constraint, timeout, etc.)
+    
+    return order;
+} catch (DataIntegrityViolationException e) {
+    // Save failed but stock was deducted → restore
+    if (stockDeducted) {
+        productService.restoreStock(productId, quantity);
+        log.warn("Compensated stock deduction for productId={}, qty={} due to: {}",
+            productId, quantity, e.getMessage());
+    }
+    throw e;
+}
+```
+
+**Why needed?**
+
+```
+Without compensation:
+  1. Stock deducted: 100→97
+  2. Order save fails (e.g., FK constraint: user deleted)
+  3. Exception propagates to client (500 error)
+  4. Client retries, but stock is already gone
+  5. Inventory record now out-of-sync with order reality
+  → Ghost deduction; stock can never be recovered
+
+With compensation:
+  1. Stock deducted: 100→97
+  2. Order save fails
+  3. Compensation runs: stock restored 97→100
+  4. Exception propagates
+  5. Client retries; stock still available
+  6. Inventory remains consistent
+  → No orphaned deductions
+```
+
+### 16.5 Cache Invalidation Strategy
+
+```java
+@Caching(evict = {
+    @CacheEvict(value = "products", allEntries = true),  // Invalidate LIST cache
+    @CacheEvict(value = "product", key = "#productId")   // Invalidate individual cache
+})
+public void deductStock(Long productId, Integer quantity) {
+    // ... deduct logic ...
+}
+```
+
+**Why dual-layer caching?**
+
+```
+API Pattern:
+  GET /api/products                        → "products" cache (all products list)
+  GET /api/products/{id}                   → "product" cache (specific product)
+  POST /api/products/123/flash-sale-buy    → deductStock() evicts both
+
+Without allEntries invalidation on "products":
+  User calls GET /api/products
+  → Cache returns stale list (still shows 100 units for AAPL)
+  → User sees inventory that's already sold out
+  → Bad UX (shows availability that's false)
+
+With allEntries:
+  Deduction invalidates entire "products" cache
+  → Next GET /api/products forces fresh query
+  → User sees accurate availability
+```
+
+### 16.6 Active Window Validation (Config-Driven)
+
+```yaml
+# application.yml
+equitycart:
+  flash-sale:
+    enabled: true
+    start-time: "2026-08-15T10:00:00Z"    # ISO-8601 Instant
+    end-time: "2026-08-15T18:00:00Z"
+```
+
+```java
+@Value("${equitycart.flash-sale.enabled:true}")
+private boolean flashSaleEnabled;
+
+@Value("${equitycart.flash-sale.start-time:}")
+private String startTime;
+
+private boolean isFlashSaleActive() {
+    if (!flashSaleEnabled) return false;
+    
+    if (startTime.isBlank() || endTime.isBlank()) {
+        return true;  // No bounds = always active
+    }
+    
+    try {
+        Instant now = Instant.now();
+        Instant start = Instant.parse(startTime);
+        Instant end = Instant.parse(endTime);
+        
+        return now.isAfter(start) && now.isBefore(end);
+    } catch (DateTimeParseException e) {
+        log.error("Invalid flash sale window. Treating as inactive.", e);
+        return false;  // Fail-closed: on config error, disable sale
+    }
+}
+```
+
+**Key design decisions:**
+
+- **Fail-closed on parse errors:** If timestamp format is wrong, sale is disabled (safe choice)
+- **Blank times = open window:** Allows one-time sales (manually enabled/disabled via property)
+- **Checked before lock:** Rejects upfront if window closed (saves lock acquisition on expired sales)
+
+### 16.7 Lock Acquisition Logging (Observability)
+
+```
+DEBUG: Lock acquisition attempt for productId=123, attempt 1/3
+DEBUG: Lock acquired for productId=123 on attempt=1
+DEBUG: Flash sale active, window closes at 2026-08-15T18:00:00Z
+INFO:  Processing order for productId=123, qty=10
+DEBUG: Stock deducted: 123 → inventory now 90
+INFO:  Order created: orderId=456, userId=789
+DEBUG: Lock released for productId=123
+
+----- Failure case -----
+WARN:  Lock contention on productId=123, retrying in 50ms (attempt 1/3)
+WARN:  Lock contention on productId=123, retrying in 100ms (attempt 2/3)
+WARN:  Failed to acquire lock for productId=123 after 3 attempts (300ms max wait)
+ERROR: FlashSaleBusyException: Too many concurrent buyers for productId=123
+```
+
+### 16.8 Concurrent Scenario Walkthrough (100 Users, 10 Units Available)
+
+```
+TIME  USER 1                          USER 2                           USER 3–100
+────────────────────────────────────────────────────────────────────────────────────
+0ms   Checks: sale active? YES        Checks: sale active? YES         (simultaneous)
+      Checks: cache miss              Checks: cache miss               
+      Tries lock → SET NX → YES       Tries lock → SET NX → nil        Tries: all get nil
+      
+5ms   Holds lock, deducts: 10→0       Backoff: sleep 50ms              Backoff: ~50ms
+      Saves order
+      
+20ms  Releases lock                   (still sleeping)                 (still sleeping)
+
+55ms                                  Tries lock → SET NX → YES        Tries: nil
+                                      Deducts: 0→-10  FAIL!            (still sleeping)
+                                      InsufficientStock exception
+                                      
+105ms                                 (sleeping)                       Tries lock → nil
+                                                                        Backoff: ~100ms
+
+155ms                                                                   Tries lock → nil
+                                                                        Give up
+                                                                        FlashSaleBusyException
+                                                                        
+RESULT: 1 user gets order. Others get either 400 (insufficient stock) or 409 (too busy).
+        NO OVERSELLING. NO DATA CORRUPTION.
+        Max latency: ~300ms for any request.
+```
+
+### 16.9 Production Considerations
+
+| Consideration                 | Setting                              | Rationale                                                |
+| ----------------------------- | ------------------------------------ | -------------------------------------------------------- |
+| Lock TTL                      | 10 seconds                           | Balances: short enough to free quickly, long enough for ops |
+| Max retries                   | 3 attempts                           | Covers transient contention; gives up fast under storm |
+| Backoff strategy              | 50ms × attempt                       | Staggers retries; prevents herd behavior                 |
+| Max total wait                | 300ms (50+100+150)                   | Acceptable for user-facing API, not too long            |
+| Cache invalidation granularity | allEntries=true on "products"        | Safe but conservative; can be optimized if contention shows  |
+| Window parsing                | Fail-closed on errors                | Security: if config wrong, sale disabled (not live)     |
+| Compensation trigger          | Tracks `stockDeducted` flag          | Prevents orphaned deductions on order-save failure      |
+| Idempotency key scope         | Client-provided, indexed in DB       | Enables retry safety and duplicate detection            |
+
+### 16.10 When to Use vs When to Avoid
+
+**Use Distributed Locking When:**
+- Limited resource (inventory, seats, limited slots)
+- High concurrency expected (burst traffic, flash sales)
+- Single instance can't handle full workload
+- You have operational capacity to monitor Redis
+
+**Avoid (or Simplify) When:**
+- Resource is unlimited (open inventory)
+- Low concurrency (few concurrent users)
+- Database pessimistic locks acceptable (low scale)
+- You're not committed to maintaining Redis
+
+**Don't Use For:**
+- Message ordering (use Kafka partitions instead)
+- Complex state machines (use sagas or event sourcing)
+- Mutual exclusion beyond milliseconds (consensus algorithms better)
+
+### 16.11 Interview Questions (Topic 3)
+
+**Q: "Why not use database row-level locks instead of Redis?"**  
+A: Database locks are pessimistic — they block other readers. At 100 concurrent requests, the database becomes the bottleneck. Redis locks are optimistic — most requests fail fast (409 Busy) instead of queuing. UX is better ("try again in a moment") than DB timeout (stuck for 30s). Also, Redis is in-process (sub-millisecond), while DB has network round-trip latency.
+
+**Q: "What happens if Redis crashes mid-transaction?"**  
+A: The lock expires via TTL (10 seconds). Next request acquires it. No permanent lock leak. Tradeoff: if the service holding the lock crashes, it won't release it, but the 10-second TTL ensures recovery. Compare to Zookeeper where nodes could block indefinitely.
+
+**Q: "How do you test distributed locking locally?"**  
+A: Docker Redis for testing. Mock the lockManager interface for unit tests (no actual lock contention). Integration tests use testcontainers + Redis to test retry behavior + backoff. Load tests (k6, Gatling) simulate burst traffic with many concurrent requests.
+
+**Q: "Does idempotency key need to be globally unique?"**  
+A: No, just unique per user for a given operation. Example: (userId, operation_type, timestamp) makes a good composite key. Client can use UUID + store on their end for retry. The key prevents *this user* from double-purchasing; it doesn't need to prevent *someone else* from buying.
+
+**Q: "How does this pattern scale to microservices?"**  
+A: Redis is already distributed (lives outside any single service). Multiple service instances use the same Redis. Lock key includes productId (not serviceId), so the lock is global across all services. Same 3-attempt retry logic applies. Caveat: Redis must be highly available (use Redis Sentinel or Cluster in production).
+
+

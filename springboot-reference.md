@@ -2216,6 +2216,320 @@ BUT: if services were on host and Keycloak on Docker (typical dev setup):
 
 FIX: Use jwk-set-uri instead of issuer-uri
     → spring.security.oauth2.resourceserver.jwt.jwk-set-uri=http://localhost:8180/.../certs
+
+---
+
+## 11. Redis Distributed Locking & Cache Management — Topic 3 Flash Sale Pattern
+
+### 11.1 Redis SET NX EX for Distributed Locks
+
+**Problem:** How do you protect a shared resource (product inventory, limited slots) across multiple service instances from concurrent over-mutation?
+
+JVM `synchronized` blocks don't span multiple processes. Database row locks serialize all requests (poor UX under burst). Solution: Redis as external coordination point.
+
+**Mechanism:**
+
+```java
+// Acquisition
+Boolean acquired = redisTemplate.opsForValue()
+    .setIfAbsent(
+        "flash-sale:lock:123",      // key (product-scoped)
+        "{ownerToken}",              // value (must be unique per holder)
+        10,                           // TTL
+        TimeUnit.SECONDS              // auto-expires on crash
+    );
+// Returns true if key didn't exist (you own lock)
+// Returns false if key existed (someone else owns lock)
+
+// Release (Lua script for atomic ownership check)
+String script = "if redis.call('GET', KEYS[1]) == ARGV[1] then " +
+                "  redis.call('DEL', KEYS[1]) " +
+                "  return 1 " +
+                "else " +
+                "  return 0 " +
+                "end";
+
+Boolean released = redisTemplate.execute(
+    new DefaultRedisScript<>(script, Boolean.class),
+    List.of("flash-sale:lock:123"),
+    "{ownerToken}"                  // must match acquisition token
+);
+```
+
+**Why Lua for release?**
+
+Without Lua, a race condition exists:
+
+```
+Thread A (old owner):
+  1. GET key → "{tokenA}"
+  2. [crash for 5 seconds]
+  3. [recover]
+  4. DEL key → ✓ (but this is WRONG — key is owned by Thread B now)
+
+Thread B (new owner):
+  1. [5 seconds pass, TTL expires]
+  2. SET NX key "{tokenB}" → success
+  3. Acquires lock, does work
+  
+Thread A wakes up:
+  4. DEL key → DELETES Thread B'S LOCK !!!
+  5. Thread C now acquires → data corruption
+```
+
+Lua fixes by making (GET + compare + DELETE) atomic in Redis:
+
+```lua
+if redis.call('GET', key) == "{tokenA}" then DELETE
+else IGNORE
+```
+
+### 11.2 Spring @Cacheable, @CacheEvict, @Caching
+
+**@Cacheable — Conditional Caching:**
+
+```java
+@Cacheable(value = "product", key = "#productId")
+public Product getProduct(Long productId) {
+    return productRepository.findById(productId)
+        .orElseThrow(() -> new ResourceNotFoundException("Product not found"));
+}
+```
+
+Behavior:
+```
+Request 1: productId=123 → cache miss → query DB → cache result → return
+Request 2: productId=123 → cache hit → return cached → DB not queried
+Request 3: productId=456 → cache miss (different key) → query DB → cache
+```
+
+**Cache key generation:**
+- `value` = cache name (logical grouping)
+- `key` = cache key within that value (usually based on method parameters)
+- Composite key example: `#userId + ':' + #productId`
+
+**@CacheEvict — Invalidation:**
+
+```java
+@CacheEvict(value = "product", key = "#productId")
+public void updateProduct(Long productId, Product updated) {
+    productRepository.save(updated);
+    // After method completes, cache entry for this productId is removed
+}
+```
+
+Multiple caches in one annotation:
+
+```java
+@CacheEvict(value = "product", key = "#productId")
+@CacheEvict(value = "products", allEntries = true)  // Invalidate entire cache
+public void deductStock(Long productId, Integer quantity) {
+    // After deduction:
+    // - GET /api/products/{productId} misses cache → fresh query
+    // - GET /api/products misses cache → fresh query (entire list)
+}
+```
+
+**Why `allEntries = true` on "products"?**
+
+```
+Scenario: Product AAPL in "products" list cache
+
+Deduction: AAPL stock 10 → 9
+  Query 1: @Cacheable("product", key="123") → cache evicted (specific key)
+  Query 2: @Cacheable("products") → LIST returns AAPL with stock=10 (STALE!)
+  
+User sees stock=10 but actual is 9 → bad UX (shows availability that's sold out)
+
+With allEntries=true:
+  Both specific + list cache evicted
+  Next /api/products query forced to rebuild from DB
+  List includes accurate stock=9
+```
+
+### 11.3 Spring Caching Mechanism — How Proxies Work
+
+```java
+@Service
+public class ProductServiceImpl {
+    
+    @Cacheable("product")
+    public Product getProduct(Long productId) {
+        log.info("Querying DB for productId={}", productId);
+        return repository.findById(productId).orElseThrow();
+    }
+}
+```
+
+**Execution path:**
+
+```
+request → Spring proxy
+    → checks cache for key (productId=123)
+    → if hit: return cached value, DON'T call real method
+    → if miss: call real method → save result in cache → return result
+
+Caller never knows method was cached — same interface, different performance.
+```
+
+**Critical gotcha — Self-invocation bypasses cache:**
+
+```java
+@Service
+public class OrderServiceImpl {
+    
+    @Transactional
+    public Order placeOrder(OrderRequest req) {
+        Product product = getProduct(req.productId());  // ← CALLS THIS.METHOD()
+        // ...
+    }
+    
+    @Cacheable("product")
+    public Product getProduct(Long productId) {
+        return productRepository.findById(productId).orElseThrow();
+    }
+}
+```
+
+**Problem:** `getProduct()` is NOT cached because `this.method()` calls bypass the proxy.
+
+**Solution:** Extract into separate @Service bean:
+
+```java
+@Service
+public class ProductLoaderService {
+    @Cacheable("product")
+    public Product getProduct(Long productId) {
+        return productRepository.findById(productId).orElseThrow();
+    }
+}
+
+@Service
+public class OrderServiceImpl {
+    private ProductLoaderService productLoader;  // Injected bean
+    
+    @Transactional
+    public Order placeOrder(OrderRequest req) {
+        Product product = productLoader.getProduct(req.productId());  // ← proxy called
+    }
+}
+```
+
+Now `productLoader.getProduct()` routes through the proxy → caching works.
+
+### 11.4 Cache Invalidation Timing — Dual-Layer Strategy (Topic 3)
+
+**Pattern: Invalidate AFTER database write commits**
+
+```java
+@Caching(evict = {
+    @CacheEvict(value = "products", allEntries = true),
+    @CacheEvict(value = "product", key = "#productId")
+})
+@Transactional
+public void deductStock(Long productId, Integer quantity) {
+    Product product = productRepository.findById(productId).orElseThrow();
+    product.setQuantity(product.getQuantity() - quantity);
+    productRepository.save(product);  // ← DB commit happens here
+    // After method returns and transaction commits, @CacheEvict fires
+}
+```
+
+**Why after, not before?**
+
+```
+WRONG: Evict cache → call method
+
+@CacheEvict(...)  // ← Fires BEFORE method
+public void deductStock(...) {
+    product.setQuantity(quantity - 1);
+    save(product);  // May fail (FK violation, timeout)
+}
+
+If save() fails:
+  - Cache is already evicted
+  - Database still has old quantity
+  - Next GET cache-misses → queries DB → reads old quantity
+  - User thinks deduction didn't work, retries
+  - Retry succeeds → double deduction
+
+CORRECT: Method runs → DB commits → evict cache
+
+public void deductStock(...) {  // Method runs first
+    product.setQuantity(quantity - 1);
+    save(product);  // Succeeds
+}
+// After method returns and TX commits, @CacheEvict fires
+// → Next GET cache-misses → DB query returns new quantity
+// → No double deduction
+```
+
+**Ordering guarantee:** Spring's @Transactional and @CacheEvict are both proxies; Spring ensures @CacheEvict fires AFTER transaction commits (via TransactionSynchronizationManager).
+
+### 11.5 Redis Connection Configuration
+
+```yaml
+spring:
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+      timeout: 60000  # 60 second socket timeout
+      lettuce:
+        pool:
+          max-active: 8        # Max connections in pool
+          max-idle: 8          # Max idle connections
+          min-idle: 0          # Min idle (can go to 0)
+          max-wait: -1ms       # Wait indefinitely for a connection
+```
+
+**Why Lettuce (not Jedis)?**
+
+- Lettuce: async, non-blocking, uses Netty → better under high load, connection pooling automatic
+- Jedis: sync/blocking, requires thread per connection → resource-intensive
+
+For flash sale under 100s of concurrent requests, Lettuce is essential.
+
+### 11.6 Lock Acquisition Metrics (Topic 3)
+
+```java
+private MeterRegistry meterRegistry;
+
+private boolean acquireFlashSaleLock(Long productId, String token) {
+    Timer.Sample sample = Timer.start(meterRegistry);
+    int attempts = 0;
+    
+    for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        attempts++;
+        boolean acquired = redisTemplate.opsForValue()
+            .setIfAbsent(lockKey, token, 10, TimeUnit.SECONDS);
+        
+        if (acquired) {
+            sample.stop(Timer.builder("flash-sale.lock.acquisition-time")
+                .description("Time to acquire flash-sale lock")
+                .tag("productId", productId.toString())
+                .tag("attempts", String.valueOf(attempts))
+                .register(meterRegistry));
+            return true;
+        }
+        
+        if (attempt < MAX_ATTEMPTS) {
+            Thread.sleep(50 * attempt);
+        }
+    }
+    
+    meterRegistry.counter("flash-sale.lock.failures", "productId", productId.toString())
+        .increment();
+    return false;
+}
+```
+
+**What to monitor:**
+- `flash-sale.lock.acquisition-time` histogram: p50/p95/p99 latency (should stay <50ms on first attempt)
+- `flash-sale.lock.failures` counter: how often requests exceed max retries
+- Alert if p99 > 300ms: indicates Redis saturation or network issues
+
     → Direct key fetch — no issuer validation
     → Tokens validate correctly regardless of hostname mismatch
 ```

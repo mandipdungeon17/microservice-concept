@@ -201,6 +201,7 @@ public class ProductServiceImpl implements ProductService {
   /** {@inheritDoc} */
   @Override
   @Transactional
+  @CacheEvict(value = "product", key = "#productId")
   public void deductStock(Long productId, int quantity) {
     log.info("Deducting stock for product id: {}, quantity: {}", productId, quantity);
     Product product =
@@ -235,6 +236,7 @@ public class ProductServiceImpl implements ProductService {
   /** {@inheritDoc} */
   @Transactional
   @Override
+  @CacheEvict(value = "product", key = "#productId")
   public void restoreStock(Long productId, int quantity) {
     log.info("Restoring stock for product id: {}, quantity: {}", productId, quantity);
     Product product =

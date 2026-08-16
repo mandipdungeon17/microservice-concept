@@ -1,5 +1,6 @@
 package com.equitycart.order.service.api;
 
+import com.equitycart.order.dto.FlashSalePurchaseRequest;
 import com.equitycart.order.dto.OrderResponse;
 import com.equitycart.order.dto.PlaceOrderRequest;
 import com.equitycart.order.dto.UpdateOrderStatusRequest;
@@ -57,4 +58,22 @@ public interface OrderService {
    * @return the updated order details with RETURN_REQUESTED status
    */
   OrderResponse requestReturn(Long userId, Long orderId);
+
+  /**
+   * Places a direct flash-sale order for one product under burst-protection controls.
+   *
+   * <p>Implementation responsibilities:
+   *
+   * <ul>
+   *   <li>validate sale window active state
+   *   <li>enforce product-scoped distributed lock with bounded retries
+   *   <li>apply idempotency checks before and after lock acquisition
+   *   <li>deduct stock via product-service and compensate on save failure
+   * </ul>
+   *
+   * @param userId authenticated buyer identifier
+   * @param request flash-sale payload
+   * @return created order response or existing order for duplicate idempotency key
+   */
+  OrderResponse placeFlashSaleOrder(Long userId, FlashSalePurchaseRequest request);
 }
