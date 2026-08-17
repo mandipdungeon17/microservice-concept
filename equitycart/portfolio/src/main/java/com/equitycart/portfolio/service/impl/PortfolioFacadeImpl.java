@@ -1,5 +1,10 @@
 package com.equitycart.portfolio.service.impl;
 
+import com.equitycart.portfolio.alerts.dtos.AlertAuditLogResponse;
+import com.equitycart.portfolio.alerts.dtos.CreatePriceAlertRequest;
+import com.equitycart.portfolio.alerts.dtos.PriceAlertResponse;
+import com.equitycart.portfolio.alerts.dtos.UpdatePriceAlertRequest;
+import com.equitycart.portfolio.alerts.service.PriceAlertService;
 import com.equitycart.portfolio.dto.GiftRequest;
 import com.equitycart.portfolio.dto.GiftResponse;
 import com.equitycart.portfolio.dto.HoldingAnalyticsResponse;
@@ -44,6 +49,7 @@ public class PortfolioFacadeImpl implements PortfolioFacade {
   private final TradeService tradeService;
   private final SellToSpendService sellToSpendService;
   private final GiftSagaServiceImpl giftSagaService;
+  private final PriceAlertService priceAlertService;
 
   /** {@inheritDoc} */
   @Override
@@ -221,6 +227,32 @@ public class PortfolioFacadeImpl implements PortfolioFacade {
         vestedRewardsCount);
 
     return analyticsResponse;
+  }
+
+  @Override
+  public PriceAlertResponse createPriceAlert(Long userId, CreatePriceAlertRequest request) {
+    return priceAlertService.createAlert(userId, request);
+  }
+
+  @Override
+  public List<PriceAlertResponse> getPriceAlerts(Long userId) {
+    return priceAlertService.getUserAlerts(userId);
+  }
+
+  @Override
+  public PriceAlertResponse updatePriceAlert(
+      Long userId, Long alertId, UpdatePriceAlertRequest request) {
+    return priceAlertService.updateAlert(userId, alertId, request);
+  }
+
+  @Override
+  public void deactivatePriceAlert(Long userId, Long alertId) {
+    priceAlertService.deactivateAlert(userId, alertId);
+  }
+
+  @Override
+  public List<AlertAuditLogResponse> getPriceAlertHistory(Long userId, Long alertId) {
+    return priceAlertService.getAlertHistory(userId, alertId);
   }
 
   private HoldingResponse toHoldingResponse(Holding holding) {

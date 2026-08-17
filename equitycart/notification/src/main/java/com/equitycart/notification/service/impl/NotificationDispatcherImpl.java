@@ -98,6 +98,13 @@ public class NotificationDispatcherImpl implements NotificationDispatcher {
                   "Unfortunately, your sell-to-spend order for %s shares of %s at $%s has failed. Please try again.",
                   event.quantity(), event.tickerSymbol(), event.pricePerShare());
           break;
+        case "PRICE_ALERT_TRIGGERED":
+          subject = "Price Alert: " + event.tickerSymbol();
+          body =
+              String.format(
+                  "Your price alert for %s triggered. Current price: $%s.",
+                  event.tickerSymbol(), event.pricePerShare());
+          break;
         default:
           log.warn(
               "Received unknown notification type: {}. No notification will be sent.",

@@ -1,5 +1,9 @@
 package com.equitycart.portfolio.controller;
 
+import com.equitycart.portfolio.alerts.dtos.AlertAuditLogResponse;
+import com.equitycart.portfolio.alerts.dtos.CreatePriceAlertRequest;
+import com.equitycart.portfolio.alerts.dtos.PriceAlertResponse;
+import com.equitycart.portfolio.alerts.dtos.UpdatePriceAlertRequest;
 import com.equitycart.portfolio.config.CQRSFeatureFlag;
 import com.equitycart.portfolio.cqrs.controller.PortfolioReadController;
 import com.equitycart.portfolio.cqrs.dtos.PortfolioReadResponse;
@@ -25,8 +29,11 @@ import org.apache.logging.log4j.Logger;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -185,6 +192,52 @@ public class PortfolioController {
         request.tickerSymbol(),
         request.quantity());
     return portfolioFacade.giftStock(userId, request);
+  }
+
+  @PostMapping("/alerts")
+  @ResponseStatus(HttpStatus.CREATED)
+  public PriceAlertResponse createAlert(
+      Authentication authentication, @Valid @RequestBody CreatePriceAlertRequest request) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info(
+        "POST /api/portfolio/alerts — userId={}, ticker={}", userId, request.tickerSymbol());
+    return portfolioFacade.createPriceAlert(userId, request);
+  }
+
+  @GetMapping("/alerts")
+  @ResponseStatus(HttpStatus.OK)
+  public List<PriceAlertResponse> getAlerts(Authentication authentication) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info("GET /api/portfolio/alerts — userId={}", userId);
+    return portfolioFacade.getPriceAlerts(userId);
+  }
+
+  @PutMapping("/alerts/{alertId}")
+  @ResponseStatus(HttpStatus.OK)
+  public PriceAlertResponse updateAlert(
+      Authentication authentication,
+      @PathVariable Long alertId,
+      @Valid @RequestBody UpdatePriceAlertRequest request) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info("PUT /api/portfolio/alerts/{} — userId={}", alertId, userId);
+    return portfolioFacade.updatePriceAlert(userId, alertId, request);
+  }
+
+  @DeleteMapping("/alerts/{alertId}")
+  @ResponseStatus(HttpStatus.NO_CONTENT)
+  public void deleteAlert(Authentication authentication, @PathVariable Long alertId) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info("DELETE /api/portfolio/alerts/{} — userId={}", alertId, userId);
+    portfolioFacade.deactivatePriceAlert(userId, alertId);
+  }
+
+  @GetMapping("/alerts/{alertId}/history")
+  @ResponseStatus(HttpStatus.OK)
+  public List<AlertAuditLogResponse> getAlertHistory(
+      Authentication authentication, @PathVariable Long alertId) {
+    Long userId = (Long) authentication.getPrincipal();
+    logger.info("GET /api/portfolio/alerts/{}/history — userId={}", alertId, userId);
+    return portfolioFacade.getPriceAlertHistory(userId, alertId);
   }
 
   // Helper to convert CQRS response to legacy format (backward compat)

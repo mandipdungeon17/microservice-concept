@@ -1,5 +1,9 @@
 package com.equitycart.portfolio.service.api;
 
+import com.equitycart.portfolio.alerts.dtos.AlertAuditLogResponse;
+import com.equitycart.portfolio.alerts.dtos.CreatePriceAlertRequest;
+import com.equitycart.portfolio.alerts.dtos.PriceAlertResponse;
+import com.equitycart.portfolio.alerts.dtos.UpdatePriceAlertRequest;
 import com.equitycart.portfolio.dto.GiftRequest;
 import com.equitycart.portfolio.dto.GiftResponse;
 import com.equitycart.portfolio.dto.HoldingRequest;
@@ -81,4 +85,14 @@ public interface PortfolioFacade {
    * @return gifting saga response for client-side tracking
    */
   GiftResponse giftStock(Long giverUserId, GiftRequest request);
+
+  PriceAlertResponse createPriceAlert(Long userId, CreatePriceAlertRequest request);
+
+  List<PriceAlertResponse> getPriceAlerts(Long userId);
+
+  PriceAlertResponse updatePriceAlert(Long userId, Long alertId, UpdatePriceAlertRequest request);
+
+  void deactivatePriceAlert(Long userId, Long alertId);
+
+  List<AlertAuditLogResponse> getPriceAlertHistory(Long userId, Long alertId);
 }
