@@ -20,15 +20,15 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 /**
- * Scheduled orchestrator that evaluates every active price alert against the latest market price and
- * fires notifications when a rule is satisfied.
+ * Scheduled orchestrator that evaluates every active price alert against the latest market price
+ * and fires notifications when a rule is satisfied.
  *
  * <p><b>Per-cycle flow</b> (see {@link #evaluateActiveAlerts()}):
  *
  * <ol>
  *   <li>Load all active alerts ({@code PriceAlertRepository.findByActiveTrue()}).
- *   <li>For each alert, fetch its ticker's current price from {@link MarketDataService} (Redis-cached
- *       upstream, so repeated tickers are cheap).
+ *   <li>For each alert, fetch its ticker's current price from {@link MarketDataService}
+ *       (Redis-cached upstream, so repeated tickers are cheap).
  *   <li>Delegate the condition check to {@link AlertConditionEvaluator}. The alert's previous price
  *       ({@code lastEvaluatedPrice}) supplies the "before" value needed for CROSSING detection.
  *   <li>Persist the freshly observed price so the next cycle can detect a crossing.
@@ -40,8 +40,8 @@ import org.springframework.stereotype.Service;
  *
  * <p><b>Error handling:</b> a failure evaluating one alert is caught, logged at ERROR, and recorded
  * as an {@code EVALUATION_ERROR} audit row — it never aborts the rest of the cycle. Notification
- * publishing is best-effort (see {@link NotificationPublisher}); a publish failure is logged and does
- * not roll back the trigger.
+ * publishing is best-effort (see {@link NotificationPublisher}); a publish failure is logged and
+ * does not roll back the trigger.
  *
  * <p><b>Design notes:</b> the evaluator holds no mutable state (thread-safe); the database is the
  * single source of truth with {@code @Version} optimistic locking guarding concurrent user edits. A
@@ -136,7 +136,10 @@ public class AlertEvaluationService {
           alert.getId(),
           alert.getLastTriggeredAt().plusMinutes(alert.getCooldownMinutes()));
       recordAudit(
-          alert, AlertEventType.COOLDOWN_SKIPPED, currentPrice, "Condition met but within cooldown");
+          alert,
+          AlertEventType.COOLDOWN_SKIPPED,
+          currentPrice,
+          "Condition met but within cooldown");
       alertRepository.save(alert); // Persist the updated lastEvaluatedPrice.
     } else {
       log.debug("Condition not met for alertId={}; skipping", alert.getId());

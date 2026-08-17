@@ -47,8 +47,8 @@ public class PriceAlertService {
    * Creates a new price alert for a user.
    *
    * <p>Steps: (1) build the entity and validate thresholds via {@link AlertConditionEvaluator}; (2)
-   * reject duplicates (same user + ticker + condition + threshold1); (3) enforce the per-user active
-   * quota; (4) persist; (5) write a {@code CREATED} audit row.
+   * reject duplicates (same user + ticker + condition + threshold1); (3) enforce the per-user
+   * active quota; (4) persist; (5) write a {@code CREATED} audit row.
    *
    * @param userId owner of the alert (from the JWT principal)
    * @param request validated creation payload

@@ -3,6 +3,10 @@
 > This document covers Kafka concepts in depth as they relate to the EquityCart project.
 > Updated progressively as new Kafka patterns are implemented across Phase 6+.
 
+## Current Phase 10 Context
+
+The project's current Kafka usage is anchored on the portfolio CQRS read-model flow: transactional outbox -> Debezium CDC -> Kafka topic -> projection consumer -> Mongo read model. This pattern is the verified baseline, and the remaining Topic 10 performance tuning and CI/CD pipeline work are intentionally deferred until after the current scope is stable.
+
 ---
 
 ## 1. What Is Kafka?

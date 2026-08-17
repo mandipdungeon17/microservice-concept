@@ -1,6 +1,6 @@
 # Progress Tracking
 
-## Status: Phase 9 - Observability (COMPLETE) → Phase 10 Next
+## Status: Phase 10 Scope Narrowed — Topic 10 + CI/CD Next
 
 ## Project: EquityCart
 - Hybrid domain: E-Commerce + Stock Market

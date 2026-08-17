@@ -4,6 +4,10 @@
 > Updated progressively as new patterns are implemented across Phase 6+.
 > For Kafka-specific concepts, see `kafka-learning.md`.
 
+## Current Phase 10 Pattern Check
+
+The verified baseline in this repo is the transactional outbox + event-driven CQRS read model pattern. This is intentionally preferred over speculative push layers or over-engineered notification infrastructure. The implementation is constrained to the project's actual repository structure and real event boundaries.
+
 ---
 
 ## 1. The Outbox Pattern

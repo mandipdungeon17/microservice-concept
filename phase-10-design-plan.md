@@ -23,16 +23,20 @@ This phase is where architecture choices become production-grade operating patte
 
 | Topic | Status | Owner | Next Action | Risk |
 | --- | --- | --- | --- | --- |
-| Topic 1 - CQRS Portfolio Read Model | In Progress (Core done) | You + Assistant | Finish JavaDoc/comments/logging pass in main repo workspace and run compile verification | Medium |
-| Topic 2 - Stock Gifting Saga | In Progress (Implementation + compile verified) | You + Assistant | Manual E2E validation (happy path, duplicate key, step-failure compensation, timeout recovery) and docs closeout | High |
-| Topic 3 - Flash Sale Stock Drops | Complete | You + Assistant | Implementation verified, logging/JavaDoc added, compile pass | Complete |
-| Topic 4 - Price Alert Watchlist | Complete | You + Assistant | Implemented under portfolio/alerts (scheduled evaluator, MarketDataService prices, Kafka NotificationEvent), integrated into PortfolioController/Facade, notification-service PRICE_ALERT_TRIGGERED added; compile pass, Javadoc/logging polished | Low |
-| Topic 5 - Dividend DRIP | Not Started | You + Assistant | Design batch workflow and reinvestment idempotency rules | High |
-| Topic 6 - Tax Report Generation | Not Started | You + Assistant | Define report schema and batch output format (CSV/PDF) | Medium |
-| Topic 7 - Portfolio Leaderboard | Not Started | You + Assistant | Define ranking rules and Mongo aggregation plan | Medium |
-| Topic 8 - Return Clawback Saga | Completed | You + Assistant | Monitor with manual E2E and timeout/compensation checks | Medium |
-| Topic 9 - Load Testing | Not Started | You + Assistant | Build test scenarios and baseline SLA metrics | Medium |
-| Topic 10 - Performance Tuning | Not Started | You + Assistant | Tune from load-test evidence (DB, pool, consumer, queries) | Medium |
+| Topic 1 - CQRS Portfolio Read Model | Complete | You + Assistant | Keep as implemented baseline; compile verified and operationally documented | Low |
+| Topic 2 - Stock Gifting Saga | Complete | You + Assistant | Closeout design + manual E2E validation record if needed | Low |
+| Topic 3 - Flash Sale Stock Drops | Complete | You + Assistant | Keep as concurrency reference pattern; no further implementation unless business demand changes | Low |
+| Topic 4 - Price Alert Watchlist | Complete | You + Assistant | Keep repo-aligned watchlist pattern and Kafka notification boundary as reference | Low |
+| Topic 5 - Dividend DRIP | Skipped for now | You + Assistant | Defer; not required in current Phase 10 branch | Low |
+| Topic 6 - Tax Report Generation | Skipped for now | You + Assistant | Defer; not required in current Phase 10 branch | Low |
+| Topic 7 - Portfolio Leaderboard | Skipped for now | You + Assistant | Defer; not required in current Phase 10 branch | Low |
+| Topic 8 - Return Clawback Saga | Complete | You + Assistant | Preserve as compensation pattern reference | Low |
+| Topic 9 - Load Testing | Skipped for now | You + Assistant | Defer; CI/CD and performance tuning will take precedence | Low |
+| Topic 10 - Performance Tuning | Active | You + Assistant | Focus on measured DB/app/Kafka/Mongo tuning, then package the deployment pipeline concept | Medium |
+
+### Scope adjustment for this branch
+
+The current decision is to skip Topic 5, Topic 6, Topic 7, and Topic 9 for now. The immediate objective is to finish Topic 10 in a performance-first manner and then cover the CI/CD pipeline concept for the Gradle multi-module EquityCart project.
 
 ---
 

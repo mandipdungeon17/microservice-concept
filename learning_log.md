@@ -3,6 +3,24 @@
 > This file is a comprehensive revision guide. Updated at the end of every phase.
 > Covers: Roadblocks faced, Concepts learned, Interview questions discussed.
 
+## Current Phase 10 Status (Verified)
+
+- The source of truth remains `phase-10-design-plan.md`.
+- Topics 1, 2, 3, 4, and 8 are completed in the current branch.
+- Topics 5, 6, 7, and 9 are intentionally skipped for this pass.
+- The current focus is Topic 10 performance tuning plus CI/CD pipeline learning for the Gradle multi-module project.
+- Topic 10 is treated as a measured tuning cycle driven by real bottlenecks, not speculative optimization.
+
+---
+
+## Scope Adjustment: Topic 10 + CI/CD path
+
+The project branch has been intentionally narrowed to avoid unnecessary implementation in Topics 5, 6, 7, and 9. The remaining value for this phase is in:
+
+1. Performance tuning the already-completed financial and event-driven flows.
+2. Learning the CI/CD deployment model appropriate for a Gradle multi-module Spring Boot repository.
+3. Keeping the implementation aligned to actual project structure and not inventing extra modules or unsupported infrastructure.
+
 ---
 
 ## Phase 0: Foundation & Project Setup ✅

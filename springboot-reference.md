@@ -6,6 +6,12 @@
 
 ---
 
+## Current Phase 10 Boot Context
+
+The current Spring Boot application region being validated is the portfolio module's event-driven archival and projection workflow. The important design principle here is to keep business code aligned with actual repository conventions, using real transaction boundaries, existing Kafka/outbox integration, and minimal production-safe logging rather than introducing unsupported infrastructure components.
+
+---
+
 ## 1. Spring Boot Auto-Configuration — How "Magic" Actually Works
 
 ### 1.1 The Problem Auto-Configuration Solves

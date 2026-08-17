@@ -102,8 +102,8 @@ public class PriceAlert extends BaseEntity {
 
   /**
    * Optimistic-locking version. Detects concurrent modification when the scheduled evaluator and a
-   * user edit touch the same alert at once, so a stale {@code lastTriggeredAt} or
-   * {@code lastEvaluatedPrice} is not silently overwritten.
+   * user edit touch the same alert at once, so a stale {@code lastTriggeredAt} or {@code
+   * lastEvaluatedPrice} is not silently overwritten.
    */
   @Version private Long version;
 

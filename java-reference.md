@@ -3,6 +3,10 @@
 > Comprehensive reference covering Java's evolution from pre-8 through 21, with EquityCart examples.
 > Each section includes what changed, why, how it works internally, and best practices.
 
+## Current Phase 10 Focus
+
+The current project focus is not broad Java syntax exploration; it is the practical application of concurrency, event-driven deltas, and safe projection logic in the portfolio service. The key pattern in use is transactional write-side correctness paired with asynchronous read-side rebuilding, rather than speculative complexity.
+
 ---
 
 ## Part 1: Java Language Evolution
