@@ -5324,3 +5324,93 @@ A: This is prevented by including productId in the idempotency key (composite ke
 
 ---
 
+## Phase 10 — Topic 4: Price Alert Watchlist (Scheduled Async Evaluation) (2026-08-17)
+
+### Roadblocks & Issues Faced
+
+**1. Over-Engineering — Building a Parallel Notification Stack**
+
+- **Problem:** The first implementation created an in-portfolio `NotificationService` with four handler dependencies (`WebSocketNotificationHandler`, `EmailNotificationHandler`, `SmsNotificationHandler`, `InAppNotificationHandler`) — none of which existed in the codebase. The project already had a working notification path (portfolio publishes `NotificationEvent` → `portfolio-notification` Kafka topic → notification-service dispatches by config). This duplicated architecture and did not even compile.
+- **Fix:** Deleted the whole handler layer and reused `NotificationPublisher` + the shared `NotificationEvent` contract. The evaluator now just publishes an event; notification-service owns delivery.
+- **Lesson:** Before adding infrastructure, search for an existing pattern in the repo. Reuse beats reinvention — it compiles, matches conventions, and is smaller. "Which existing component already does this?" should precede "what new class do I need?".
+
+**2. Empty `PortfolioPriceService` Stub — Undefined Price Source**
+
+- **Problem:** The evaluator called `priceService.getCurrentPrice(ticker)` / `getPreviousPrice(ticker)` on a `PortfolioPriceService` that was an empty class → compile errors. It was an unnecessary abstraction for something the platform already provides.
+- **Fix:** Injected the existing `MarketDataService` (`getPrice(symbol)` → Redis-cached `StockPriceResponse`) directly. Deleted the stub.
+- **Lesson:** Don't introduce a wrapper abstraction until it earns its keep. A two-method pass-through to an existing service is just indirection.
+
+**3. CROSSING Needs a "Previous" Price — Where Does It Come From?**
+
+- **Problem:** CROSSING (`prev <= threshold && curr > threshold`) requires the price seen on the last cycle. Fetching market-data history each cycle would couple the evaluator to Mongo history queries and add load.
+- **Fix:** Store `lastEvaluatedPrice` on the `PriceAlert` row itself, written back every cycle. The alert becomes self-contained — no history join.
+- **Lesson:** Sometimes the cheapest place to remember "the previous value" is on the entity you're already reading and writing.
+
+**4. Cooldown vs Spam — Level Conditions Fire Every Cycle**
+
+- **Problem:** ABOVE/BELOW/BETWEEN are "level" conditions — true continuously while the price stays past the threshold. Without a cooldown, a `@Scheduled` 5s loop would notify every 5 seconds.
+- **Fix:** `lastTriggeredAt + cooldownMinutes` gates re-firing; condition-met-but-cooling-down records a `COOLDOWN_SKIPPED` audit row and sends nothing. CROSSING further reduces noise by only firing on the transition.
+- **Lesson:** Any polling evaluator over a "level" predicate needs a debounce/cooldown or it becomes a spam machine.
+
+**5. Stale Docs After Redesign — Comments Describing Deleted Code**
+
+- **Problem:** After simplifying, class/method Javadoc still described the old design ("send via all channels", "mark audit as NOTIFICATION_FAILED", `nextAlertEligibleAt`), and a dead `alertsByTicker` grouping remained computed-but-unused.
+- **Fix:** Polish pass rewrote the docs to match reality, removed dead code, and demoted per-branch evaluator logs from INFO → TRACE.
+- **Lesson:** A refactor isn't done until the comments, logs, and dead code are reconciled. Stale docs are worse than none — they mislead the next reader.
+
+### Core Concepts Learned
+
+**126. Scheduled Async Evaluation via `@Scheduled(fixedDelay)` (2026-08-17, Topic 4)**
+
+- Topic 4 is the first "pull/polling" workflow (vs Topic 1 CDC events, Topic 3 request-driven locks). A `@Scheduled(fixedDelayString = "${...:5000}")` method wakes periodically, scans active alerts, and reacts.
+- `fixedDelay` (not `fixedRate`) means the next run starts only after the previous finishes → cycles never overlap → no distributed lock needed at current scale. `@EnableScheduling` was already on the portfolio app.
+
+**127. Reuse Existing Integration Seams (2026-08-17, Topic 4)**
+
+- Prices: existing `MarketDataService` (Redis-cached). Notifications: existing `NotificationPublisher` → Kafka → notification-service. New code = domain + orchestration only.
+- Architectural payoff: the feature slots into the established controller → facade → service → market-data → Kafka path instead of a bespoke island.
+
+**128. Self-Contained CROSSING via `lastEvaluatedPrice` (2026-08-17, Topic 4)**
+
+- Persisting the last-seen price on the alert row turns a stateful, history-dependent computation into a single-row read/write. Simplicity beats a history join.
+
+**129. Cooldown Debounce for Level Predicates (2026-08-17, Topic 4)**
+
+- `isCooldownExpired()` gates re-notification; `COOLDOWN_SKIPPED` audit gives observability into "we saw it but stayed quiet." CROSSING is the transition-based alternative that fires once.
+
+**130. Extending a Shared Event Contract (2026-08-17, Topic 4)**
+
+- Adding `PRICE_ALERT_TRIGGERED` to `NotificationType` + one `switch` case in `NotificationDispatcherImpl` is the whole cross-service change. The `NotificationEvent` record's `metadata` map carried alert-specific context (alertId, condition, threshold) without schema changes.
+
+**131. Entity/DTO Convention Alignment (2026-08-17, Topic 4)**
+
+- Entities `extends BaseEntity` (audited `Long` id + timestamps); DTOs are `record`s. Matching the module's conventions removed a whole class of friction (UUID keys, Lombok builders on DTOs) that the first draft had introduced.
+
+### Interview Questions & Answers
+
+**Q209: "Why a scheduled poller instead of reacting to each price tick?" (2026-08-17, Topic 4)**
+
+A: Simplicity and predictable load. A `@Scheduled(fixedDelay)` scan is easy to reason about, needs no backpressure handling, and bounds DB/market-data load to one pass per interval. A reactive per-tick design gives lower latency but adds streaming plumbing and overload risk. For a watchlist where a few seconds of latency is acceptable, polling is the right first design; you can shard by ticker or move to event-driven later if scale demands.
+
+**Q210: "How do you stop a price alert from notifying every 5 seconds?" (2026-08-17, Topic 4)**
+
+A: Two mechanisms. (1) Cooldown: after firing, stamp `lastTriggeredAt`; the alert is ineligible until `lastTriggeredAt + cooldownMinutes` passes. Condition-met-during-cooldown is recorded as `COOLDOWN_SKIPPED` with no notification. (2) The CROSSING condition only fires on the `<=threshold → >threshold` transition, using the stored `lastEvaluatedPrice`, so it's naturally one-shot per crossing.
+
+**Q211: "How does CROSSING work without querying price history?" (2026-08-17, Topic 4)**
+
+A: The alert row stores `lastEvaluatedPrice`, updated every cycle. The evaluator passes it as `previousPrice`; CROSSING is `previousPrice <= threshold && currentPrice > threshold`. On the very first evaluation `previousPrice` is null, so we treat "currently above" as an eligible crossing. This keeps the evaluator a single-row read/write with no history join.
+
+**Q212: "Why publish a Kafka NotificationEvent instead of sending email/SMS directly from portfolio?" (2026-08-17, Topic 4)**
+
+A: Separation of concerns and reuse. The notification-service already owns delivery (channel strategy chosen by config) and audit logging via the `portfolio-notification` topic. Portfolio's job is to decide *that* a user should be notified, not *how*. Publishing an event keeps portfolio decoupled from mail/SMS providers and reuses the existing consumer, dispatcher, and `NotificationLog`.
+
+**Q213: "What's the failure mode of the trigger path, and how would you harden it?" (2026-08-17, Topic 4)**
+
+A: `NotificationPublisher.publish()` is fire-and-forget — it catches and logs publish failures. So if Kafka is briefly down, the alert is still stamped `lastTriggeredAt` and audited `TRIGGERED` locally, but the user may not get the message. That's acceptable for a best-effort watchlist. To guarantee delivery you'd apply the outbox pattern (already used elsewhere in the project): write a notification-outbox row in the same transaction as the trigger, and a poller publishes it with retries.
+
+**Q214: "Why does the alert feature reuse PortfolioController/Facade instead of a new controller?" (2026-08-17, Topic 4)**
+
+A: Consistency. The module exposes one portfolio REST surface and routes through `PortfolioFacade`; alert endpoints live under `/api/portfolio/alerts` and delegate to `PriceAlertService` through the facade. Auth (`Authentication.getPrincipal()`), error mapping (`GlobalExceptionHandler`), and package layout all stay uniform. A separate controller would fragment the surface for no benefit.
+
+---
+

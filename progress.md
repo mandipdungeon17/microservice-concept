@@ -1248,6 +1248,56 @@ API Gateway (port 8080, Netty/WebFlux)
   - Window parsing relies on app startup — changing config at runtime requires restart (ConfigServer refresh not implemented)
   - Load testing not yet run — 300ms max retry wait may be insufficient under extreme burst traffic (p99 measurements needed)
 
+### Topic 4 Completion Summary (2026-08-17)
+
+**Phase 10 Topic 4 — Price Alert Watchlist (Scheduled Async Evaluation):**
+
+- **Deliverables Completed:**
+  - Alert domain under `portfolio/alerts/`: `PriceAlert` + `AlertAuditLog` entities (both `extends BaseEntity` → `Long` IDs), `AlertCondition` (ABOVE/BELOW/BETWEEN/CROSSING) and `AlertEventType` enums
+  - `PriceAlertRepository` / `AlertAuditLogRepository` (Spring Data JPA, `Long` keys, ownership-safe `findByIdAndUserId`)
+  - `AlertConditionEvaluator` — pure, side-effect-free condition logic
+  - `PriceAlertService` — CRUD + threshold validation + duplicate (409) + per-user active quota (50) + soft-delete + audit writes
+  - `AlertEvaluationService` — `@Scheduled(fixedDelay)` loop: reads active alerts, fetches price via existing `MarketDataService`, evaluates, publishes `NotificationEvent` on trigger, stamps cooldown, writes audit
+  - Record DTOs: `CreatePriceAlertRequest`, `UpdatePriceAlertRequest`, `PriceAlertResponse`, `AlertAuditLogResponse`
+  - REST surface added to existing `PortfolioController` (`/api/portfolio/alerts` POST/GET/PUT/DELETE + `/{id}/history`) via `PortfolioFacade`/`PortfolioFacadeImpl` — no separate controller
+  - notification-service: added `PRICE_ALERT_TRIGGERED` to `NotificationType` enum + one dispatcher case
+  - Config: `equitycart.alerts.evaluation.fixed-delay-ms` / `initial-delay-ms` in `portfolio-service.yml`; tables auto-create via existing `ddl-auto: update`
+
+- **Architecture Decision — Reuse over Reinvent (key lesson):**
+  - First draft over-engineered the feature: `PortfolioPriceService` stub, an in-portfolio `NotificationService` with WebSocket/Email/SMS/InApp handler classes (none existed → compile errors), per-alert `notificationChannels`, unused Spring `ApplicationEvent`s, and a redundant scheduler config
+  - Correction: deleted 7 files and reused existing infrastructure — `MarketDataService` (Redis-cached prices) for reads, and `NotificationPublisher` → `portfolio-notification` Kafka topic → `NotificationDispatcherImpl` for delivery (channel chosen by config, not per-alert)
+  - Net result: fewer classes, compiles clean, matches the module's controller→facade→service→market-data→Kafka pattern
+
+- **CROSSING Detection — self-contained:**
+  - `PriceAlert.lastEvaluatedPrice` stores the price seen last cycle; the evaluator passes it as `previousPrice`, so CROSSING (`prev <= threshold && curr > threshold`) needs no market-data history join
+  - Written back every cycle (even on non-match) so the "before" value is always current
+
+- **Cooldown Anti-Spam:**
+  - `isCooldownExpired()` = active AND (`lastTriggeredAt == null` OR `now > lastTriggeredAt + cooldownMinutes`)
+  - Condition met but cooling down → `COOLDOWN_SKIPPED` audit row, no notification (prevents firing every 5s while price stays past threshold)
+
+- **Code Quality (polish pass 2026-08-17):**
+  - All alert files + integration files compile with no errors/warnings
+  - Removed dead code (unused `alertsByTicker` grouping, redundant ownership checks) and stale Javadoc referencing the deleted design (channels, `nextAlertEligibleAt`, "send via all channels")
+  - Lowered per-branch evaluator logs from INFO → TRACE (they fire per-alert per-cycle); INFO reserved for cycle start/end and actual triggers
+  - Method-level JavaDoc with what/why/how on evaluator, service, and scheduled flow
+
+- **Manual E2E Validation Checklist (ready for execution):**
+  - Create alert (POST) → 201, `CREATED` audit row
+  - Duplicate (same user+ticker+condition+threshold1) → 409
+  - Quota: 50 active alerts → 51st → 400
+  - Price crosses threshold → within ≤ (delay) a `PRICE_ALERT_TRIGGERED` notification is published + `TRIGGERED` audit; `lastTriggeredAt` stamped
+  - Repeat within cooldown → `COOLDOWN_SKIPPED`, no notification; after cooldown → fires again
+  - CROSSING fires once on transition, not again while price stays above
+  - Deactivate (DELETE) → 204, `active=false`, skipped by evaluator; history (GET) newest-first
+
+- **Learning Files Updated:** progress.md, learning_log.md, phase-10-design-plan.md, phase-10-learning-deep-dive.md, microservice-patterns.md, springboot-reference.md
+
+- **Residual Risks & Open Questions:**
+  - Full-table scan of active alerts every cycle — fine at current scale; shard-by-ticker is the future optimization
+  - Notification publish is best-effort (fire-and-forget); a broker outage can drop a notification while the trigger is still recorded locally — an outbox pattern would close this gap if guaranteed delivery is required
+  - `AlertEventType` has 3 reserved values (`CONDITION_NOT_MET`, `REACTIVATED`, `NOTIFICATION_FAILED`) not yet emitted
+
 ## Phase Checklist
 
 - [x] Phase 0: Foundation & Setup (Week 1)

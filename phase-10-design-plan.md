@@ -26,7 +26,7 @@ This phase is where architecture choices become production-grade operating patte
 | Topic 1 - CQRS Portfolio Read Model | In Progress (Core done) | You + Assistant | Finish JavaDoc/comments/logging pass in main repo workspace and run compile verification | Medium |
 | Topic 2 - Stock Gifting Saga | In Progress (Implementation + compile verified) | You + Assistant | Manual E2E validation (happy path, duplicate key, step-failure compensation, timeout recovery) and docs closeout | High |
 | Topic 3 - Flash Sale Stock Drops | Complete | You + Assistant | Implementation verified, logging/JavaDoc added, compile pass | Complete |
-| Topic 4 - Price Alert Watchlist | In Design (Complete) | You + Assistant | Implement 15 classes (entities, repos, services, controller, DTOs, events), wire NotificationService handlers, add DB migrations, run E2E validation | Medium |
+| Topic 4 - Price Alert Watchlist | Complete | You + Assistant | Implemented under portfolio/alerts (scheduled evaluator, MarketDataService prices, Kafka NotificationEvent), integrated into PortfolioController/Facade, notification-service PRICE_ALERT_TRIGGERED added; compile pass, Javadoc/logging polished | Low |
 | Topic 5 - Dividend DRIP | Not Started | You + Assistant | Design batch workflow and reinvestment idempotency rules | High |
 | Topic 6 - Tax Report Generation | Not Started | You + Assistant | Define report schema and batch output format (CSV/PDF) | Medium |
 | Topic 7 - Portfolio Leaderboard | Not Started | You + Assistant | Define ranking rules and Mongo aggregation plan | Medium |

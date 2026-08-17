@@ -3295,3 +3295,71 @@ A: It gives false safety for distributed workflow boundaries. Saga correctness c
 
 **Q: "What role does @Scheduled play in saga?"**  
 A: It detects stalled in-progress sagas (`updatedAt` threshold), enabling timeout handling and reducing orphaned workflow risk.
+
+## 20. Scheduled Evaluation with `@Scheduled` — Price Alert Watchlist (Topic 4)
+
+### 20.1 `@Scheduled(fixedDelayString)` with externalized config
+
+The price-alert evaluator runs on a timer, with the interval read from config so it can be tuned per environment without a rebuild:
+
+```java
+@Scheduled(
+    fixedDelayString = "${equitycart.alerts.evaluation.fixed-delay-ms:5000}",
+    initialDelayString = "${equitycart.alerts.evaluation.initial-delay-ms:10000}")
+public void evaluateActiveAlerts() { ... }
+```
+
+- **`fixedDelayString` / `initialDelayString`** (the `String` variants) accept a property placeholder with a default (`:5000`). The plain `fixedDelay = 5000` attribute is a compile-time constant and can't be externalized — always use the `*String` form when the value should come from config.
+- **`@EnableScheduling`** must be on a `@Configuration`/app class (portfolio already had it for the vesting task). Without it, `@Scheduled` methods are silently ignored — a classic "why isn't my job running?" gotcha.
+- Config lives in `equitycart-config/portfolio-service.yml`:
+  ```yaml
+  equitycart:
+    alerts:
+      evaluation:
+        fixed-delay-ms: 5000
+        initial-delay-ms: 10000
+  ```
+
+### 20.2 `fixedDelay` vs `fixedRate` (Spring semantics)
+
+- **`fixedRate`** — next invocation is scheduled relative to the *start* of the previous one. If a run overtakes the interval, invocations queue/overlap on the scheduler.
+- **`fixedDelay`** — next invocation starts a fixed gap after the *completion* of the previous one. Runs never overlap. For a self-contained scan where correctness depends on "one pass at a time," `fixedDelay` removes the need for any locking.
+- Default scheduler is a **single-threaded** `ThreadPoolTaskScheduler` (pool size 1). If you add more scheduled jobs and need parallelism, define a `ThreadPoolTaskScheduler` bean — but note that a bigger pool reintroduces the overlap question per job.
+
+### 20.3 Transaction boundaries in a scheduled scan
+
+`AlertEvaluationService` is not annotated `@Transactional` at class level (unlike `PriceAlertService`). Each alert is processed and saved independently inside the loop, and a failure on one alert is caught, logged, and audited as `EVALUATION_ERROR` without aborting the cycle:
+
+```java
+for (PriceAlert alert : alerts) {
+  try { evaluateOne(alert); }
+  catch (Exception e) {
+    log.error("Error evaluating alertId={}: {}", alert.getId(), e.getMessage(), e);
+    recordAudit(alert, AlertEventType.EVALUATION_ERROR, null, e.getMessage());
+  }
+}
+```
+
+Lesson: for a batch-style scheduled job, prefer **per-item isolation** over one big transaction, so a single bad row can't roll back or halt the whole cycle.
+
+### 20.4 Logging levels for a high-frequency job
+
+A job that runs every 5s over N alerts can flood logs. The polished levels:
+
+- **INFO** — cycle start and end (`evaluated=…, duration=…ms`), and actual triggers. Low volume, operationally useful.
+- **DEBUG** — per-alert decisions (met/cooldown/skip) for troubleshooting a specific alert.
+- **TRACE** — per-branch comparison detail inside `AlertConditionEvaluator` (fires per-alert per-cycle; far too noisy for INFO/DEBUG).
+
+Rule of thumb: **the higher the call frequency, the lower the default log level** for its inner detail. Reserve INFO for events an operator actually wants to see each cycle.
+
+### 20.5 Interview Q/A
+
+**Q: "My `@Scheduled` method never runs — why?"**  
+A: Most commonly `@EnableScheduling` is missing, or the bean isn't a Spring-managed component, or an exception on the first run killed a `fixedRate` chain. Also check that the placeholder in `fixedDelayString` resolves (a bad property with no default throws at startup).
+
+**Q: "How do you make a scheduled interval configurable per environment?"**  
+A: Use `fixedDelayString`/`cron` with a property placeholder and a sane default (`${…:5000}`), and put the value in the config server. Avoid the constant `fixedDelay` attribute for anything you'd want to tune.
+
+**Q: "One item in a scheduled batch throws — what happens to the rest?"**  
+A: With per-item try/catch (and no single wrapping transaction) the rest continue; the failure is logged and audited. With one class-level `@Transactional` over the whole loop, the throw would roll back everything and abort the cycle — usually not what you want for independent items.
+

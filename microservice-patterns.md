@@ -3830,4 +3830,90 @@ A: No, just unique per user for a given operation. Example: (userId, operation_t
 **Q: "How does this pattern scale to microservices?"**  
 A: Redis is already distributed (lives outside any single service). Multiple service instances use the same Redis. Lock key includes productId (not serviceId), so the lock is global across all services. Same 3-attempt retry logic applies. Caveat: Redis must be highly available (use Redis Sentinel or Cluster in production).
 
+## 17. Scheduled Async Evaluation Pattern — Price Alert Watchlist (Topic 4)
+
+### 17.1 Problem & context
+
+A **watchlist alert** watches a market condition (e.g. "AAPL crosses $150") and notifies the user when it happens. Unlike Topic 1 (CDC event-driven) or Topic 3 (synchronous request-driven), there is **no incoming request or upstream event** to react to — the trigger is the passage of time plus a changing external price. This calls for a **pull/polling** design: periodically evaluate every active rule against the latest price.
+
+### 17.2 Shape of the pattern
+
+```
+@Scheduled(fixedDelay)  ──▶  load active rules
+        │                         │
+        │                    for each rule:
+        │                         ├─ fetch current price  (reuse MarketDataService, Redis-cached)
+        │                         ├─ evaluate condition   (pure function, previous price from the row)
+        │                         ├─ write back lastEvaluatedPrice
+        │                         └─ if met AND cooldown elapsed:
+        │                               ├─ publish NotificationEvent  (reuse NotificationPublisher → Kafka)
+        │                               ├─ stamp lastTriggeredAt      (opens cooldown window)
+        │                               └─ audit TRIGGERED
+        ▼
+   cycle repeats after the previous one finishes (fixedDelay, not fixedRate)
+```
+
+Key property: the evaluator holds **no in-memory state**. The database row is the single source of truth (active flag, cooldown timestamp, and the previous price for transition detection). This makes the service horizontally trivial and restart-safe.
+
+### 17.3 `fixedDelay` vs `fixedRate` — why it matters
+
+- `fixedRate` schedules the *next start* N ms after the *previous start* — runs can overlap if one is slow, and two overlapping cycles could double-fire an alert.
+- `fixedDelay` schedules the next start N ms after the *previous finish* — cycles are serialized, so **no distributed lock is needed** at this scale. This is the correct default for a self-contained evaluator.
+
+`@EnableScheduling` must be present on the app (it already was on portfolio for the vesting task). Delay/initial-delay are externalized: `@Scheduled(fixedDelayString = "${equitycart.alerts.evaluation.fixed-delay-ms:5000}")`.
+
+### 17.4 Reuse-over-reinvent (the central lesson)
+
+The first draft built a **parallel** stack inside portfolio: a `PortfolioPriceService` stub and a `NotificationService` with WebSocket/Email/SMS/InApp handler classes that didn't exist. It duplicated capabilities the platform already had and didn't compile.
+
+The corrected design reuses two existing seams:
+
+| Need | Reused component | Why |
+| --- | --- | --- |
+| Current price | `MarketDataService.getPrice()` (Redis-cached) | Already the platform's price source; caching means repeated tickers are cheap |
+| Delivery | `NotificationPublisher` → `portfolio-notification` Kafka → `NotificationDispatcherImpl` | Notification-service owns channel selection + audit; portfolio only decides *that* to notify |
+
+New code is limited to **domain + orchestration**. This is the difference between a feature that slots into the architecture and one that fights it.
+
+### 17.5 Transition detection without a history store
+
+CROSSING (`prev <= threshold && curr > threshold`) needs the previous price. Instead of joining market-data history each cycle, the alert row carries `lastEvaluatedPrice`, written back on **every** cycle (even non-matches). The stateful part of the computation lives on the row you're already reading and writing — no extra query, no coupling.
+
+### 17.6 Cooldown as a debounce for level predicates
+
+ABOVE/BELOW/BETWEEN are **level** conditions — true continuously while the price stays past the threshold. A naive poller would notify every cycle. Two defenses:
+
+1. **Cooldown:** re-fire only after `lastTriggeredAt + cooldownMinutes`. Met-but-cooling-down → `COOLDOWN_SKIPPED` audit, no notification.
+2. **CROSSING:** a transition predicate that fires once on the `≤threshold → >threshold` edge.
+
+General rule: **any polling evaluator over a level predicate needs a debounce**, or it becomes a spam generator.
+
+### 17.7 Extending a shared event contract cheaply
+
+Cross-service change was minimal: add `PRICE_ALERT_TRIGGERED` to the notification-service `NotificationType` enum + one `switch` case in the dispatcher. The shared `NotificationEvent` record's `metadata` map carried alert-specific fields (`alertId`, `condition`, `threshold1`) with **no schema change** — a good example of why a flexible metadata bag on an event contract pays off.
+
+### 17.8 Delivery guarantee & failure mode
+
+`NotificationPublisher.publish()` is **fire-and-forget** (catches + logs publish failures). Consequence: on a broker blip the alert is still stamped `lastTriggeredAt` and audited `TRIGGERED`, but the message may be lost — acceptable for a best-effort watchlist. To make it **at-least-once**, apply the outbox pattern already used elsewhere: persist a notification-outbox row in the same transaction as the trigger, and let a poller publish with retries.
+
+### 17.9 When to use / when to avoid
+
+- **Use** scheduled evaluation when: no natural trigger event exists; a few seconds of latency is acceptable; the rule set fits a periodic scan.
+- **Avoid / evolve** when: sub-second latency is required (go event/stream-driven), or the active-rule count is huge (shard by ticker, or index and page the scan). A full-table scan every cycle is fine at small scale and is the honest first design.
+
+### 17.10 Interview Q/A
+
+**Q: "Event-driven vs scheduled — how did you choose for alerts?"**  
+A: There's no upstream event that means "the price is now above X"; the condition becomes true silently as the market moves. Polling on a fixed delay is the simplest correct design and bounds load to one pass per interval. I'd move to stream-driven only if latency requirements tightened.
+
+**Q: "How do you prevent overlapping evaluation cycles?"**  
+A: `fixedDelay` (not `fixedRate`) — the next cycle starts only after the previous finishes, so a single scheduler thread never overlaps itself. No distributed lock required at this scale.
+
+**Q: "Where does the 'previous price' for CROSSING come from?"**  
+A: It's persisted on the alert row (`lastEvaluatedPrice`) and updated every cycle. Keeps the evaluator a single-row read/write instead of a history join.
+
+**Q: "Why publish to Kafka instead of sending notifications directly?"**  
+A: Delivery is a separate bounded context. Notification-service already owns channel strategy + audit logging via the `portfolio-notification` topic. Portfolio decides *that* to notify; it publishes an event and stays decoupled from providers.
+
+
 
