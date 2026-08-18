@@ -482,7 +482,7 @@ Key application properties (`app/src/main/resources/application.yml`):
 | `equitycart-roadmap.md`             | Full 10-phase, 20-26 week development roadmap                            |
 | `progress.md`                       | Current phase status, steps completed, next steps                        |
 | `learning_log.md`                   | Roadblocks, concepts learned, and interview Q&A                          |
-| `phase-9-observability-learning.md` | Phase 9 deep-dive: architecture, trade-offs, issues, and interview notes |
+| `phase-10-learning-deep-dive.md` | Phase 10 deep-dive: CQRS, CDC, sagas, eventual consistency, patterns   |
 | `kafka-learning.md`                 | Deep-dive Kafka concepts (topics, partitions, serialization, DLQ)        |
 | `microservice-patterns.md`          | Microservice patterns (Outbox, Saga, Circuit Breaker)                    |
 | `test-commands.md`                  | Consolidated curl test commands for all phases                           |
@@ -503,14 +503,60 @@ Key application properties (`app/src/main/resources/application.yml`):
 | Phase 7 | Microservices Decomposition    | COMPLETE (E2E testing deferred to Phase 8)                              |
 | Phase 8 | Security Hardening             | COMPLETE                                                                |
 | Phase 9 | Observability                  | COMPLETE (EFK/Fluentd image access blocked by policy; fallback adopted) |
+| Phase 10| Advanced Features & Scale      | COMPLETE (Topics 1, 2, 3, 4, 8 implemented; Topics 5, 6, 7, 9 deferred)  |
 
 ## Known Issues
 
 - **403 instead of 401** for unauthenticated requests — needs custom `AuthenticationEntryPoint` (planned fix)
 - **Eureka links show container IPs** (172.18.0.x) — not routable from host browser; use `localhost:PORT` instead
 - **Config-server DNS warning** — `UnknownHostException: github.com` on health check refresh; harmless (serves from cache)
+- **Order-service dependency removed from Portfolio** (Phase 10) — All Order-related operations now use OrderFeignClient HTTP calls instead of direct module imports
+
+## Phase 10 Implementation Summary
+
+### Topics Completed (Wave A - Financial Workflows + Wave B - Scale Features)
+
+| Topic | Name | Status | Key Features |
+|-------|------|--------|--------------|
+| Topic 1 | CQRS Portfolio Read Model | COMPLETE | Mongo read-model, portfolio outbox, Debezium CDC, Kafka projection consumer, MongoDB read model updates |
+| Topic 2 | Stock Gifting Saga | COMPLETE | Orchestrated saga with compensation, idempotency via unique key, timeout detection, audit trail |
+| Topic 3 | Flash Sale Stock Drops | COMPLETE | Distributed lock pattern, burst concurrency control, atomic price drop + reward calculation |
+| Topic 4 | Price Alert Watchlist | COMPLETE | Scheduled rule evaluation, multi-condition support (ABOVE/BELOW/BETWEEN/CROSSING), cooldown pattern, multi-channel notification |
+| Topic 8 | Return Clawback Saga | COMPLETE | Compensating transaction for returned orders, portfolio reversal, ledger reconciliation |
+
+### Topics Deferred (for future phases)
+
+- **Topic 5 - Dividend DRIP**: Scheduled reinvestment workflow
+- **Topic 6 - Tax Report Generation**: Batch CSV/PDF reporting
+- **Topic 7 - Portfolio Leaderboard**: Mongo aggregation ranking
+- **Topic 9 - Load Testing**: k6/Gatling performance validation
+
+### Architecture Changes
+
+1. **Order-Service Decoupling**: Portfolio no longer has direct dependency on order-service module
+   - Order operations now use `OrderFeignClient` HTTP calls to `lb://ORDER-SERVICE`
+   - Removed `order-service` from `@ComponentScan` in `PortfolioServiceApplication`
+   - Removed `com.equitycart.order` from `@EnableJpaRepositories` (was only needed for OutboxEventRepository)
+   - Kept shared `OutboxEvent` and `OutboxStatus` as portfolio-specific copies (`PortfolioOutboxEvent`, `PortfolioOutboxStatus`)
+
+2. **CQRS Implementation**:
+   - PostgreSQL write model: Portfolio, Holding, StockBackReward (source of truth)
+   - MongoDB read model: portfolio_read_models collection (eventual consistency via Kafka projection)
+   - Debezium CDC from outbox → Kafka → projection consumer → MongoDB
+   - Fallback route via feature flag when Kafka/MongoDB unavailable
+
+3. **Advanced Saga Patterns**:
+   - GiftSaga: Orchestrated saga with 3 steps (debit, credit, ledger) + compensation
+   - ClawbackSaga: Compensating transaction for order returns
+   - SellToSpendSaga: Existing saga evolved with lifecycle events to outbox
+   - All use optimistic locking (@Version) + timeout detection
+
+4. **Event-Driven Observability**:
+   - SagaOutboxWriter publishes lifecycle events (STARTED, STEP_COMPLETED, COMPLETED, COMPENSATING, COMPENSATED, FAILED)
+   - Events routed to topic-specific Kafka topics (gift-saga, clawback-saga, sell-to-spend-saga) for monitoring
+   - SagaLifecycleEvent in commons/event enables cross-service observability
 
 ## Roadmap Ahead
 
-- **Phase 8**: Security Hardening (OAuth2/Keycloak, per-service JWT validation, rate limiting)
-- **Phase 10**: Advanced Features & Scale (Kubernetes, CI/CD, load testing)
+- **Phase 11**: CI/CD Pipeline (GitHub Actions/Azure DevOps for automated build/test/deploy)
+- **Phase 12**: Performance Tuning & Load Testing (Kubernetes, scaling, bottleneck analysis)
