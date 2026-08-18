@@ -98,10 +98,10 @@ WORKDIR /app
 # BUILD CONTEXT NOTE: The build context is equitycart/ (parent of docker/), so COPY paths are
 # relative to equitycart/, not to the Dockerfile's location. Hence: docker/ZscalerRootCA.pem
 # (not just ZscalerRootCA.pem).
-COPY docker/ZscalerRootCA.pem /tmp/ZscalerRootCA.pem
-RUN keytool -importcert -cacerts -storepass changeit -noprompt \
-  -alias zscaler-root-ca -file /tmp/ZscalerRootCA.pem \
-  && rm /tmp/ZscalerRootCA.pem
+#COPY docker/ZscalerRootCA.pem /tmp/ZscalerRootCA.pem
+#RUN keytool -importcert -cacerts -storepass changeit -noprompt \
+#  -alias zscaler-root-ca -file /tmp/ZscalerRootCA.pem \
+#  && rm /tmp/ZscalerRootCA.pem
 
 # ARG values reset after every FROM — must re-declare what Stage 2 needs.
 # MODULE_NAME is not needed here; only MODULE_DIR (to locate the JAR).
