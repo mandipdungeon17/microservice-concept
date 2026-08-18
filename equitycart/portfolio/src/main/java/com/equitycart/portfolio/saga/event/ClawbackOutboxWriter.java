@@ -1,9 +1,9 @@
 package com.equitycart.portfolio.saga.event;
 
 import com.equitycart.commons.event.SagaLifecycleEvent;
-import com.equitycart.order.entity.OutboxEvent;
-import com.equitycart.order.enums.OutboxStatus;
-import com.equitycart.order.repository.OutboxEventRepository;
+import com.equitycart.portfolio.async.entity.PortfolioOutboxEvent;
+import com.equitycart.portfolio.async.enums.PortfolioOutboxStatus;
+import com.equitycart.portfolio.async.repository.PortfolioOutboxEventRepository;
 import com.equitycart.portfolio.saga.entity.ClawbackSaga;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,7 +24,7 @@ public class ClawbackOutboxWriter {
 
   private static final Logger log = LogManager.getLogger(ClawbackOutboxWriter.class);
 
-  private final OutboxEventRepository outboxEventRepository;
+  private final PortfolioOutboxEventRepository outboxEventRepository;
   private final ObjectMapper objectMapper;
 
   /**
@@ -48,7 +48,8 @@ public class ClawbackOutboxWriter {
 
     String json = convertObjToJsonString(event);
 
-    OutboxEvent outboxEvent = getOutboxEvent(saga, json, event.getClass().getName(), eventType);
+    PortfolioOutboxEvent outboxEvent =
+        getOutboxEvent(saga, json, event.getClass().getName(), eventType);
 
     outboxEventRepository.save(outboxEvent);
 
@@ -76,16 +77,16 @@ public class ClawbackOutboxWriter {
   }
 
   /** Builds outbox row targeting the clawback lifecycle topic. */
-  private static OutboxEvent getOutboxEvent(
+  private static PortfolioOutboxEvent getOutboxEvent(
       ClawbackSaga saga, String json, String className, String eventType) {
-    return OutboxEvent.builder()
+    return PortfolioOutboxEvent.builder()
         .aggregateType("ClawbackSaga")
         .aggregateId(saga.getId())
         .eventType(eventType)
         .topic("clawback-saga")
         .payload(json)
         .payloadType(className)
-        .status(OutboxStatus.PENDING)
+        .status(PortfolioOutboxStatus.PENDING)
         .build();
   }
 }

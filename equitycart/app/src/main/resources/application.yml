@@ -14,8 +14,6 @@ spring:
   mail:
     host: localhost
     port: 1025
-  profiles:
-    active: cdc
   batch:
     jdbc:
       initialize-schema: always

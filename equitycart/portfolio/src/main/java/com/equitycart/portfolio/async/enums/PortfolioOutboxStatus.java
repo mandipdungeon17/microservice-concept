@@ -9,7 +9,7 @@ package com.equitycart.portfolio.async.enums;
  *   <li>{@code SENT} — successfully published to Kafka and acknowledged.
  * </ul>
  */
-public enum OutboxStatus {
+public enum PortfolioOutboxStatus {
   PENDING,
   SENT
 }

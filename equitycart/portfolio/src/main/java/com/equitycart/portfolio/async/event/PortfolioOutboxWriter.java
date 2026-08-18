@@ -1,9 +1,9 @@
 package com.equitycart.portfolio.async.event;
 
 import com.equitycart.portfolio.async.dto.PortfolioProjectionEvent;
-import com.equitycart.portfolio.async.entity.OutboxEvent;
-import com.equitycart.portfolio.async.enums.OutboxStatus;
-import com.equitycart.portfolio.async.repository.OutboxEventRepository;
+import com.equitycart.portfolio.async.entity.PortfolioOutboxEvent;
+import com.equitycart.portfolio.async.enums.PortfolioOutboxStatus;
+import com.equitycart.portfolio.async.repository.PortfolioOutboxEventRepository;
 import com.equitycart.portfolio.entity.Holding;
 import com.equitycart.portfolio.entity.StockBackReward;
 import com.equitycart.portfolio.eventsourcing.enums.PortfolioEventType;
@@ -51,7 +51,7 @@ public class PortfolioOutboxWriter {
 
   private static final String TOPIC = "portfolio-readmodel-events";
   private final ObjectMapper objectMapper;
-  private final OutboxEventRepository outboxEventRepository;
+  private final PortfolioOutboxEventRepository outboxEventRepository;
 
   /**
    * Writes a SHARES_PURCHASED event when a user buys stock.
@@ -293,15 +293,15 @@ public class PortfolioOutboxWriter {
   private void write(PortfolioProjectionEvent event) {
     try {
       String json = objectMapper.writeValueAsString(event);
-      OutboxEvent outboxEvent =
-          OutboxEvent.builder()
+      PortfolioOutboxEvent outboxEvent =
+          PortfolioOutboxEvent.builder()
               .aggregateType("Portfolio")
               .aggregateId(event.userId()) // key by userId
               .eventType(event.eventType())
               .topic(TOPIC)
               .payload(json)
               .payloadType(PortfolioProjectionEvent.class.getName())
-              .status(OutboxStatus.PENDING)
+              .status(PortfolioOutboxStatus.PENDING)
               .build();
       outboxEventRepository.save(outboxEvent);
       log.debug(

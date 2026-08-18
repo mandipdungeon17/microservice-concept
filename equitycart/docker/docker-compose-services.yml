@@ -82,6 +82,7 @@ services:
       - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - SPRING_DATA_REDIS_HOST=redis
       - LOG_ROOT=/logs
+      - SPRING_PROFILES_ACTIVE=cdc
     networks:
       - equitycart_network
     volumes:
@@ -107,6 +108,7 @@ services:
       - SPRING_DATA_MONGODB_URI=mongodb://mongodb:27017/equitycart_portfolio
       - SPRING_DATA_REDIS_HOST=redis  # Required because MarketDataServiceImpl (embedded via module dep) uses Redis cache
       - LOG_ROOT=/logs
+      - SPRING_PROFILES_ACTIVE=cdc
     networks:
       - equitycart_network
     volumes:

@@ -1,9 +1,9 @@
 package com.equitycart.portfolio.saga.event;
 
 import com.equitycart.commons.event.SagaLifecycleEvent;
-import com.equitycart.order.entity.OutboxEvent;
-import com.equitycart.order.enums.OutboxStatus;
-import com.equitycart.order.repository.OutboxEventRepository;
+import com.equitycart.portfolio.async.entity.PortfolioOutboxEvent;
+import com.equitycart.portfolio.async.enums.PortfolioOutboxStatus;
+import com.equitycart.portfolio.async.repository.PortfolioOutboxEventRepository;
 import com.equitycart.portfolio.saga.entity.GiftSaga;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,7 +24,7 @@ public class GiftSagaOutboxWriter {
 
   private static final Logger log = LogManager.getLogger(GiftSagaOutboxWriter.class);
 
-  private final OutboxEventRepository outboxEventRepository;
+  private final PortfolioOutboxEventRepository outboxEventRepository;
   private final ObjectMapper objectMapper;
 
   /**
@@ -48,7 +48,8 @@ public class GiftSagaOutboxWriter {
 
     String json = convertObjToJsonString(event);
 
-    OutboxEvent outboxEvent = getOutboxEvent(saga, json, event.getClass().getName(), eventType);
+    PortfolioOutboxEvent outboxEvent =
+        getOutboxEvent(saga, json, event.getClass().getName(), eventType);
 
     outboxEventRepository.save(outboxEvent);
 
@@ -76,16 +77,16 @@ public class GiftSagaOutboxWriter {
   }
 
   /** Builds outbox row targeting the gift-saga topic. */
-  private static OutboxEvent getOutboxEvent(
+  private static PortfolioOutboxEvent getOutboxEvent(
       GiftSaga saga, String json, String className, String eventType) {
-    return OutboxEvent.builder()
+    return PortfolioOutboxEvent.builder()
         .aggregateType("GiftSaga")
         .aggregateId(saga.getId())
         .eventType(eventType)
         .topic("gift-saga")
         .payload(json)
         .payloadType(className)
-        .status(OutboxStatus.PENDING)
+        .status(PortfolioOutboxStatus.PENDING)
         .build();
   }
 }

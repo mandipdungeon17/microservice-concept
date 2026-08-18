@@ -1,9 +1,9 @@
 package com.equitycart.portfolio.saga.event;
 
 import com.equitycart.commons.event.SagaLifecycleEvent;
-import com.equitycart.order.entity.OutboxEvent;
-import com.equitycart.order.enums.OutboxStatus;
-import com.equitycart.order.repository.OutboxEventRepository;
+import com.equitycart.portfolio.async.entity.PortfolioOutboxEvent;
+import com.equitycart.portfolio.async.enums.PortfolioOutboxStatus;
+import com.equitycart.portfolio.async.repository.PortfolioOutboxEventRepository;
 import com.equitycart.portfolio.saga.entity.SellToSpendSaga;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -30,7 +30,7 @@ public class SagaOutboxWriter {
 
   private static final Logger log = LogManager.getLogger(SagaOutboxWriter.class);
 
-  private final OutboxEventRepository outboxEventRepository;
+  private final PortfolioOutboxEventRepository outboxEventRepository;
   private final ObjectMapper objectMapper;
 
   public void writeSagaLifecycleEvent(SellToSpendSaga saga, String eventType, String stepName) {
@@ -47,7 +47,8 @@ public class SagaOutboxWriter {
 
     String json = convertObjToJsonString(event);
 
-    OutboxEvent outboxEvent = getOutboxEvent(saga, json, event.getClass().getName(), eventType);
+    PortfolioOutboxEvent outboxEvent =
+        getOutboxEvent(saga, json, event.getClass().getName(), eventType);
 
     outboxEventRepository.save(outboxEvent);
     log.info(
@@ -71,16 +72,16 @@ public class SagaOutboxWriter {
     return json;
   }
 
-  private static OutboxEvent getOutboxEvent(
+  private static PortfolioOutboxEvent getOutboxEvent(
       SellToSpendSaga saga, String json, String className, String eventType) {
-    return OutboxEvent.builder()
+    return PortfolioOutboxEvent.builder()
         .aggregateType("SellToSpendSaga")
         .aggregateId(saga.getId())
         .eventType(eventType)
         .topic("sell-to-spend-saga")
         .payload(json)
         .payloadType(className)
-        .status(OutboxStatus.PENDING)
+        .status(PortfolioOutboxStatus.PENDING)
         .build();
   }
 }

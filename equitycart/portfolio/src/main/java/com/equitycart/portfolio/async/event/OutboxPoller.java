@@ -1,8 +1,8 @@
 package com.equitycart.portfolio.async.event;
 
-import com.equitycart.portfolio.async.entity.OutboxEvent;
-import com.equitycart.portfolio.async.enums.OutboxStatus;
-import com.equitycart.portfolio.async.repository.OutboxEventRepository;
+import com.equitycart.portfolio.async.entity.PortfolioOutboxEvent;
+import com.equitycart.portfolio.async.enums.PortfolioOutboxStatus;
+import com.equitycart.portfolio.async.repository.PortfolioOutboxEventRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -32,20 +32,21 @@ import org.springframework.transaction.annotation.Transactional;
  * cycle. This provides at-least-once delivery; consumers must be idempotent.
  */
 @Profile("!cdc")
-@Component
+@Component(value = "portfolioOutboxPoller")
 @RequiredArgsConstructor
 public class OutboxPoller {
 
   private static final Logger log = LogManager.getLogger(OutboxPoller.class);
 
   private final KafkaTemplate<String, Object> kafkaTemplate;
-  private final OutboxEventRepository outboxEventRepository;
+  private final PortfolioOutboxEventRepository outboxEventRepository;
   private final ObjectMapper objectMapper;
 
   @Scheduled(fixedDelay = 5000)
   @Transactional
   public void pollAndPublish() {
-    List<OutboxEvent> outboxEvents = outboxEventRepository.findByStatus(OutboxStatus.PENDING);
+    List<PortfolioOutboxEvent> outboxEvents =
+        outboxEventRepository.findByStatus(PortfolioOutboxStatus.PENDING);
 
     if (outboxEvents.isEmpty()) return;
 
@@ -58,7 +59,7 @@ public class OutboxPoller {
                 .send(outboxEvent.getTopic(), outboxEvent.getAggregateId().toString(), event)
                 .get();
 
-            outboxEvent.setStatus(OutboxStatus.SENT);
+            outboxEvent.setStatus(PortfolioOutboxStatus.SENT);
             outboxEvent.setPublishedAt(LocalDateTime.now());
             outboxEventRepository.save(outboxEvent);
 

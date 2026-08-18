@@ -141,18 +141,13 @@ import org.springframework.scheduling.annotation.EnableScheduling;
     },
     excludeFilters =
         @ComponentScan.Filter(type = FilterType.ANNOTATION, classes = SpringBootApplication.class))
-@EnableJpaRepositories(
-    basePackages = {"com.equitycart.portfolio", "com.equitycart.ledger", "com.equitycart.order"})
+@EnableJpaRepositories(basePackages = {"com.equitycart.portfolio", "com.equitycart.ledger"})
 @EntityScan(
-    basePackages = {
-      "com.equitycart.portfolio",
-      "com.equitycart.ledger",
-      "com.equitycart.commons",
-      "com.equitycart.order"
-    })
+    basePackages = {"com.equitycart.portfolio", "com.equitycart.ledger", "com.equitycart.commons"})
 @EnableMongoRepositories(
     basePackages = {
       "com.equitycart.portfolio.eventsourcing",
+      "com.equitycart.portfolio.cqrs",
       "com.equitycart.marketdata" // PriceHistoryRepository
     })
 @EnableDiscoveryClient

@@ -1,7 +1,7 @@
 package com.equitycart.portfolio.async.entity;
 
 import com.equitycart.commons.entity.BaseEntity;
-import com.equitycart.portfolio.async.enums.OutboxStatus;
+import com.equitycart.portfolio.async.enums.PortfolioOutboxStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -34,13 +34,13 @@ import lombok.Setter;
  * references when reading the WAL, it would publish the OID number instead of the JSON content.
  */
 @Entity
-@Table(name = "outbox_events")
+@Table(name = "portfolio_outbox_events")
 @AllArgsConstructor
 @NoArgsConstructor
 @Getter
 @Setter
 @Builder
-public class OutboxEvent extends BaseEntity {
+public class PortfolioOutboxEvent extends BaseEntity {
 
   String aggregateType;
 
@@ -58,7 +58,7 @@ public class OutboxEvent extends BaseEntity {
   String payloadType; // Class name to serialize/deserialize payload into
 
   @Enumerated(EnumType.STRING)
-  OutboxStatus status; // PENDING → SENT
+  PortfolioOutboxStatus status; // PENDING → SENT
 
   LocalDateTime publishedAt; // timestamp of when the event was published to Kafka
 }

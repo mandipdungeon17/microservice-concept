@@ -29,7 +29,7 @@ public class FlashSaleLockManager {
 
   private static final String LOCK_KEY_PREFIX = "flash_sale:lock:";
 
-  @Value("${equitycart.flash-sale.lock-ttl-seconds:10l}")
+  @Value("${equitycart.flash-sale.lock-ttl-seconds:10}")
   private long lockTtlSeconds; // Lock time-to-live
 
   private static final RedisScript<Long> RELEASE_SCRIPT =
