@@ -1,0 +1,15 @@
+allprojects {
+    plugins.withId('java') {
+        apply plugin: 'jacoco'
+        tasks.withType(Test).configureEach {
+            finalizedBy tasks.named('jacocoTestReport')
+        }
+        tasks.named('jacocoTestReport') {
+            reports {
+                xml.required = true
+                html.required = true
+                csv.required = false
+            }
+        }
+    }
+}

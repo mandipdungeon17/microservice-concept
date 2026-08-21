@@ -1,0 +1,11 @@
+Module: ledger
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\ledger\entity\LedgerEntry.java
+2. src\main\java\com\equitycart\ledger\enums\AccountType.java
+3. src\main\java\com\equitycart\ledger\enums\EntryType.java
+4. src\main\java\com\equitycart\ledger\enums\ReferenceType.java
+5. src\main\java\com\equitycart\ledger\LedgerServiceApplication.java
+6. src\main\java\com\equitycart\ledger\repository\LedgerEntryRepository.java
+7. src\main\java\com\equitycart\ledger\service\api\LedgerService.java
+8. src\main\java\com\equitycart\ledger\service\impl\LedgerServiceImpl.java

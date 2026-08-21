@@ -1,0 +1,4 @@
+Module: config-server
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\config\ConfigServerApplication.java

@@ -1,0 +1,9 @@
+Module: api-gateway
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com.equitycart.gateway\config\RateLimiterConfig.java
+2. src\main\java\com.equitycart.gateway\config\SecurityConfig.java
+3. src\main\java\com.equitycart.gateway\filter\CorrelationIdGatewayFilter.java
+4. src\main\java\com.equitycart.gateway\filter\JwtValidationGatewayFilter.java
+5. src\main\java\com.equitycart.gateway\filter\SecurityHeadersGlobalFilter.java
+6. src\main\java\com.equitycart.gateway\GatewayApplication.java

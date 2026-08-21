@@ -1,0 +1,36 @@
+Module: user
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\user\config\DataSeeder.java
+2. src\main\java\com\equitycart\user\config\SecurityConfig.java
+3. src\main\java\com\equitycart\user\controller\AuthController.java
+4. src\main\java\com\equitycart\user\controller\UserController.java
+5. src\main\java\com\equitycart\user\dto\AuthResponse.java
+6. src\main\java\com\equitycart\user\dto\LoginRequest.java
+7. src\main\java\com\equitycart\user\dto\RefreshRequest.java
+8. src\main\java\com\equitycart\user\dto\RegisterRequest.java
+9. src\main\java\com\equitycart\user\dto\RoleSeedData.java
+10. src\main\java\com\equitycart\user\entity\KycDetail.java
+11. src\main\java\com\equitycart\user\entity\RefreshToken.java
+12. src\main\java\com\equitycart\user\entity\Role.java
+13. src\main\java\com\equitycart\user\entity\User.java
+14. src\main\java\com\equitycart\user\entity\UserProfile.java
+15. src\main\java\com\equitycart\user\entity\UserRole.java
+16. src\main\java\com\equitycart\user\entity\WalletAccount.java
+17. src\main\java\com\equitycart\user\enums\KycStatus.java
+18. src\main\java\com\equitycart\user\enums\UserRoles.java
+19. src\main\java\com\equitycart\user\filter\JwtAuthFilter.java
+20. src\main\java\com\equitycart\user\repository\KycDetailRepository.java
+21. src\main\java\com\equitycart\user\repository\RefreshTokenRepository.java
+22. src\main\java\com\equitycart\user\repository\RoleRepository.java
+23. src\main\java\com\equitycart\user\repository\UserProfileRepository.java
+24. src\main\java\com\equitycart\user\repository\UserRepository.java
+25. src\main\java\com\equitycart\user\repository\UserRoleRepository.java
+26. src\main\java\com\equitycart\user\repository\WalletAccountRepository.java
+27. src\main\java\com\equitycart\user\service\api\AuthService.java
+28. src\main\java\com\equitycart\user\service\api\JwtService.java
+29. src\main\java\com\equitycart\user\service\api\UserService.java
+30. src\main\java\com\equitycart\user\service\impl\AuthServiceImpl.java
+31. src\main\java\com\equitycart\user\service\impl\JwtServiceImpl.java
+32. src\main\java\com\equitycart\user\service\impl\UserServiceImpl.java
+33. src\main\java\com\equitycart\user\UserServiceApplication.java

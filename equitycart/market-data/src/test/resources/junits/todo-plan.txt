@@ -1,0 +1,14 @@
+Module: market-data
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\marketdata\client\AlphaVantageClient.java
+2. src\main\java\com\equitycart\marketdata\config\WebClientConfig.java
+3. src\main\java\com\equitycart\marketdata\controller\MarketDataController.java
+4. src\main\java\com\equitycart\marketdata\dto\HealthScoreResponse.java
+5. src\main\java\com\equitycart\marketdata\dto\StockPriceResponse.java
+6. src\main\java\com\equitycart\marketdata\dto\StockQuote.java
+7. src\main\java\com\equitycart\marketdata\entity\PriceHistory.java
+8. src\main\java\com\equitycart\marketdata\MarketDataServiceApplication.java
+9. src\main\java\com\equitycart\marketdata\repository\PriceHistoryRepository.java
+10. src\main\java\com\equitycart\marketdata\service\api\MarketDataService.java
+11. src\main\java\com\equitycart\marketdata\service\impl\MarketDataServiceImpl.java

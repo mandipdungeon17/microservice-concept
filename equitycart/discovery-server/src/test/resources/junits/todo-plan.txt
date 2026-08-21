@@ -1,0 +1,4 @@
+Module: discovery-server
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\discovery\DiscoveryServerApplication.java

@@ -1,0 +1,19 @@
+Module: notification
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\notification\consumer\NotificationConsumer.java
+2. src\main\java\com\equitycart\notification\controller\NotificationController.java
+3. src\main\java\com\equitycart\notification\dto\NotificationResponse.java
+4. src\main\java\com\equitycart\notification\entity\NotificationLog.java
+5. src\main\java\com\equitycart\notification\enums\NotificationChannel.java
+6. src\main\java\com\equitycart\notification\enums\NotificationStatus.java
+7. src\main\java\com\equitycart\notification\enums\NotificationType.java
+8. src\main\java\com\equitycart\notification\metrics\NotificationMetrics.java
+9. src\main\java\com\equitycart\notification\NotificationServiceApplication.java
+10. src\main\java\com\equitycart\notification\repository\NotificationLogRepository.java
+11. src\main\java\com\equitycart\notification\service\api\NotificationDispatcher.java
+12. src\main\java\com\equitycart\notification\service\channel\api\NotificationChannelStrategy.java
+13. src\main\java\com\equitycart\notification\service\channel\impl\EmailChannelStrategy.java
+14. src\main\java\com\equitycart\notification\service\channel\impl\LogChannelStrategy.java
+15. src\main\java\com\equitycart\notification\service\channel\impl\WebhookChannelStrategy.java
+16. src\main\java\com\equitycart\notification\service\impl\NotificationDispatcherImpl.java

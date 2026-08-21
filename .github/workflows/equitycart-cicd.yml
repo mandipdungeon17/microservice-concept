@@ -120,7 +120,7 @@ jobs:
   publish-images:
     name: Build and publish container images
     # `needs` makes this job WAIT for `build-and-test` to succeed first. If the
-    # build/test job fails, this job is skipped — we never publish broken code.
+    # build/test job fails, this job is skipped - we never publish broken code.
     needs: build-and-test
     # `if` is a conditional guard. This job runs for pushes and manual dispatch,
     # but NOT for pull_request events (we don't publish images for open PRs).
@@ -133,7 +133,7 @@ jobs:
       packages: write
     steps:
       # Step 1: check out the source again. Remember: each job gets a clean VM,
-      # so nothing from build-and-test carries over — we must re-clone here.
+      # so nothing from build-and-test carries over - we must re-clone here.
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -149,7 +149,8 @@ jobs:
 
       # Step 3: build and push one image per service via a Bash loop.
       - name: Build and push service images
-        shell: bash                                  # Force Bash so `${VAR,,}` (lowercasing) and arrays work.
+        # Force Bash so `${VAR,,}` (lowercasing) and arrays work.
+        shell: bash
         env:
           # Tag every image with the commit SHA for a unique, traceable version.
           IMAGE_TAG: ${{ github.sha }}
@@ -197,7 +198,8 @@ jobs:
               market-data-service) module_dir="market-data" ;;
               ledger-service) module_dir="ledger" ;;
               notification-service) module_dir="notification" ;;
-              *) module_dir="$svc" ;;                 # Fallback: use the service name as-is.
+              # Fallback: use the service name as-is.
+              *) module_dir="$svc" ;;
             esac
 
             # Full image name, e.g. ghcr.io/<owner>/equitycart-user-service.
@@ -205,7 +207,7 @@ jobs:
             # Build the Docker image:
             #   --build-arg  pass values INTO the Dockerfile (which module to package).
             #   -f           path to the shared Dockerfile used by all services.
-            #   (positional) the build "context" — the folder Docker can read files from.
+            #   (positional) the build "context" - the folder Docker can read files from.
             #   -t           tag the image (applied twice: SHA + latest).
             docker build \
               --build-arg MODULE_NAME="$svc" \

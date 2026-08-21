@@ -1,0 +1,31 @@
+Module: order
+Goal: Cover all source classes one-by-one using module JUnit coverage smoke tests.
+
+1. src\main\java\com\equitycart\order\cart\controller\CartController.java
+2. src\main\java\com\equitycart\order\cart\dto\AddToCartRequest.java
+3. src\main\java\com\equitycart\order\cart\dto\CartItemResponse.java
+4. src\main\java\com\equitycart\order\cart\dto\CartResponse.java
+5. src\main\java\com\equitycart\order\cart\repository\CartRedisRepository.java
+6. src\main\java\com\equitycart\order\cart\service\api\CartService.java
+7. src\main\java\com\equitycart\order\cart\service\impl\CartServiceImpl.java
+8. src\main\java\com\equitycart\order\controller\OrderController.java
+9. src\main\java\com\equitycart\order\dto\FlashSalePurchaseRequest.java
+10. src\main\java\com\equitycart\order\dto\OrderItemResponse.java
+11. src\main\java\com\equitycart\order\dto\OrderResponse.java
+12. src\main\java\com\equitycart\order\dto\PlaceOrderRequest.java
+13. src\main\java\com\equitycart\order\dto\UpdateOrderStatusRequest.java
+14. src\main\java\com\equitycart\order\entity\Order.java
+15. src\main\java\com\equitycart\order\entity\OrderItem.java
+16. src\main\java\com\equitycart\order\entity\OutboxEvent.java
+17. src\main\java\com\equitycart\order\enums\OrderStatus.java
+18. src\main\java\com\equitycart\order\enums\OutboxStatus.java
+19. src\main\java\com\equitycart\order\event\OrderOutboxWriter.java
+20. src\main\java\com\equitycart\order\event\OutboxPoller.java
+21. src\main\java\com\equitycart\order\lock\FlashSaleLockManager.java
+22. src\main\java\com\equitycart\order\metrics\OrderMetrics.java
+23. src\main\java\com\equitycart\order\OrderServiceApplication.java
+24. src\main\java\com\equitycart\order\repository\OrderItemRepository.java
+25. src\main\java\com\equitycart\order\repository\OrderRepository.java
+26. src\main\java\com\equitycart\order\repository\OutboxEventRepository.java
+27. src\main\java\com\equitycart\order\service\api\OrderService.java
+28. src\main\java\com\equitycart\order\service\impl\OrderServiceImpl.java
